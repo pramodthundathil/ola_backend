@@ -78,8 +78,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         message="Phone number must be entered in the format: '+999999999'. Up to 15 digits allowed."
     )
     
-    # Primary Fields
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
     email = models.EmailField(
         verbose_name='email address',
         max_length=255,

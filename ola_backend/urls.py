@@ -48,9 +48,9 @@ schema_view = get_schema_view(
         - **Sales Advisor**: Support collections, monitoring
         - **Admin**: Full system access
         """,
-        terms_of_service="https://www.example.com/terms/",
-        contact=openapi.Contact(email="support@phonefinancing.com"),
-        license=openapi.License(name="Proprietary License"),
+        terms_of_service="https://www.byteboot.in/",
+        contact=openapi.Contact(email="support@byteboot.in"),
+        license=openapi.License(name="Ola Credit"),
     ),
     public=True,
     permission_classes=(permissions.AllowAny,),

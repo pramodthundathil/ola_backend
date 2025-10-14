@@ -803,46 +803,28 @@ class DeleteOwnAccount(APIView):
 
 # ==================== HELPER FUNCTIONS ====================
 def generate_and_send_otp(identifier, is_registration=False):
-    """
-    Helper function to generate and send OTP via email or SMS.
-    """
-    # Generate 6-digit OTP
     otp = random.randint(100000, 999999)
-    
-    # Store OTP in cache for 10 minutes
     cache.set(f'otp_{identifier}', otp, timeout=600)
     
-    # Send via email
     if '@' in identifier:
         try:
             subject = 'OTP for Registration' if is_registration else 'OTP for Login'
-            message = f'Your OTP code is: {otp}. Valid for 10 minutes.'
+            template = 'emails/otp_registration.html' if is_registration else 'emails/otp_login.html'
             
-            email_message = EmailMessage(
-                subject,
-                message,
-                to=[identifier]
-            )
+            message = render_to_string(template, {
+                'otp': otp,
+                'domain': 'byteboot.com',  # Update with your domain
+                'validity': '10 minutes'
+            })
+            
+            email_message = EmailMessage(subject, message, to=[identifier])
+            email_message.content_subtype = "html"
             email_message.send(fail_silently=False)
             
             return True, "OTP sent to your email successfully."
         except Exception as e:
             logger.error(f"Email OTP send failed: {str(e)}")
             return False, f"Failed to send OTP via email: {str(e)}"
-    
-    # Send via SMS
-    else:
-        try:
-            # TODO: Integrate LabsMobile SMS API
-            logger.info(f"SMS OTP {otp} would be sent to {identifier}")
-            return True, "OTP sent to your phone successfully."
-        except Exception as e:
-            logger.error(f"SMS OTP send failed: {str(e)}")
-            return False, f"Failed to send OTP via SMS: {str(e)}"
-
-
-
-
 
 
 

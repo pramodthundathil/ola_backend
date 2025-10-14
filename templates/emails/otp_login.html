@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login OTP</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7fa;
+        }
+        .email-container {
+            max-width: 600px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 30px;
+            text-align: center;
+            color: #ffffff;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        .content {
+            padding: 40px 30px;
+        }
+        .greeting {
+            font-size: 18px;
+            color: #333333;
+            margin-bottom: 20px;
+        }
+        .message {
+            font-size: 15px;
+            color: #555555;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        .otp-container {
+            background-color: #f8f9fd;
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            padding: 25px;
+            text-align: center;
+            margin: 30px 0;
+        }
+        .otp-label {
+            font-size: 14px;
+            color: #666666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        .otp-code {
+            font-size: 36px;
+            font-weight: bold;
+            color: #667eea;
+            letter-spacing: 8px;
+            font-family: 'Courier New', monospace;
+        }
+        .validity {
+            font-size: 13px;
+            color: #888888;
+            margin-top: 15px;
+        }
+        .warning {
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 25px 0;
+            border-radius: 4px;
+        }
+        .warning-text {
+            font-size: 14px;
+            color: #856404;
+            margin: 0;
+        }
+        .footer {
+            background-color: #f8f9fa;
+            padding: 25px 30px;
+            text-align: center;
+            border-top: 1px solid #e9ecef;
+        }
+        .footer-text {
+            font-size: 13px;
+            color: #6c757d;
+            margin: 5px 0;
+        }
+        .footer-link {
+            color: #667eea;
+            text-decoration: none;
+        }
+        .divider {
+            height: 1px;
+            background-color: #e9ecef;
+            margin: 25px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="header">
+            <h1>🔐 Login Verification</h1>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">
+                Hello {{ user.first_name|default:"User" }},
+            </div>
+            
+            <div class="message">
+                We received a request to log in to your Phone Financing Platform account. Use the OTP code below to complete your login.
+            </div>
+            
+            <div class="otp-container">
+                <div class="otp-label">Your One-Time Password</div>
+                <div class="otp-code">{{ otp }}</div>
+                <div class="validity">⏱ Valid for {{ validity }}</div>
+            </div>
+            
+            <div class="warning">
+                <p class="warning-text">
+                    <strong>⚠️ Security Notice:</strong> Never share this OTP with anyone. Our team will never ask for your OTP. If you didn't request this code, please ignore this email or contact support immediately.
+                </p>
+            </div>
+            
+            <div class="divider"></div>
+            
+            <div class="message">
+                If you have any questions or need assistance, feel free to reach out to our support team.
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p class="footer-text">
+                <strong>Phone Financing Platform</strong>
+            </p>
+            <p class="footer-text">
+                {{ domain }}
+            </p>
+            <p class="footer-text" style="margin-top: 15px;">
+                This is an automated message, please do not reply to this email.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

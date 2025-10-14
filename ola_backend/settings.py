@@ -152,7 +152,7 @@ SIMPLE_JWT = {
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [os.path.join(BASE_DIR,'templates')],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -206,7 +206,9 @@ USE_TZ = True
 TIME_ZONE = 'America/Panama'
 USE_I18N = True
 
+# settings.py
 
+AUTH_USER_MODEL = 'home.CustomUser'  
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
@@ -221,5 +223,12 @@ MEDIA_ROOT = os.path.join(BASE_DIR,"media")
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
+
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_USE_TLS = True
+EMAIL_PORT = 587
+EMAIL_HOST_USER = "cepcentre007@gmail.com"
+EMAIL_HOST_PASSWORD = 'sjcapvmtthbkdhuh'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

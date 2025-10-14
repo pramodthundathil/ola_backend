@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registration OTP</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7fa;
+        }
+        .email-container {
+            max-width: 600px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            padding: 40px 30px;
+            text-align: center;
+            color: #ffffff;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        .header-subtitle {
+            margin-top: 10px;
+            font-size: 15px;
+            opacity: 0.95;
+        }
+        .content {
+            padding: 40px 30px;
+        }
+        .greeting {
+            font-size: 18px;
+            color: #333333;
+            margin-bottom: 20px;
+        }
+        .message {
+            font-size: 15px;
+            color: #555555;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        .otp-container {
+            background: linear-gradient(135deg, #f5f7fa 0%, #e8f5e9 100%);
+            border: 2px solid #11998e;
+            border-radius: 10px;
+            padding: 30px;
+            text-align: center;
+            margin: 30px 0;
+        }
+        .otp-label {
+            font-size: 14px;
+            color: #666666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        .otp-code {
+            font-size: 38px;
+            font-weight: bold;
+            color: #11998e;
+            letter-spacing: 10px;
+            font-family: 'Courier New', monospace;
+            margin: 10px 0;
+        }
+        .validity {
+            font-size: 13px;
+            color: #888888;
+            margin-top: 15px;
+        }
+        .welcome-box {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 20px;
+            margin: 25px 0;
+            border-radius: 4px;
+        }
+        .welcome-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1565c0;
+            margin: 0 0 10px 0;
+        }
+        .welcome-text {
+            font-size: 14px;
+            color: #0d47a1;
+            margin: 0;
+            line-height: 1.5;
+        }
+        .security-note {
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 25px 0;
+            border-radius: 4px;
+        }
+        .security-text {
+            font-size: 14px;
+            color: #856404;
+            margin: 0;
+        }
+        .steps {
+            margin: 25px 0;
+        }
+        .step {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        .step-number {
+            background-color: #11998e;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 14px;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+        .step-text {
+            font-size: 14px;
+            color: #555555;
+            line-height: 1.5;
+            padding-top: 4px;
+        }
+        .footer {
+            background-color: #f8f9fa;
+            padding: 25px 30px;
+            text-align: center;
+            border-top: 1px solid #e9ecef;
+        }
+        .footer-text {
+            font-size: 13px;
+            color: #6c757d;
+            margin: 5px 0;
+        }
+        .footer-link {
+            color: #11998e;
+            text-decoration: none;
+        }
+        .divider {
+            height: 1px;
+            background-color: #e9ecef;
+            margin: 25px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="header">
+            <h1>🎉 Welcome Aboard!</h1>
+            <div class="header-subtitle">Complete Your Registration</div>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">
+                Hello there,
+            </div>
+            
+            <div class="message">
+                Thank you for choosing Phone Financing Platform! We're excited to have you join our community. To complete your registration, please verify your account using the OTP code below.
+            </div>
+            
+            <div class="otp-container">
+                <div class="otp-label">Your Verification Code</div>
+                <div class="otp-code">{{ otp }}</div>
+                <div class="validity">⏱ Valid for {{ validity|default:"10 minutes" }}</div>
+            </div>
+            
+            <div class="welcome-box">
+                <div class="welcome-title">📱 What's Next?</div>
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-number">1</div>
+                        <div class="step-text">Enter the OTP code on the registration page</div>
+                    </div>
+                    <div class="step">
+                        <div class="step-number">2</div>
+                        <div class="step-text">Complete your profile setup</div>
+                    </div>
+                    <div class="step">
+                        <div class="step-number">3</div>
+                        <div class="step-text">Start exploring our phone financing options</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="security-note">
+                <p class="security-text">
+                    <strong>⚠️ Security Reminder:</strong> Keep this code confidential. Never share your OTP with anyone, including our staff. If you didn't initiate this registration, please disregard this email.
+                </p>
+            </div>
+            
+            <div class="divider"></div>
+            
+            <div class="message">
+                Need help? Our support team is here to assist you every step of the way.
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p class="footer-text">
+                <strong>Phone Financing Platform</strong>
+            </p>
+            <p class="footer-text">
+                {{ domain|default:"yourplatform.com" }}
+            </p>
+            <p class="footer-text" style="margin-top: 15px;">
+                This is an automated message, please do not reply to this email.
+            </p>
+            <p class="footer-text" style="margin-top: 10px;">
+                Questions? Contact us at <a href="mailto:support@yourplatform.com" class="footer-link">support@yourplatform.com</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>
