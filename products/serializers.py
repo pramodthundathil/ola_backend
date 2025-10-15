@@ -7,7 +7,7 @@ class ProductCategorySerializer(serializers.ModelSerializer):
     Serializer for product category model
     Handles validation and serialization of category data.
     """
-    image = serializers.ImageField(required=False, allow_null=True, use_url=True)
+    image = serializers.ImageField(use_url=True, required=False)
     class Meta:
         model=ProductCategory        
         fields=[
