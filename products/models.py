@@ -264,9 +264,9 @@ class Brand(models.Model):
         """Get models within a specific price range"""
         queryset = self.products.filter(is_active=True)
         if min_price:
-            queryset = queryset.filter(retail_price__gte=min_price)
+            queryset = queryset.filter(suggested_price__gte=min_price)
         if max_price:
-            queryset = queryset.filter(retail_price__lte=max_price)
+            queryset = queryset.filter(suggested_price__lte=max_price)
         return queryset
 
 
@@ -451,33 +451,28 @@ class ProductModel(models.Model):
     
     # ============ PRICING ============
     
-    retail_price = models.DecimalField(
+    suggested_price = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         validators=[MinValueValidator(Decimal('0.01'))],
-        help_text="Retail price (used for financing calculations)"
+        help_text="suggested Retail price (used for financing calculations)"
     )
     
-    tax_rate = models.DecimalField(
-        max_digits=5,
-        decimal_places=2,
-        default=Decimal('7.00'),
-        help_text="Tax rate percentage (default 7%)"
-    )
     
-    retail_price_with_tax = models.DecimalField(
+    
+    minimum_price_to_sell = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         editable=False,
-        help_text="Retail price including tax (auto-calculated)"
+        help_text="minimum price"
     )
     
-    original_price = models.DecimalField(
+    maximum_price = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         null=True,
         blank=True,
-        help_text="Original MSRP (for showing discounts)"
+        help_text="maximum price"
     )
     
     currency = models.CharField(
@@ -587,7 +582,7 @@ class ProductModel(models.Model):
             models.Index(fields=['ola_code']),
             models.Index(fields=['brand', 'model_name']),
             models.Index(fields=['is_active', 'is_featured']),
-            models.Index(fields=['retail_price']),
+            models.Index(fields=['suggested_price']),
             models.Index(fields=['display_order']),
             models.Index(fields=['-created_at']),
             models.Index(fields=['slug']),
@@ -615,9 +610,7 @@ class ProductModel(models.Model):
             base_slug = slugify(f"{self.brand.name}-{self.model_name}")
             self.slug = self.generate_unique_slug(base_slug)
         
-        # Calculate price with tax
-        tax_multiplier = 1 + (self.tax_rate / 100)
-        self.retail_price_with_tax = self.retail_price * tax_multiplier
+        
         
         super().save(*args, **kwargs)
     
@@ -660,28 +653,7 @@ class ProductModel(models.Model):
         """Get product category through brand"""
         return self.brand.category
     
-    def get_price_with_tax(self):
-        """Get retail price including tax"""
-        return self.retail_price_with_tax
-    
-    def has_discount(self):
-        """Check if product has a discount from original price"""
-        if self.original_price and self.original_price > self.retail_price:
-            return True
-        return False
-    
-    def get_discount_percentage(self):
-        """Calculate discount percentage if applicable"""
-        if self.has_discount():
-            discount = self.original_price - self.retail_price
-            return round((discount / self.original_price) * 100, 2)
-        return 0
-    
-    def get_discount_amount(self):
-        """Get absolute discount amount"""
-        if self.has_discount():
-            return self.original_price - self.retail_price
-        return Decimal('0.00')
+   
     
     def get_tag_list(self):
         """Get tags as a list"""
