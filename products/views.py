@@ -21,20 +21,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @swagger_auto_schema(
     method='post',
     operation_summary="Create a new Product Category(Admin or Global Manager Only)",
