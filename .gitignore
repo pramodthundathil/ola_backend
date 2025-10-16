@@ -1,6 +1,26 @@
+
+# Ignore SQLite database
+db.sqlite3
+
+# Ignore media files (uploaded images, documents, etc.)
+media/
+
+# Ignore Python cache files
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environment
+venv/
 env/
-*.sqlite3
+
+# Ignore log files
 *.log
-.DS_Store
+
+# Ignore Django secret key file (if any)
+.env
+
+# Ignore migrations cache (optional)
+**/migrations/__pycache__/
+
