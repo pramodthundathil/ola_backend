@@ -35,11 +35,11 @@ class IsAdminOrGlobalManagerOrReadOnly(permissions.BasePermission):
             return True
 
         user = request.user
-        if not user or not user.is_authenticated: #the user is not logged in, deny access.
+        if not user or not user.is_authenticated: #The user is not logged in, deny access.
             return False
 
         return (
             user.is_staff
             or getattr(user, 'is_global_manager', False)
-            or getattr(user, 'role', '').lower() in ['admin', 'global_manager'] #allows only 'admin' or 'global_manager'
+            or getattr(user, 'role', '').lower() in ['admin', 'global_manager'] #Allows only 'admin' or 'global_manager'
         )

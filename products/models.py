@@ -456,14 +456,11 @@ class ProductModel(models.Model):
         decimal_places=2,
         validators=[MinValueValidator(Decimal('0.01'))],
         help_text="suggested Retail price (used for financing calculations)"
-    )
-    
-    
+    )     
     
     minimum_price_to_sell = models.DecimalField(
         max_digits=10,
-        decimal_places=2,
-        editable=False,
+        decimal_places=2,        
         help_text="minimum price"
     )
     

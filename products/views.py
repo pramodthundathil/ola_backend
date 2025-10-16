@@ -21,8 +21,8 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 # Local Application Imports
 # ============================================================
-from .models import ProductCategory, Brand
-from .serializers import ProductCategorySerializer, ProductBrandSerializer
+from .models import ProductCategory, Brand, ProductModel
+from .serializers import ProductCategorySerializer, ProductBrandSerializer, ProductModelSerializer
 from .permissions import IsAdminOrGlobalManager, IsAdminOrGlobalManagerOrReadOnly
 
 # ============================================================
@@ -218,7 +218,7 @@ class ProductBrandCreateView(APIView):
     @swagger_auto_schema(
         operation_summary="List all Product Brands",
         responses={200: ProductBrandSerializer(many=True)},
-        tags=["Product Catalog - Brands"]
+        tags=["Product Brands"]
     )
     def get(self, request):
         """GET: List all product brands (ordered by category, display_order, name)."""
@@ -236,7 +236,7 @@ class ProductBrandCreateView(APIView):
             400: "Invalid Brand or Brand Already Exists in Category",
             500: "Unexpected Server Error",
         },
-        tags=["Product Catalog - Brands"]
+        tags=["Product Brands"]
     )
     def post(self, request):
         """POST: Create a new product brand."""
@@ -285,7 +285,7 @@ class ProductBrandDetailView(APIView):
     @swagger_auto_schema(
         operation_summary="Retrieve Product Brand by ID",
         responses={200: ProductBrandSerializer, 404: "Brand not found", 500: "Server Error"},
-        tags=["Product Catalog - Brands"]
+        tags=["Product Brands"]
     )
     def get(self, request, pk):
         """GET: Retrieve brand by ID."""
@@ -306,7 +306,7 @@ class ProductBrandDetailView(APIView):
         request_body=ProductBrandSerializer,
         consumes=['multipart/form-data'],
         responses={200: ProductBrandSerializer, 400: "Invalid data", 404: "Not Found", 500: "Server Error"},
-        tags=["Product Catalog - Brands"]
+        tags=["Product Brands"]        
     )
     def put(self, request, pk):
         """PUT: Fully update brand by ID."""
@@ -331,7 +331,8 @@ class ProductBrandDetailView(APIView):
         request_body=ProductBrandSerializer,
         consumes=['multipart/form-data'],
         responses={200: ProductBrandSerializer, 400: "Invalid data", 404: "Not Found", 500: "Server Error"},
-        tags=["Product Catalog - Brands"]
+        tags=["Product Brands"]
+        
     )
     def patch(self, request, pk):
         """PATCH: Partially update brand by ID."""
@@ -354,7 +355,8 @@ class ProductBrandDetailView(APIView):
     @swagger_auto_schema(
         operation_summary="Delete Product Brand by ID",
         responses={204: "Deleted successfully", 404: "Not Found", 500: "Server Error"},
-        tags=["Product Catalog - Brands"]
+        tags=["Product Brands"]
+        
     )
     def delete(self, request, pk):
         """DELETE: Remove brand by ID."""
@@ -368,3 +370,164 @@ class ProductBrandDetailView(APIView):
         except Exception as e:
             logger.exception(f"Error deleting brand ID {pk}.")
             return Response({"detail": "Unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================================
+# Product Model Create and List View
+# ============================================================
+class ProductModelListCreateView(APIView):
+    """
+    List all Product Models or create a new one.
+    """
+    permission_classes = [IsAdminOrGlobalManagerOrReadOnly]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @swagger_auto_schema(
+        operation_summary="List all Product Models",
+        responses={200: ProductModelSerializer(many=True)},
+        tags=["Product Models"]
+    )
+    def get(self, request):
+        products = ProductModel.objects.all().order_by('-created_at')
+        serializer = ProductModelSerializer(products, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @swagger_auto_schema(
+        operation_summary="Create a new Product Model (Admin or Global Manager only)",
+        request_body=ProductModelSerializer,
+        responses={201: ProductModelSerializer, 400: "Validation Error"},
+        tags=["Product Models"]
+    )
+    def post(self, request):
+        serializer = ProductModelSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ============================================================
+# Product Model Detail View (Retrieve, Update, Delete)
+# ============================================================
+class ProductModelDetailView(APIView):
+    """
+    API View to Retrieve, Update (full & partial), or Delete a Product Model by ID.
+    Includes proper error handling with try-except and logging.
+    """    
+    # Permissions and parsers    
+    permission_classes = [IsAdminOrGlobalManagerOrReadOnly]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_object(self, pk):
+        """
+        Helper method to fetch a ProductModel by primary key.
+        Returns None if the object does not exist, and logs a warning.
+        """
+        try:
+            return ProductModel.objects.get(pk=pk)
+        except ProductModel.DoesNotExist:
+            logger.warning(f"ProductModel with ID {pk} not found")
+            return None
+
+    # ---------- Retrieve ----------
+    @swagger_auto_schema(
+        operation_summary="Retrieve Product Model by ID",
+        responses={200: ProductModelSerializer, 404: "Not Found"},
+        tags=["Product Models"]       
+    )
+    def get(self, request, pk):
+        try:
+            product = self.get_object(pk)
+            if not product:
+                return Response({"detail": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            serializer = ProductModelSerializer(product, context={'request': request})
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error retrieving ProductModel ID {pk}: {str(e)}")
+            return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ---------- Full Update (PUT) ----------
+    @swagger_auto_schema(
+        operation_summary="Full update Product Model (Admin or Global Manager only)",
+        request_body=ProductModelSerializer,
+        responses={200: ProductModelSerializer, 400: "Validation Error", 404: "Not Found"},
+        tags=["Product Models"]
+    )
+    def put(self, request, pk):
+        try:
+            product = self.get_object(pk)
+            if not product:
+                return Response({"detail": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            serializer = ProductModelSerializer(
+                product,
+                data=request.data,
+                partial=False,  # All fields are required
+                context={'request': request}
+            )
+
+            if serializer.is_valid():
+                serializer.save()
+                logger.info(f"ProductModel ID {pk} fully updated successfully")
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            else:
+                logger.warning(f"Validation error updating ProductModel ID {pk}: {serializer.errors}")
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            logger.error(f"Error fully updating ProductModel ID {pk}: {str(e)}")
+            return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ---------- Partial Update (PATCH) ----------
+    @swagger_auto_schema(
+        operation_summary="Partial update Product Model (Admin or Global Manager only)",
+        request_body=ProductModelSerializer,
+        responses={200: ProductModelSerializer, 400: "Validation Error", 404: "Not Found"},
+        tags=["Product Models"]
+    )
+    def patch(self, request, pk):
+        try:
+            product = self.get_object(pk)
+            if not product:
+                return Response({"detail": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            serializer = ProductModelSerializer(
+                product,
+                data=request.data,
+                partial=True,  # Only fields provided will be updated
+                context={'request': request}
+            )
+
+            if serializer.is_valid():
+                serializer.save()
+                logger.info(f"ProductModel ID {pk} partially updated successfully")
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            else:
+                logger.warning(f"Validation error partially updating ProductModel ID {pk}: {serializer.errors}")
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            logger.error(f"Error partially updating ProductModel ID {pk}: {str(e)}")
+            return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ---------- Delete ----------
+    @swagger_auto_schema(
+        operation_summary="Delete Product Model (Admin or Global Manager only)",
+        responses={204: "Deleted", 403: "Forbidden", 404: "Not Found"},
+        tags=["Product Models"]
+    )
+    def delete(self, request, pk):
+        try:
+            product = self.get_object(pk)
+            if not product:
+                return Response({"detail": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            product.delete()
+            logger.info(f"ProductModel ID {pk} deleted successfully")
+            return Response({"message":"Deleted Successfully"},status=status.HTTP_204_NO_CONTENT)
+
+        except Exception as e:
+            logger.error(f"Error deleting ProductModel ID {pk}: {str(e)}")
+            return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
