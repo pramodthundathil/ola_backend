@@ -45,6 +45,9 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['email'] = user.email
         token['id'] = user.id  # This should match 'id'
         token['first_name'] = user.first_name
+        token['role'] = user.role
+        token['is_admin'] = user.is_superuser,
+
         return token
 
     
