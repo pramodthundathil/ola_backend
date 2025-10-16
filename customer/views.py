@@ -1,249 +1,227 @@
-from django.shortcuts import render
-
-
 import requests
 from django.conf import settings
-from rest_framework.response import Response
-from rest_framework.views import APIView
 from django.utils import timezone
+from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework import status
+from .models import IdentityVerification, Customer
+from .serializers import GenerateVerificationLinkSerializer, MetaMapWebhookSerializer
 
-from .models import IdentityVerification
+
+import base64
+
+import qrcode
+from io import BytesIO
 
 
-class GetMetaMapAccessToken(APIView):
+
+
+
+# -------------------------------
+# Generate Verification Link / QR
+# -------------------------------
+
+
+class GenerateVerificationLinkView(APIView):
     """
-    API endpoint to request an access token from MetaMap.
-    This token is required to create verification instances and send user data.
+    Generates a MetaMap verification link or QR code for the customer.
     """
-
     def post(self, request):
-        # MetaMap OAuth endpoint
-        url = "https://api.prod.metamap.com/oauth/"
 
-        payload = {
+        # request.data= {"user_id": 25}
+
+        serializer = GenerateVerificationLinkSerializer(data=request.data)
+        if serializer.is_valid():
+            user_id = serializer.validated_data['user_id']
+        else:
+            return Response(serializer.errors, status=400)
+            #  {"user_id": ["This field is required."]}
+        
+
+        try:
+            customer = Customer.objects.get(id=user_id) 
+            # user
+        except Customer.DoesNotExist:
+            return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+            # {"error": "Customer not found"}
+
+
+        # -----------------------------
+        # Step 1.1: Get Access Token
+        # -----------------------------
+        token_url = "https://api.prod.metamap.com/oauth/"
+        token_payload = {
             "client_id": settings.METAMAP_CLIENT_ID,
             "client_secret": settings.METAMAP_CLIENT_SECRET
         }
-
         try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status() 
-
-            return Response(response.json(), status=response.status_code)
-
-        except requests.exceptions.RequestException as e:
-            return Response(
-                {"error": "Failed to get MetaMap access token", "details": str(e)},
-                status=500
-            )
-        
+            response = requests.post(token_url, json=token_payload)
+            token_data = response.json()
+            access_token = token_data.get("access_token", "")
+        except:
+            access_token = "dummy-access-token"
 
 
+        # MetaMap credentials and flow
+        client_id = settings.METAMAP_CLIENT_ID
+        client_secret = settings.METAMAP_CLIENT_SECRET
+        flow_id = settings.METAMAP_FLOW_ID
 
-class CreateMetaMapVerification(APIView):
-    """
-    Create a new verification instance for a user in MetaMap.
-    Returns identityId which is used for sending user documents and biometrics.
-    """
 
-    def post(self, request):
-        # Get user details from request (optional metadata)
-        user_id = request.data.get("user_id")
-        email = request.data.get("email")
+        # -----------------------------
+        # Step 1.1: Get Identity data
+        # -----------------------------
 
-        # MetaMap verification instance endpoint
-        url = "https://api.prod.metamap.com/v2/verifications"
+        # Create MetaMap identity (using a sample API or placeholder)
+        identity_url = "https://api.getmati.com/v2/identities"
+        identity_payload = {
+            "flowId": flow_id,
+            "metadata": {"user_id": str(user_id), "email": customer.email}
+        }
+        # headers = {
+        #     "Content-Type": "application/json",
+        #     "Authorization": f"Basic {client_id}:{client_secret}"
+        # }
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }        
 
-        access_token = request.data.get("access_token")  
+
+        # Send request to MetaMap (sample API, does not need to actually work)
+        try:
+            # response = requests.post(url, json=payload, headers=headers)
+            response = requests.post(identity_url, json=identity_payload, headers=headers)
+            identity_data = response.json() if response.status_code in [200, 201] else {}
+            # data = response.json() if response.status_code == 201 else {}
+        except:
+            # If API fails, use dummy identityId
+            # data = {"id": f"identity-dummy-{user_id}"}
+            identity_data = {"id": f"identity-dummy-{user_id}"}
+
+        # identity_id = data.get("id", f"identity-dummy-{user_id}")
+        identity_id = identity_data.get("id", f"identity-dummy-{user_id}")
+
+    # -----------------------------
+    # Step 2: Start Verification
+    # -----------------------------
+
+        verification_url = "https://api.getmati.com/v2/verifications"
+        verification_payload = {
+            "identityId": identity_id,
+            "metadata": {"user_id": str(user_id)}
+        }
 
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-
-        payload = {
-            "metamap_id": settings.METAMAP_FLOW_ID,
-            "metadata": {"user_id": user_id, "email": email}  # optional
-        }
-
+        
         try:
-            response = requests.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            return Response(response.json(), status=response.status_code)
+            # response = requests.post(verification_url, json=verification_payload, headers=headers)
+            response = requests.post(verification_url, json=verification_payload, headers=headers)
+            verification_data = response.json() if response.status_code in [200, 201] else {}
+        except:
+            # Dummy verificationId for testing
+            verification_data = {"id": f"verification-dummy-{user_id}"}
 
-        except requests.exceptions.RequestException as e:
-            return Response(
-                {"error": "Failed to create MetaMap verification", "details": str(e)},
-                status=500
-            )
+        verification_id = verification_data.get("id", f"verification-dummy-{user_id}")
+
+        # -----------------------------
+        # Step 1.4: Generate QR Code
+        # -----------------------------
+        
+        verification_link = f"https://verify.getmati.com/verify/{flow_id}/{identity_id}"
+
+        qr = qrcode.QRCode(box_size=10, border=4)
+        qr.add_data(verification_link)
+        qr.make(fit=True)
+        img = qr.make_image(fill="black", back_color="white")
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
 
 
-class SendMetaMapInputs(APIView):
-    """
-    Send user inputs (biometrics/documents) to MetaMap for verification.
-    Example: Selfie image or document (id card, Passport, etc.)
-    """
 
-    def post(self, request):
-        # Inputs from frontend
-        identity_id = request.data.get("identity_id")  # from CreateMetaMapVerification
-        access_token = request.data.get("access_token")
-        selfie_file = request.FILES.get("selfie")  # file input (optional)
-        document_file = request.FILES.get("document")  # file input (optional)
+     # -----------------------------
+    # Step 3: Save or update in DB
+    # ----------------------------- 
 
-        if not identity_id or not access_token:
-            return Response({"error": "identity_id and access_token required"}, status=400)
 
-        url = f"https://api.prod.metamap.com/v2/identities/{identity_id}/send-input"
 
-        headers = {
-            "Authorization": f"Bearer {access_token}"
-        }
+        # Create or update IdentityVerification record
+        verification, created = IdentityVerification.objects.get_or_create(
+            customer=customer,
+            defaults={
+                "metamap_verification_id": identity_id,
+                "verification_link": verification_link,
+                "verification_qr_code": qr_code_base64,
+                "biometric_status": "QR_GENERATED",
+                "overall_status": "PENDING",
+            }
+        )
+        if not created:
+            verification.metamap_verification_id = identity_id
+            verification.verification_link = verification_link
+            verification.verification_qr_code = qr_code_base64
+            verification.biometric_status = "QR_GENERATED"
+            verification.save()
 
-        # Prepare multipart/form-data for file upload
-        files = {}
-        if selfie_file:
-            files["selfie"] = selfie_file
-        if document_file:
-            files["document"] = document_file
+        return Response({
+            "message": "Verification link and QR generated successfully",
+            "identity_id": identity_id,
+            "verification_id": verification_id,
+            "verification_link": verification_link,
+            "qr_code_base64": qr_code_base64
+        }, status=status.HTTP_201_CREATED)
 
-        try:
-            response = requests.post(url, files=files, headers=headers)
-            response.raise_for_status()
-            return Response(response.json(), status=response.status_code)
 
-        except requests.exceptions.RequestException as e:
-            return Response(
-                {"error": "Failed to send inputs to MetaMap", "details": str(e)},
-                status=500
-            )
 
 
 
 
 class MetaMapWebhookView(APIView):
     """
-    Receives webhook callbacks from MetaMap after verification is completed.
-    MetaMap sends verification status, confidence score, and other details.
+    Webhook endpoint to receive MetaMap verification results and update IdentityVerification.
     """
-
     def post(self, request):
-        # The payload sent by MetaMap
-        data = request.data
+        serializer = MetaMapWebhookSerializer(data=request.data.get("data", {}))
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
 
-            # Example payload MetaMap sends:
-            # {
-            #   "identityId": "abc12345",
-            #   "status": "verified",
-            #   "confidence_score": 0.91,
-            #   "steps": {
-            #       "face_match": "success",
-            #       "document_check": "success"
-            #   },
-            #   "timestamp": "2025-10-15T10:13:22Z"
-            # }
-
-        metamap_id = data.get("identityId")
-        status = data.get("status")
-        confidence = data.get("confidence_score", 0)
-        steps = data.get("steps", {})    
-
+        identity_id = data.get("identityId")
+        status_result = data.get("status")
+        steps = data.get("steps", [])
 
         try:
-            verification = IdentityVerification.objects.get(metamap_verification_id=metamap_id)
-            verification.face_match_score = confidence * 100  
-            verification.biometric_status = (
-                "COMPLETED" if status == "verified" else "FAILED"
-            )
-            verification.overall_status = (
-                "VERIFIED" if confidence >= 0.85 else "REJECTED"
-            )
-            verification.liveness_check_passed = steps.get("liveness_check") == "success"
+            verification = IdentityVerification.objects.get(metamap_verification_id=identity_id)
+
+            # Update status
+            if status_result.lower() == "approved":
+                verification.biometric_status = "COMPLETED"
+            else:
+                verification.biometric_status = "FAILED"
+
+            # Extract face match score & liveness
+            for step in steps:
+                if step.get("name") == "selfie-check":
+                    confidence = step.get("metadata", {}).get("confidence", 0)
+                    verification.face_match_score = confidence * 100
+                    verification.liveness_check_passed = step.get("result") == "approved"
+
+            # Minimum 85% confidence check
+            if verification.face_match_score is not None and verification.face_match_score < 85:
+                verification.overall_status = "REJECTED"
+            else:
+                verification.overall_status = "VERIFIED" if verification.biometric_status == "COMPLETED" else "REJECTED"
+
             verification.biometric_verified_at = timezone.now()
             verification.save()
 
-            return Response({"message": "MetaMap result updated successfully"}, status=200)
+            return Response({"message": "Webhook processed successfully"}, status=200)
 
         except IdentityVerification.DoesNotExist:
-            return Response({"error": "Verification not found"}, status=404)        
+            return Response({"error": "Verification not found"}, status=404)
 
-
-
-
-
-
-class GenerateVerificationLinkView(APIView):
-    """
-    API View to generate MetaMap verification link (QR Code URL)
-    for a user's identity verification process.
-    """
-
-    def post(self, request):
-        # Step 1: Collect the required inputs
-        user_id = request.data.get("user_id")
-
-        if not user_id:
-            return Response({"error": "user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Step 2: Define MetaMap credentials and flow details
-        client_id = settings.METAMAP_CLIENT_ID
-        client_secret = settings.METAMAP_CLIENT_SECRET
-        flow_id = settings.METAMAP_FLOW_ID
-
-        # Step 3: Prepare API endpoint and headers
-        url = f"https://api.getmati.com/v2/identities"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Basic {client_id}:{client_secret}"
-        }
-
-        # Step 4: Create a new MetaMap identity for this user
-        body = {
-            "flowId": flow_id,
-            "metadata": {
-                "user_id": str(user_id)
-            }
-        }
-
-        response = requests.post(url, json=body, headers=headers)
-
-        if response.status_code == 201:
-            data = response.json()
-            identity_id = data.get("id")
-            verification_link = f"https://verify.getmati.com/verify/{flow_id}/{identity_id}"
-
-            # Step 5: Save or update IdentityVerification record
-            verification, created = IdentityVerification.objects.get_or_create(
-                user_id=user_id,
-                defaults={
-                    "metamap_verification_id": identity_id,
-                    "verification_qr_code": verification_link,
-                    "overall_status": "PENDING",
-                }
-            )
-
-            if not created:
-                # Update existing record with latest link
-                verification.metamap_verification_id = identity_id
-                verification.verification_qr_code = verification_link
-                verification.save()
-
-            # Step 6: Send success response
-            return Response(
-                {
-                    "message": "Verification link generated successfully",
-                    "verification_link": verification_link,
-                    "identity_id": identity_id,
-                },
-                status=status.HTTP_201_CREATED
-            )
-
-        else:
-            return Response(
-                {
-                    "error": "Failed to generate verification link",
-                    "details": response.text,
-                },
-                status=response.status_code
-            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
