@@ -12,6 +12,18 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from pathlib import Path
 import os
+from dotenv import load_dotenv 
+
+# Load environment variables from the .env file
+load_dotenv() 
+
+# MetaMap API credentials and workflow ID
+# These are used for authentication and verification flow
+# Do NOT hardcode secrets; keep them in .env for security
+METAMAP_CLIENT_ID = os.getenv("METAMAP_CLIENT_ID")
+METAMAP_CLIENT_SECRET = os.getenv("METAMAP_CLIENT_SECRET")
+METAMAP_FLOW_ID = os.getenv("METAMAP_FLOW_ID")
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
