@@ -1,10 +1,10 @@
 from django.urls import path
-<<<<<<< HEAD
+# <<<<<<< HEAD
 
-urlpatterns = [
+# urlpatterns = [
 
-]
-=======
+# ]
+# =======
 from .views import MetaMapWebhookView
 from .views import GenerateVerificationLinkView
 
@@ -13,4 +13,4 @@ urlpatterns = [
     path('api/generate-verification-link/', GenerateVerificationLinkView.as_view(), name='generate-verification-link'),
 ]
 
->>>>>>> dilshad/development
+# >>>>>>> dilshad/development
