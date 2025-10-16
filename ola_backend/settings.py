@@ -23,6 +23,7 @@ load_dotenv()
 METAMAP_CLIENT_ID = os.getenv("METAMAP_CLIENT_ID")
 METAMAP_CLIENT_SECRET = os.getenv("METAMAP_CLIENT_SECRET")
 METAMAP_FLOW_ID = os.getenv("METAMAP_FLOW_ID")
+METAMAP_WEBHOOK_SECRET = os.getenv("METAMAP_WEBHOOK_SECRET")
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.

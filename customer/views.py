@@ -1,21 +1,34 @@
-import requests
+# Django Imports
 from django.conf import settings
 from django.utils import timezone
+from django.core.files.base import ContentFile
+
+# Django REST Framework Imports
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated,AllowAny
+
+# Local  Imports
 from .models import IdentityVerification, Customer
 from .serializers import GenerateVerificationLinkSerializer, MetaMapWebhookSerializer
 
-
+# Standard Library Imports
 import base64
-
-import qrcode
-from io import BytesIO
-from django.core.files.base import ContentFile
 import logging
+from io import BytesIO
 
+# External Library Imports
+import qrcode
+import requests
+
+# Logger Setup
 logger = logging.getLogger(__name__)
+
+# swagger settup
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+
 
 
 
@@ -25,9 +38,48 @@ logger = logging.getLogger(__name__)
 
 
 class GenerateVerificationLinkView(APIView):
+    permission_classes=[IsAuthenticated]
     """
     Generates a MetaMap verification link or QR code for the customer.
     """
+
+
+    @swagger_auto_schema(
+        operation_summary="Generate MetaMap verification link",
+        operation_description="Generates a MetaMap verification link or QR code for a customer using their customer ID.",
+        tags=["customer"], 
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['user_id'],
+            properties={
+                'user_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='ID of the customer')
+            }
+        ),
+        responses={
+            201: openapi.Response(
+                description="Verification link and QR generated successfully",
+                examples={
+                    "application/json": {
+                        "message": "Verification link and QR generated successfully",
+                        "identity_id": "abc123",
+                        "verification_id": "def456",
+                        "verification_link": "https://verify.getmati.com/verify/flow_id/identity_id",
+                        "qr_code_base64": "base64string..."
+                    }
+                }
+            ),
+            400: "Invalid input",
+            404: "Customer not found",
+            500: "MetaMap API error"
+        }
+    )
+
+
+
+
+
+
+
     def post(self, request):
         # request.data= {"user_id": 25}
         serializer = GenerateVerificationLinkSerializer(data=request.data)
@@ -191,10 +243,44 @@ class GenerateVerificationLinkView(APIView):
 
 
 class MetaMapWebhookView(APIView):
+    permission_classes=[AllowAny]
     """
     Webhook endpoint to receive MetaMap verification results and update IdentityVerification.
     """
+
+
+
+    @swagger_auto_schema(
+        operation_summary="MetaMap webhook endpoint",
+        operation_description="Receives verification results from MetaMap and updates the IdentityVerification model.",
+        tags=["customer"],
+        responses={
+            200: openapi.Response(
+                description="Webhook processed successfully",
+                examples={
+                    "application/json": {
+                        "message": "Webhook processed successfully",
+                        "overall_status": "VERIFIED",
+                        "biometric_status": "COMPLETED",
+                        "verification_completed_at": "2025-10-16T09:45:00Z"
+                    }
+                }
+            ),
+            400: "Invalid payload",
+            404: "Verification not found",
+            500: "Server error"
+        }
+    )
+
+
+
     def post(self, request):
+
+            # --- webhook permission check -----
+        token = request.headers.get("X-MetaMap-Token")
+        if token != settings.METAMAP_WEBHOOK_SECRET:
+            return Response({"error": "Unauthorized"}, status=401)
+
         serializer = MetaMapWebhookSerializer(data=request.data.get("data", {}))
         if serializer.is_valid():
             data = serializer.validated_data
@@ -209,35 +295,77 @@ class MetaMapWebhookView(APIView):
         try:
             verification = IdentityVerification.objects.get(metamap_verification_id=identity_id)
 
-            # Update status
+            # --Update status---
             if status_result.lower() == "approved":
                 verification.biometric_status = "COMPLETED"
             else:
                 verification.biometric_status = "FAILED"
 
-            # Extract face match score & liveness
+            # ----Extract face match score & liveness----
             for step in steps:
+
+                # ----selfie check----
                 if step.get("name") == "selfie-check":
                     confidence = step.get("metadata", {}).get("confidence", 0)
                     verification.face_match_score = confidence * 100
+
                     verification.liveness_check_passed = step.get("result") == "approved"
+
+                     # ---Minimum 85% confidence check---
+                    if (verification.face_match_score is not None 
+                        and verification.face_match_score < 85 
+                        and verification.overall_status != "REJECTED"):
+
+                        verification.overall_status = "REJECTED"
+                        verification.rejection_reason = rejection_reason or "Face match below 85%"
+
+                    
 
                     selfie_url =step.get("metadata", {}).get("selfie_image_url")
 
-                    # add document images
-
                     if selfie_url:
-                        response = requests.get(selfie_url)
-                        if response.status_code == 200:
+                        try:
+                            response = requests.get(selfie_url, timeout=10)
+                            response.raise_for_status()
                             verification.selfie_image.save(f"{identity_id}.jpg", ContentFile(response.content), save=False)
+                        except requests.RequestException:
+                            logger.warning(f"Failed to download selfie image for {identity_id}")
 
-            # Minimum 85% confidence check
-            if verification.face_match_score is not None and verification.face_match_score < 85:
-                verification.overall_status = "REJECTED"
-                verification.rejection_reason = rejection_reason or "Face match below 85%"
-            else:
+
+                    #---- document verification ----
+                elif step.get("name") == "document-check":
+
+                    if step.get("result") != "approved" and verification.overall_status != "REJECTED":
+                        verification.overall_status = "REJECTED"
+                        verification.rejection_reason = rejection_reason or "Document verification failed"
+
+
+                    front_url = step.get("metadata", {}).get("front_image_url")
+                    back_url = step.get("metadata", {}).get("back_image_url")
+                    
+                    if front_url:
+                        try:
+                            response = requests.get(front_url, timeout=10)
+                            response.raise_for_status()
+                            verification.document_front_image.save(f"{identity_id}_front.jpg", ContentFile(response.content), save=False)
+                        except requests.RequestException:
+                            logger.warning(f"Failed to download front document image for {identity_id}")
+                    
+                    if back_url:
+                        try:
+                            response = requests.get(back_url, timeout=10)
+                            response.raise_for_status()
+                            verification.document_back_image.save(f"{identity_id}_back.jpg", ContentFile(response.content), save=False)
+                        except requests.RequestException:
+                            logger.warning(f"Failed to download back document image for {identity_id}")
+
+
+            
+
+            if verification.overall_status != "REJECTED":
                 verification.overall_status = "VERIFIED" if verification.biometric_status == "COMPLETED" else "REJECTED"
-                verification.rejection_reason = rejection_reason if verification.overall_status == "REJECTED" else ""
+                verification.rejection_reason = "" if verification.overall_status == "VERIFIED" else rejection_reason
+
 
             verification.verification_completed_at = timezone.now()    
 
