@@ -17,3 +17,4 @@ class MetaMapWebhookSerializer(serializers.Serializer):
     face_match_score = serializers.FloatField(required=False)
     selfie_image_url = serializers.URLField(required=False)
     rejection_reason = serializers.CharField(required=False)
+    steps = serializers.ListField(child=serializers.DictField(),required=False)
