@@ -1,24 +1,67 @@
-# Ignore SQLite database
-db.sqlite3
+# =====================================
+# Django & Python .gitignore Template
+# =====================================
 
-# Ignore media files (uploaded images, documents, etc.)
+# Ignore all SQLite databases
+*.sqlite3
+*.db
+
+# Ignore all media files (user uploads, etc.)
 media/
+uploads/
 
-# Ignore Python cache files
+# Ignore all cache directories
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*__pycache__*/
+*.py[cod]
+*$py.class
 
-# Ignore virtual environment
+# Ignore virtual environments
 venv/
 env/
+ENV/
+.venv/
+.env/
 
-# Ignore log files
+# Ignore compiled, packaged, or distribution files
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Ignore Django-related local files
+db.sqlite3
+local_settings.py
+staticfiles/
+static_root/
+tmp/
 *.log
 
-# Ignore Django secret key file (if any)
+# Ignore environment & secret files
 .env
+*.env
+.env.*
+secrets.json
 
-# Ignore migrations cache (optional)
+# Ignore editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore migration caches (not the actual migrations)
 **/migrations/__pycache__/
+
+# Ignore system files
+.DS_Store
+Thumbs.db

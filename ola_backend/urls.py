@@ -31,19 +31,19 @@ schema_view = get_schema_view(
         This API uses JWT (JSON Web Tokens) for authentication.
         
         ### Login Flow:
-        1. Call `/api/v1/auth/generate-otp/` with email/phone
+        1. Call /api/v1/auth/generate-otp/ with email/phone
         2. Receive OTP via email/SMS
-        3. Call `/api/v1/auth/verify-otp/` with OTP
+        3. Call /api/v1/auth/verify-otp/ with OTP
         4. Receive access and refresh tokens
-        5. Use access token in Authorization header: `Bearer <token>`
+        5. Use access token in Authorization header: Bearer <token>
         
         ## User Roles
-        - **Salesperson**: Create applications, enroll devices
-        - **Store Manager**: Manage store, approve collections
-        - **Global Manager**: View all stores, analytics
-        - **Financial Manager**: Configure credit tiers, system settings
-        - **Sales Advisor**: Support collections, monitoring
-        - **Admin**: Full system access
+        - *Salesperson*: Create applications, enroll devices
+        - *Store Manager*: Manage store, approve collections
+        - *Global Manager*: View all stores, analytics
+        - *Financial Manager*: Configure credit tiers, system settings
+        - *Sales Advisor*: Support collections, monitoring
+        - *Admin*: Full system access
         """,
         terms_of_service="https://www.byteboot.in/",
         contact=openapi.Contact(email="support@byteboot.in"),
@@ -65,8 +65,8 @@ urlpatterns = [
     path('swagger.yaml', schema_view.without_ui(cache_timeout=0), name='schema-yaml'),
     
     # API v1
-    path('v1/users/', include('home.urls')),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/v1/users/', include('home.urls')),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     # path('api/v1/applications/', include('applications.urls')),
     path('api/v1/products/', include('products.urls')),
     path('api/v1/customer/', include('customer.urls')),
