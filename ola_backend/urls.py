@@ -65,13 +65,13 @@ urlpatterns = [
     path('swagger.yaml', schema_view.without_ui(cache_timeout=0), name='schema-yaml'),
     
     # API v1
-    path('api/v1/users/', include('home.urls')),
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('v1/users/', include('home.urls')),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     # path('api/v1/applications/', include('applications.urls')),
-    path('api/v1/products/', include('products.urls')),
-    path('api/v1/customer/', include('customer.urls')),
-    # path('api/v1/payments/', include('payments.urls')),
-    # path('api/v1/devices/', include('devices.urls')),
+    path('v1/products/', include('products.urls')),
+    path('v1/customer/', include('customer.urls')),
+    path('v2/store/', include('store.urls')),
+    path('v2/finance/', include('finance.urls')),
     # path('api/v1/reports/', include('reports.urls')),
 ]
 
