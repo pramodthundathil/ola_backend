@@ -16,7 +16,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
 
 # ============================================================
 # Local Application Imports
@@ -97,7 +96,7 @@ class ProductCategoryDetailView(APIView):
     """
 
     # In production, only Admin or Global Manager should create categories
-    permission_classes = [IsAdminOrGlobalManager]
+    permission_classes = [IsAdminOrGlobalManager]   
 
     def get_object(self, pk):
         """Helper: Fetch ProductCategory instance or return None."""

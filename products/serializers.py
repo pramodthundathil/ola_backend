@@ -29,8 +29,18 @@ class ProductCategorySerializer(serializers.ModelSerializer):
 
     def validate_name(self, value):
         """
-        Ensure the category name is unique(case-insensitive).
+        Ensure 'name' is unique during creation and valid during updates.
         """
-        if ProductCategory.objects.filter(name__iexact=value).exists():
-            raise serializers.ValidationError("A category with this name is already exists.")
+        # Get the instance (if updating)
+        instance = getattr(self, 'instance', None)
+
+        # If creating a new category (no instance yet)
+        if instance is None:
+            if ProductCategory.objects.filter(name__iexact=value).exists():
+                raise serializers.ValidationError("A category with this name already exists.")
+        else:
+            # If updating, check only if name is changed
+            if ProductCategory.objects.filter(name__iexact=value).exclude(pk=instance.pk).exists():
+                raise serializers.ValidationError("A category with this name already exists.")
+        
         return value
