@@ -1,11 +1,16 @@
 from django.urls import path
 
-from .views import MetaMapWebhookView
-from .views import GenerateVerificationLinkView
+# from .views import MetaMapWebhookView
+# from .views import GenerateVerificationLinkView
+from .import views
 
 urlpatterns = [
-    path('metamap/webhook/', MetaMapWebhookView.as_view(), name='metamap-webhook'),
-    path('generate-verification-link/', GenerateVerificationLinkView.as_view(), name='generate-verification-link'),
+  
+    # Metamap verification
+    path('metamap/webhook/', views.MetaMapWebhookView.as_view(), name='metamap-webhook'),
+    path('generate-verification-link/', views.GenerateVerificationLinkView.as_view(), name='generate-verification-link'),
+
+
 ]
 
 
