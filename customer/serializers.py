@@ -19,3 +19,27 @@ class MetaMapWebhookSerializer(serializers.Serializer):
 
 
 
+# =========== customer serializers for post/get/delete ==========#
+
+
+class CustomerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Customer
+        fields = [
+            'id',
+            'document_number',
+            'document_type', 
+            'first_name', 
+            'last_name', 
+            'email', 
+            'phone_number', 
+            'status',
+            'created_by',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'status', 'created_by', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        user = self.context['request'].user
+        return Customer.objects.create(created_by=user, **validated_data)    

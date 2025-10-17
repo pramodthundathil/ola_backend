@@ -7,7 +7,6 @@ from django.core.files.base import ContentFile
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated,AllowAny
 
 # Local  Imports
 from .models import IdentityVerification, Customer
@@ -31,7 +30,8 @@ logger = logging.getLogger(__name__)
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
-
+# permisions
+from .permissions import IsAuthenticatedUser
 
 
 # -------------------------------
@@ -40,7 +40,7 @@ from drf_yasg import openapi
 
 
 class GenerateVerificationLinkView(APIView):
-    permission_classes=[IsAuthenticated]
+    permission_classes=[IsAuthenticatedUser]
     """
     Generates a MetaMap verification link or QR code for the customer.
     """
@@ -245,7 +245,7 @@ class GenerateVerificationLinkView(APIView):
 
 
 class MetaMapWebhookView(APIView):
-    permission_classes=[AllowAny]
+    permission_classes=[]
     """
     Webhook endpoint to receive MetaMap verification results and update IdentityVerification.
     """
@@ -388,3 +388,64 @@ class MetaMapWebhookView(APIView):
 
 
 
+
+
+
+# -------------------------------
+#   customer creation View
+# -------------------------------
+
+
+
+class CustomerManagementView(APIView):
+        
+        permission_classes=[IsAuthenticatedUser]
+
+
+        @swagger_auto_schema(
+            operation_summary="Create a new customer",
+            operation_description="Creates a new customer in the system. The authenticated user is automatically set as the creator.",
+            tags=["customer"], 
+            request_body=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                required=['document_number', 'document_type', 'first_name', 'last_name', 'email', 'phone_number'],
+                properties={
+                    'document_number': openapi.Schema(type=openapi.TYPE_STRING, description="ID card with hyphens (e.g., 8-123-456) or passport number"),
+                    'document_type': openapi.Schema(type=openapi.TYPE_STRING, description="Type of document: PANAMA_ID, PASSPORT, FOREIGNER_ID"),
+                    'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                    'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                    'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                    'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                }
+            ),
+            responses={
+                201: openapi.Response(
+                    description="Customer created successfully",
+                    schema=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                            'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                            'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                            'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                            'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                            'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                            'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                            'status': openapi.Schema(type=openapi.TYPE_STRING),
+                            'created_by': openapi.Schema(type=openapi.TYPE_INTEGER),
+                            'created_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                            'updated_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                        }
+                    )
+                ),
+                400: "Validation error"
+            }
+        )
+
+
+        def post(self, request):
+            serializer = CustomerSerializer(data=request.data, context={'request': request})
+            if serializer.is_valid():
+                customer = serializer.save()
+                return Response(CustomerSerializer(customer).data, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
