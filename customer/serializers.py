@@ -1,25 +1,11 @@
 from rest_framework import serializers
-from .models import IdentityVerification, Customer,CreditScore
-
-class GenerateVerificationLinkSerializer(serializers.Serializer):
-    user_id = serializers.IntegerField()
-
-
-class MetaMapWebhookSerializer(serializers.Serializer):
-    identityId = serializers.CharField()
-    verificationId = serializers.CharField()
-    status = serializers.CharField()
-    face_match_score = serializers.FloatField(required=False)
-    selfie_image_url = serializers.URLField(required=False)
-    rejection_reason = serializers.CharField(required=False)
-    steps = serializers.ListField(child=serializers.DictField(),required=False)
+from .models import  Customer,CreditScore
 
 
 
 
 
-
-# =========== customer serializers for post/get/delete ==========#
+# =========== customer serializers for CRUD (except block customer) ==========#
 
 
 class CustomerSerializer(serializers.ModelSerializer):
@@ -43,11 +29,6 @@ class CustomerSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = self.context['request'].user
         return Customer.objects.create(created_by=user, **validated_data)    
-
-
-
-
-
 
 
 

@@ -17,13 +17,13 @@ from dotenv import load_dotenv
 # Load environment variables from the .env file
 load_dotenv() 
 
-# MetaMap API credentials and workflow ID
-# These are used for authentication and verification flow
-# Do NOT hardcode secrets; keep them in .env for security
-METAMAP_CLIENT_ID = os.getenv("METAMAP_CLIENT_ID")
-METAMAP_CLIENT_SECRET = os.getenv("METAMAP_CLIENT_SECRET")
-METAMAP_FLOW_ID = os.getenv("METAMAP_FLOW_ID")
-METAMAP_WEBHOOK_SECRET = os.getenv("METAMAP_WEBHOOK_SECRET")
+
+# Experian API
+EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL")
+EXPERIAN_CLIENT_ID = os.getenv("EXPERIAN_CLIENT_ID")
+EXPERIAN_CLIENT_SECRET = os.getenv("EXPERIAN_CLIENT_SECRET")
+EXPERIAN_USERNAME = os.getenv("EXPERIAN_USERNAME")
+EXPERIAN_PASSWORD = os.getenv("EXPERIAN_PASSWORD")
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
