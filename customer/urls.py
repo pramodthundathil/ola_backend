@@ -1,7 +1,4 @@
 from django.urls import path
-
-# from .views import MetaMapWebhookView
-# from .views import GenerateVerificationLinkView
 from .import views
 
 urlpatterns = [
@@ -18,5 +15,6 @@ urlpatterns = [
 
 
 ]
+
 
 
