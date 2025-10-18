@@ -13,6 +13,10 @@ urlpatterns = [
     path('list/',views.CustomerManagementView.as_view(), name='customer'),
 
 
+
+    path('customer/<int:customer_id>/credit-score/', views.CreditScoreCheckAPIView.as_view(), name='credit-score-check'),
+
+
 ]
 
 

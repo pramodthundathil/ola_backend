@@ -9,10 +9,12 @@ from rest_framework.response import Response
 from rest_framework import status
 
 # Local  Imports
-from .models import IdentityVerification, Customer
+from .models import IdentityVerification, Customer,CreditScore
 from .serializers import (
-     GenerateVerificationLinkSerializer, MetaMapWebhookSerializer,CustomerSerializer
+     GenerateVerificationLinkSerializer, MetaMapWebhookSerializer,CustomerSerializer,
+     CreditScoreSerializer,
      )
+from .utils import fetch_credit_score_from_experian
 
 # Standard Library Imports
 import base64
@@ -34,9 +36,9 @@ from drf_yasg import openapi
 from .permissions import IsAuthenticatedUser
 
 
-# -------------------------------
+# ============================================
 # Generate Verification Link / QR
-# -------------------------------
+# ===========================================
 
 
 class GenerateVerificationLinkView(APIView):
@@ -391,9 +393,9 @@ class MetaMapWebhookView(APIView):
 
 
 
-# -------------------------------
+# ============================================
 #   customer creation View
-# -------------------------------
+# ============================================
 
 
 
@@ -449,3 +451,98 @@ class CustomerManagementView(APIView):
                 customer = serializer.save()
                 return Response(CustomerSerializer(customer).data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+# =================================
+# CREDIT SCORE CHECK VIEW
+# =================================
+
+
+
+class CreditScoreCheckAPIView(APIView):
+    """Check a customer's credit score (cached or Experian)."""
+
+    @swagger_auto_schema(
+        operation_summary="Check Customer Credit Score",
+        operation_description="Fetches a customer's credit score. Returns cached score if available and valid; otherwise fetches a new score from Experian and stores it.",
+        responses={
+            200: openapi.Response(
+                description="Credit score fetched successfully",
+                examples={
+                    "application/json": {
+                        "source": "cache",
+                        "credit_score": {
+                            "customer": {
+                                "id": 1,
+                                "first_name": "John",
+                                "last_name": "Doe",
+                                "email": "john.doe@example.com",
+                            },
+                            "apc_score": 520,
+                            "apc_consultation_id": "ABC123",
+                            "apc_status": "APPROVED",
+                            "internal_score": 85,
+                            "max_installment_capacity": 15000.00,
+                            "payment_capacity_status": "SUFFICIENT",
+                            "final_credit_status": "APPROVED",
+                            "score_valid_until": "2025-11-16T14:30:00Z",
+                            "consulted_by": 2
+                        }
+                    }
+                }
+            ),
+            404: openapi.Response(
+                description="Customer not found",
+                examples={"application/json": {"error": "Customer not found"}}
+            ),
+            500: openapi.Response(
+                description="Failed to fetch credit score from Experian",
+                examples={"application/json": {"error": "Failed to fetch credit score from Experian"}}
+            ),
+        },
+        manual_parameters=[
+            openapi.Parameter(
+                name='customer_id',
+                in_=openapi.IN_PATH,
+                type=openapi.TYPE_INTEGER,
+                description='ID of the customer to fetch credit score for',
+                required=True
+            ),
+        ],
+        tags=['customer']
+    )
+
+
+
+
+    def get(self, request, customer_id):
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 1️= Check if recent score exists (within 30 days)
+        latest_score = customer.get_latest_credit_score()
+        if latest_score:
+            serializer = CreditScoreSerializer(latest_score)
+            return Response({"source": "cache", "credit_score": serializer.data})
+
+        # 2️= Fetch new score from Experian
+        experian_data = fetch_credit_score_from_experian(customer)
+        if not experian_data:
+            return Response({"error": "Failed to fetch credit score from Experian"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # 3️= Save new score in DB
+        credit_score = CreditScore(
+            customer=customer,
+            apc_score=experian_data["apc_score"],
+            apc_consultation_id=experian_data["apc_consultation_id"],
+            apc_status=experian_data["apc_status"],
+            score_valid_until=experian_data["score_valid_until"],
+        )
+        credit_score.save()
+
+        serializer = CreditScoreSerializer(credit_score)
+        return Response({"source": "experian", "credit_score": serializer.data})
