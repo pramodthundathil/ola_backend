@@ -22,7 +22,7 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import ProductCategory, Brand, ProductModel
-from .serializers import ProductCategorySerializer, ProductBrandSerializer, ProductModelSerializer
+from .serializers import ProductCategorySerializer, ProductBrandSerializer, ProductModelSerializer, ProductModelPriceUpdateSerializer
 from .permissions import IsAdminOrGlobalManager, IsAdminOrGlobalManagerOrReadOnly
 
 # ============================================================
@@ -531,3 +531,62 @@ class ProductModelDetailView(APIView):
         except Exception as e:
             logger.error(f"Error deleting ProductModel ID {pk}: {str(e)}")
             return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================================
+# Product Model Price Update View
+# ============================================================
+class ProductModelPriceUpdateView(APIView):
+    """
+    API to update only price fields (suggested_price, minimum_price_to_sell, maximum_price)
+    for an existing Product Model.
+    """
+    #permission_classes = [IsAdminOrGlobalManagerOrReadOnly]   
+
+    @swagger_auto_schema(
+        operation_summary="Update only price fields (Admin or Global Manager only)",
+        operation_description="Updates suggested_price, minimum_price_to_sell, and maximum_price for a Product Model.",
+        request_body=ProductModelPriceUpdateSerializer,
+        responses={
+            200: ProductModelPriceUpdateSerializer,
+            400: "Validation Error",
+            404: "Not Found"
+        },
+        tags=["Product Models"]
+    )
+    def patch(self, request, pk):
+        try:
+            product = ProductModel.objects.filter(pk=pk).first()
+            if not product:
+                return Response({"detail": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            old_data = {
+                "suggested_price": product.suggested_price,
+                "minimum_price_to_sell": product.minimum_price_to_sell,
+                "maximum_price": product.maximum_price,
+            }
+
+            serializer = ProductModelPriceUpdateSerializer(
+                product,
+                data=request.data,
+                partial=True
+            )
+
+            if serializer.is_valid():
+                serializer.save()
+                new_data = serializer.data
+
+                return Response({
+                    "message": "Price fields updated successfully.",
+                    "old_prices": old_data,
+                    "updated_prices": new_data
+                }, status=status.HTTP_200_OK)
+
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            logger.error(f"Error updating price fields for ProductModel ID {pk}: {str(e)}")
+            return Response(
+                {"detail": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
