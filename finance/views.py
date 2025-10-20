@@ -27,7 +27,7 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule
-from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
+from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 
 # ============================================================
@@ -297,3 +297,87 @@ class FinanceOverdueView(APIView):
             logger.error(f"Error generating overdue analytics: {str(e)}", exc_info=True)
             return Response({"detail": "Failed to generate overdue analytics."},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+
+# ============================================================
+# Payment Record List & Create View
+# ============================================================
+class PaymentRecordListCreateView(APIView):
+    """
+    Handles both:
+    - List payment records 
+    - Create a new payment record
+    """
+    permission_classes = [IsAdminOrGlobalManager]
+    serializer_class = PaymentRecordSerializer
+
+    # --------------------------------------
+    # List all payment records
+    # --------------------------------------
+    @swagger_auto_schema(
+        operation_summary="List Payment Records",
+        operation_description="Retrieve a paginated list of all payment records, ordered by latest payment date.",
+        responses={
+            200: PaymentRecordSerializer(many=True),
+            500: "Internal Server Error",
+        },
+        tags=["Finance"]
+    )
+    def get(self, request):
+        """
+        Retrieve a paginated list of all payment records.
+        """
+        try:
+            payments = PaymentRecord.objects.all().order_by('-payment_date')
+            paginator = FinancePlanPagination()
+            result_page = paginator.paginate_queryset(payments, request)
+            serializer = self.serializer_class(result_page, many=True, context={'request': request})
+            return paginator.get_paginated_response(serializer.data)
+        except Exception as e:
+            logger.error(f"Error fetching payment records: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": "Failed to fetch payment records."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # --------------------------------------
+    # Create new payment record
+    # --------------------------------------
+    @swagger_auto_schema(
+        operation_summary="Create Payment Record",
+        operation_description="Creates a new payment record linked to a Finance Plan or EMI Schedule.",
+        request_body=PaymentRecordSerializer,
+        responses={
+            201: PaymentRecordSerializer,
+            400: "Bad Request",
+            404: "Finance Plan or EMI Schedule Not Found",
+            500: "Internal Server Error",
+        },
+        tags=["Finance"]
+    )
+    def post(self, request):
+        """
+        Create a new payment record for a given Finance Plan or EMI Schedule.
+        """
+        try:
+            serializer = PaymentRecordSerializer(data=request.data)
+            if serializer.is_valid():
+                payment = serializer.save(processed_by=request.user)
+                return Response(
+                    PaymentRecordSerializer(payment).data,
+                    status=status.HTTP_201_CREATED
+                )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except FinancePlan.DoesNotExist:
+            logger.error("FinancePlan not found", exc_info=True)
+            return Response({"detail": "Finance plan not found."}, status=status.HTTP_404_NOT_FOUND)
+        except EMISchedule.DoesNotExist:
+            logger.error("EMI schedule not found", exc_info=True)
+            return Response({"detail": "EMI schedule not found."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error creating payment record: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": "Failed to create payment record."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        

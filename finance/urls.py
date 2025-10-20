@@ -8,6 +8,6 @@ urlpatterns = [
     path('analytics/risk-tiers/', views.FinanceRiskTierView.as_view(), name='finance-risk-tier'),
     path("analytics/collections/", views.FinanceCollectionsView.as_view(), name="finance_analytics_collections"),
     path("analytics/overdue/", views.FinanceOverdueView.as_view(), name="finance_analytics_overdue"),
-    
+    path("payments/record/", views.PaymentRecordListCreateView.as_view(), name="payments-record"),    
 
 ]
