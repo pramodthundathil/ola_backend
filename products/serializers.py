@@ -165,3 +165,34 @@ class ProductModelSerializer(serializers.ModelSerializer):
         if sku and ProductModel.objects.exclude(pk=getattr(self.instance, 'pk', None)).filter(sku=sku).exists():
             raise serializers.ValidationError({"sku": "This SKU already exists."})
         return attrs
+
+
+# ============================================================
+# Product Model Price Update Serializer
+# ============================================================
+class ProductModelPriceUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer to update only price fields in ProductModel.
+    """
+
+    class Meta:
+        model = ProductModel
+        fields = ['suggested_price', 'minimum_price_to_sell', 'maximum_price']
+
+    def validate(self, data):
+        """
+        Validate logical relationships between prices.
+        """
+        min_price = data.get('minimum_price_to_sell', getattr(self.instance, 'minimum_price_to_sell', None))
+        max_price = data.get('maximum_price', getattr(self.instance, 'maximum_price', None))
+        suggested = data.get('suggested_price', getattr(self.instance, 'suggested_price', None))
+
+        if min_price and max_price and min_price > max_price:
+            raise serializers.ValidationError({
+                "minimum_price_to_sell": "Minimum price cannot be greater than maximum price."
+            })
+        if suggested and (suggested < min_price or suggested > max_price):
+            raise serializers.ValidationError({
+                "suggested_price": "Suggested price must be between minimum and maximum price."
+            })
+        return data

@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.pagination import PageNumberPagination
 from drf_yasg.utils import swagger_auto_schema
 
 # ============================================================
@@ -29,6 +30,15 @@ from .permissions import IsAdminOrGlobalManager, IsAdminOrGlobalManagerOrReadOnl
 # Logger Setup
 # ============================================================
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Pagination
+# ============================================================
+class ProductPagination(PageNumberPagination):
+    page_size = 10  # default
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 # ============================================================
@@ -53,9 +63,10 @@ class ProductCategoryCreateView(APIView):
     def get(self, request):
         """GET: List all product categories (ordered by display_order, name)."""
         categories = ProductCategory.objects.all().order_by('display_order', 'name')
-        serializer = ProductCategorySerializer(categories, many=True, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
+        paginator =ProductPagination()
+        result_page = paginator.paginate_queryset(categories, request)
+        serializer = ProductCategorySerializer(result_page, many=True, context={'request': request})        
+        return paginator.get_paginated_response(serializer.data)      
     @swagger_auto_schema(
         operation_summary="Create a new Product Category",
         operation_description="Creates a new Product Category with optional icon and image.",
@@ -223,9 +234,11 @@ class ProductBrandCreateView(APIView):
     def get(self, request):
         """GET: List all product brands (ordered by category, display_order, name)."""
         brands = Brand.objects.select_related('category').all().order_by('category', 'display_order', 'name')
-        serializer = ProductBrandSerializer(brands, many=True, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
+        paginator =ProductPagination()
+        result_page = paginator.paginate_queryset(brands, request)
+        serializer = ProductBrandSerializer(result_page, many=True, context={'request': request})        
+        return paginator.get_paginated_response(serializer.data)  
+        
     @swagger_auto_schema(
         operation_summary="Create a new Product Brand",
         operation_description="Creates a new Product Brand under a category with optional logo and banner images.",
@@ -331,8 +344,7 @@ class ProductBrandDetailView(APIView):
         request_body=ProductBrandSerializer,
         consumes=['multipart/form-data'],
         responses={200: ProductBrandSerializer, 400: "Invalid data", 404: "Not Found", 500: "Server Error"},
-        tags=["Product Brands"]
-        
+        tags=["Product Brands"]        
     )
     def patch(self, request, pk):
         """PATCH: Partially update brand by ID."""
@@ -355,8 +367,7 @@ class ProductBrandDetailView(APIView):
     @swagger_auto_schema(
         operation_summary="Delete Product Brand by ID",
         responses={204: "Deleted successfully", 404: "Not Found", 500: "Server Error"},
-        tags=["Product Brands"]
-        
+        tags=["Product Brands"]        
     )
     def delete(self, request, pk):
         """DELETE: Remove brand by ID."""
@@ -389,9 +400,11 @@ class ProductModelListCreateView(APIView):
     )
     def get(self, request):
         products = ProductModel.objects.all().order_by('-created_at')
-        serializer = ProductModelSerializer(products, many=True, context={'request': request})
-        return Response(serializer.data)
-
+        paginator =ProductPagination()
+        result_page = paginator.paginate_queryset(products, request)
+        serializer = ProductModelSerializer(result_page, many=True, context={'request': request})        
+        return paginator.get_paginated_response(serializer.data)  
+    
     @swagger_auto_schema(
         operation_summary="Create a new Product Model (Admin or Global Manager only)",
         request_body=ProductModelSerializer,
@@ -541,7 +554,7 @@ class ProductModelPriceUpdateView(APIView):
     API to update only price fields (suggested_price, minimum_price_to_sell, maximum_price)
     for an existing Product Model.
     """
-    #permission_classes = [IsAdminOrGlobalManagerOrReadOnly]   
+    permission_classes = [IsAdminOrGlobalManager]   
 
     @swagger_auto_schema(
         operation_summary="Update only price fields (Admin or Global Manager only)",
