@@ -328,8 +328,8 @@ class CreditScore(models.Model):
     max_installment_capacity = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        null=True
-        blank=True
+        null=True,
+        blank=True,
         help_text="Maximum monthly installment (30% of income)"
     )
     payment_capacity_status = models.CharField(

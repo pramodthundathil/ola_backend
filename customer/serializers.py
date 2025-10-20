@@ -31,6 +31,22 @@ class CustomerSerializer(serializers.ModelSerializer):
         return Customer.objects.create(created_by=user, **validated_data)    
 
 
+# =========== customer serializers for status change ==========#
+
+
+class CustomerStatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Customer
+        fields = ['status']
+
+    def validate_status(self, value):
+        allowed = ['ACTIVE', 'INACTIVE', 'BLOCKED']
+        value_upper = value.upper()
+        if value_upper not in allowed:
+            raise serializers.ValidationError(f"Status must be one of {allowed}")
+        return value_upper
+
+
 
 
 

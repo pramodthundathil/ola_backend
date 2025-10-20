@@ -13,6 +13,7 @@ from .models import Customer,CreditScore
 from .serializers import (
      CustomerSerializer,
      CreditScoreSerializer,
+     CustomerStatusSerializer
      )
 from .utils import fetch_credit_score_from_experian
 
@@ -33,6 +34,9 @@ from drf_yasg import openapi
 from .permissions import IsAuthenticatedUser
 
 
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Q
+
 
 
 
@@ -43,10 +47,130 @@ from .permissions import IsAuthenticatedUser
 
 
 
+# ============= Pagination Settings===============
+
+class CustomerPagination(PageNumberPagination):
+    """Custom pagination settings"""
+    page_size = 10  # Default per page
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+
 class CustomerManagementView(APIView):
         
         permission_classes=[IsAuthenticatedUser]
 
+
+        # ---------- GET ----------
+
+        pagination_class = CustomerPagination
+
+        @swagger_auto_schema(
+            operation_summary="Retrieve customers",
+            operation_description="""
+            GET /api/customers/manage/ → Retrieve all customers (paginated)
+            GET /api/customers/manage/?search=<query> → Search by first name, last name, email, or document number (paginated)
+            GET /api/customers/manage/?id=<id> → Retrieve single customer by ID
+            """,
+            tags=["customer"],
+            manual_parameters=[
+                openapi.Parameter(
+                    'id', openapi.IN_QUERY,
+                    description='Customer ID to retrieve a single customer',
+                    type=openapi.TYPE_INTEGER
+                ),
+                openapi.Parameter(
+                    'search', openapi.IN_QUERY,
+                    description='Search term for first name, last name, email, or document number',
+                    type=openapi.TYPE_STRING
+                ),
+                openapi.Parameter(
+                    'page', openapi.IN_QUERY,
+                    description='Page number for pagination',
+                    type=openapi.TYPE_INTEGER
+                ),
+                openapi.Parameter(
+                    'page_size', openapi.IN_QUERY,
+                    description='Number of results per page',
+                    type=openapi.TYPE_INTEGER
+                ),
+            ],
+            responses={
+                200: openapi.Response(
+                    description="Customer data retrieved successfully",
+                    schema=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'count': openapi.Schema(type=openapi.TYPE_INTEGER),
+                            'next': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_URI, nullable=True),
+                            'previous': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_URI, nullable=True),
+                            'results': openapi.Schema(
+                                type=openapi.TYPE_ARRAY,
+                                items=openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                                        'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'created_by': openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True),
+                                        'created_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                                        'updated_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                                    }
+                                )
+                            )
+                        }
+                    )
+                ),
+                404: "Customer not found",
+            }
+        )
+
+
+
+
+
+        def get(self, request):
+            """
+            Handles:
+            - GET /api/customers/ → list (paginated)
+            - GET /api/customers/?search=John → search by name/email/document
+            - GET /api/customers/<id>/ → get individual customer
+            """
+            # Check if individual customer requested
+            customer_id = request.query_params.get('id')
+            if customer_id:
+                try:
+                    customer = Customer.objects.get(id=customer_id)
+                    serializer = CustomerSerializer(customer)
+                    return Response(serializer.data, status=status.HTTP_200_OK)
+                except Customer.DoesNotExist:
+                    return Response({'detail': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Otherwise, handle list or search
+            search_query = request.query_params.get('search', '').strip()
+            queryset = Customer.objects.all().order_by('-created_at')
+
+            if search_query:
+                queryset = queryset.filter(
+                    Q(first_name__icontains=search_query) |
+                    Q(last_name__icontains=search_query) |
+                    Q(email__icontains=search_query) |
+                    Q(document_number__icontains=search_query)|
+                    Q(phone_number__icontains=search_query)
+                )
+
+            # Apply pagination
+            paginator = self.pagination_class()
+            paginated_qs = paginator.paginate_queryset(queryset, request)
+            serializer = CustomerSerializer(paginated_qs, many=True)
+
+            return paginator.get_paginated_response(serializer.data)
 
         @swagger_auto_schema(
             operation_summary="Create a new customer",
@@ -99,6 +223,203 @@ class CustomerManagementView(APIView):
 
 
 
+
+
+        # ---------- PATCH ----------
+        @swagger_auto_schema(
+            operation_summary="Update a customer",
+            operation_description="Partially updates a customer. Provide `id` query parameter and only the fields you want to update.",
+            tags=["customer"],
+            manual_parameters=[
+                openapi.Parameter(
+                    'id', openapi.IN_QUERY,
+                    description='Customer ID to update',
+                    type=openapi.TYPE_INTEGER,
+                    required=True
+                )
+            ],
+            request_body=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                    'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                    'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                    'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                    'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                    'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                    'status': openapi.Schema(type=openapi.TYPE_STRING),
+                }
+            ),
+            responses={
+                200: openapi.Response(
+                    description="Customer updated successfully",
+                    schema=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                            'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                            'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                            'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                            'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                            'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                            'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                            'status': openapi.Schema(type=openapi.TYPE_STRING),
+                            'created_by': openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True),
+                            'created_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                            'updated_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                        }
+                    )
+                ),
+                400: "Validation error",
+                404: "Customer not found",
+            }
+        )
+        def patch(self, request):
+            """
+            Partially update a customer by ID.
+            Example:
+            PATCH /v1/customer/manage/?id=3
+            """
+            customer_id = request.query_params.get('id') 
+            if not customer_id:
+                return Response(
+                    {"detail": "Customer ID is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            try:
+                customer = Customer.objects.get(id=customer_id)
+            except Customer.DoesNotExist:
+                return Response(
+                    {"detail": "Customer not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            serializer = CustomerSerializer(customer, data=request.data, partial=True, context={'request': request})
+            if serializer.is_valid():
+                updated_customer = serializer.save()
+                return Response(CustomerSerializer(updated_customer).data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+        # ---------- DELETE ----------
+        @swagger_auto_schema(
+            operation_summary="Delete a customer",
+            operation_description="Deletes a customer by ID. Provide the `id` query parameter.",
+            tags=["customer"],
+            manual_parameters=[
+                openapi.Parameter(
+                    'id', openapi.IN_QUERY,
+                    description='Customer ID to delete',
+                    type=openapi.TYPE_INTEGER,
+                    required=True
+                )
+            ],
+            responses={
+                204: "Customer deleted successfully",
+                404: "Customer not found",
+            }
+        )
+        def delete(self, request):
+            """
+            Delete a customer by ID.
+            Example:
+            DELETE /v1/customer/manage/?id=3
+            """
+            customer_id = request.query_params.get('id') 
+            if not customer_id:
+                return Response(
+                    {"detail": "Customer ID is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            try:
+                customer = Customer.objects.get(id=customer_id)
+                customer.delete()
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            except Customer.DoesNotExist:
+                return Response(
+                    {"detail": "Customer not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+
+
+
+
+
+class CustomerStatusUpdateView(APIView):
+    """
+    Update the status of a customer (ACTIVE, INACTIVE, BLOCKED)
+    """
+
+    permission_classes = [IsAuthenticatedUser]  
+
+    @swagger_auto_schema(
+        operation_summary="Update customer status (ACTIVE, INACTIVE, BLOCKED)",
+        operation_description="Updates a customer's status by providing the `id` query parameter and the new `status` in the request body.",
+        tags=["customer"],
+        manual_parameters=[
+            openapi.Parameter(
+                'id', openapi.IN_QUERY,
+                description='Customer ID to update',
+                type=openapi.TYPE_INTEGER,
+                required=True
+            )
+        ],
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['status'],
+            properties={
+                'status': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='New status for the customer (ACTIVE, INACTIVE, BLOCKED)'
+                )
+            }
+        ),
+        responses={
+            200: openapi.Response(
+                description="Customer status updated successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'status': openapi.Schema(type=openapi.TYPE_STRING),
+                    }
+                ),
+                examples={
+                    "application/json": {
+                        "id": 3,
+                        "status": "ACTIVE"
+                    }
+                }
+            ),
+            400: "Validation error",
+            404: "Customer not found",
+        }
+    )
+    def patch(self, request):
+        customer_id = request.query_params.get('id')
+        if not customer_id:
+            return Response({"detail": "Customer ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CustomerStatusSerializer(customer, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"id": customer.id, "status": serializer.data['status']}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
 # =================================
 # CREDIT SCORE CHECK VIEW
 # =================================
@@ -140,11 +461,11 @@ class CreditScoreCheckAPIView(APIView):
             ),
             404: openapi.Response(
                 description="Customer not found",
-                examples={"application/json": {"error": "Customer not found"}}
+                examples={"application/json": {"detail": "Customer not found"}}
             ),
             500: openapi.Response(
                 description="Failed to fetch credit score from Experian",
-                examples={"application/json": {"error": "Failed to fetch credit score from Experian"}}
+                examples={"application/json": {"detail": "Failed to fetch credit score from Experian"}}
             ),
         },
         manual_parameters=[
@@ -166,7 +487,7 @@ class CreditScoreCheckAPIView(APIView):
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
-            return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
 
         # 1️= Check if recent score exists (within 30 days)
         latest_score = customer.get_latest_credit_score()
@@ -177,7 +498,7 @@ class CreditScoreCheckAPIView(APIView):
         # 2️= Fetch new score from Experian
         experian_data = fetch_credit_score_from_experian(customer)
         if not experian_data:
-            return Response({"error": "Failed to fetch credit score from Experian"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"detail": "Failed to fetch credit score from Experian"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # 3️= Save new score in DB
 
