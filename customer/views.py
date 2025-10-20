@@ -9,11 +9,14 @@ from rest_framework.response import Response
 from rest_framework import status
 
 # Local  Imports
-from .models import Customer,CreditScore
+from .models import ( Customer,CreditScore,
+                     CreditConfig,
+                     )
 from .serializers import (
      CustomerSerializer,
      CreditScoreSerializer,
-     CustomerStatusSerializer
+     CustomerStatusSerializer,
+     CreditConfigSerializer,
      )
 from .utils import fetch_credit_score_from_experian
 
@@ -530,3 +533,76 @@ class CreditScoreCheckAPIView(APIView):
         return Response({"source": "experian", "credit_score": serializer.data})
 
 
+
+
+
+
+
+
+class CreditConfigAPIView(APIView):
+    # permission_classes = [permissions.IsAdminUser]
+    permission_classes=[]
+
+    @swagger_auto_schema(
+        operation_summary="Get current APC threshold",
+        operation_description="Fetch the current dynamic APC/Experian approval threshold value.",
+        responses={
+            200: openapi.Response(
+                description="Current APC threshold fetched successfully",
+                examples={
+                    "application/json": {
+                        "id": 1,
+                        "apc_approval_threshold": 500,
+                        "updated_at": "2025-10-20T14:30:00Z",
+                        "created_at": "2025-10-15T10:00:00Z"
+                    }
+                }
+            ),
+            404: openapi.Response(
+                description="Configuration not found",
+                examples={"application/json": {"detail": "No configuration found"}}
+            ),
+        },
+        tags=['credit-config']
+    )
+
+
+    def get(self, request):
+        config = CreditConfig.objects.first()
+        serializer = CreditConfigSerializer(config)
+        return Response(serializer.data)
+
+
+
+    @swagger_auto_schema(
+        operation_summary="Update APC threshold",
+        operation_description="Update the dynamic APC/Experian approval threshold value. Only one configuration row exists; updates are applied to it.",
+        request_body=CreditConfigSerializer,
+        responses={
+            200: openapi.Response(
+                description="APC threshold updated successfully",
+                examples={
+                    "application/json": {
+                        "id": 1,
+                        "apc_approval_threshold": 520,
+                        "updated_at": "2025-10-20T15:00:00Z",
+                        "created_at": "2025-10-15T10:00:00Z"
+                    }
+                }
+            ),
+            400: openapi.Response(
+                description="Validation error",
+                examples={"application/json": {"apc_approval_threshold": ["This field is required."]}}
+            ),
+        },
+        tags=['credit-config']
+        )
+
+
+    def patch(self, request):
+        config = CreditConfig.objects.first()
+        serializer = CreditConfigSerializer(config, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

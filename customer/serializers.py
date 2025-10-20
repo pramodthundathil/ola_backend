@@ -1,5 +1,7 @@
 from rest_framework import serializers
-from .models import  Customer,CreditScore
+from .models import ( Customer,CreditScore,
+                     CreditConfig,
+                     )
 
 
 
@@ -95,3 +97,13 @@ class CreditScoreSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+
+
+
+
+
+class CreditConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CreditConfig
+        fields = ['id', 'apc_approval_threshold', 'updated_at']       
