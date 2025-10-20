@@ -384,6 +384,7 @@ class FinancePlan(models.Model):
         self.minimum_down_payment_percentage = min_percentage
         return (self.device_price * min_percentage) / Decimal('100')
     
+
     def calculate_emi(self):
         """
         Calculate EMI (Interest-Free)
@@ -392,16 +393,18 @@ class FinancePlan(models.Model):
         """
         if self.selected_term and self.amount_to_finance:
             raw_emi = self.amount_to_finance / Decimal(str(self.selected_term))
-            # Round up to nearest whole number
             self.monthly_installment = raw_emi.quantize(Decimal('1'), rounding='ROUND_UP')
-            return self.monthly_installment
-        return Decimal('0')
+        else:
+            self.monthly_installment = Decimal('0') 
+        return self.monthly_installment
+
     
     def check_payment_capacity(self):
         """
         Check if EMI is within payment capacity
         Rule: monthly_installment ≤ k × monthly_income
         """
+
         rules = self.get_tier_rules()
         self.payment_capacity_factor = rules['payment_capacity_factor']
         
@@ -413,14 +416,17 @@ class FinancePlan(models.Model):
             self.customer_monthly_income * self.payment_capacity_factor
         )
         
-        if self.monthly_installment > 0:
+
+        if self.monthly_installment is not None and self.monthly_installment > 0:
             self.installment_to_income_ratio = (
                 (self.monthly_installment / self.customer_monthly_income) * Decimal('100')
             )
-        
-        self.payment_capacity_passed = (
-            self.monthly_installment <= self.maximum_allowed_installment
-        )
+        if self.monthly_installment is not None:
+            self.payment_capacity_passed = (
+                self.monthly_installment <= self.maximum_allowed_installment
+            )
+        else:
+            self.payment_capacity_passed = False    
         return self.payment_capacity_passed
     
     def validate_conditions(self):
@@ -460,31 +466,44 @@ class FinancePlan(models.Model):
         
         return self.conditions_met
     
+    
+
     def calculate_final_score(self, biometric_confidence=0, references_score=0, geo_behavior=0):
         """
         Calculate weighted final score
         Formula: 0.30*apc_norm + 0.30*capacity_norm + 0.20*biometric + 0.10*references + 0.10*geo
+        Fully debugged with prints for easy tracing.
         """
-        # Normalize APC score (500-800 range to 0-100)
-        apc_norm = min(100, max(0, ((self.apc_score - 500) / 300) * 100))
-        
-        # Normalize capacity (based on how much under limit)
-        if self.maximum_allowed_installment > 0:
-            capacity_norm = min(100, (
-                (self.maximum_allowed_installment - self.monthly_installment) / 
-                self.maximum_allowed_installment * 100
-            ))
+
+        # APC normalization (500-800 → 0-100)
+        apc_norm = min(100, max(0, ((float(self.apc_score) - 500) / 300) * 100))
+
+        # Capacity normalization
+        if self.maximum_allowed_installment > 0 and self.monthly_installment is not None:
+            # Convert both to float for safe calculation
+            max_installment_f = float(self.maximum_allowed_installment)
+            monthly_installment_f = float(self.monthly_installment)
+
+            capacity_norm = min(100, ((max_installment_f - monthly_installment_f) / max_installment_f * 100))
+
         else:
             capacity_norm = 0
+
+        # Convert biometric, references, geo_behavior to float to be safe
+        biometric_f = float(biometric_confidence)
+        references_f = float(references_score)
+        geo_f = float(geo_behavior)
         
+        # Calculate final score
         self.final_score = int(
             (0.30 * apc_norm) +
             (0.30 * capacity_norm) +
-            (0.20 * biometric_confidence) +
-            (0.10 * references_score) +
-            (0.10 * geo_behavior)
+            (0.20 * biometric_f) +
+            (0.10 * references_f) +
+            (0.10 * geo_f)
         )
-        
+
+
         # Determine score status
         if self.final_score >= 80:
             self.score_status = 'APPROVED'
@@ -492,9 +511,12 @@ class FinancePlan(models.Model):
             self.score_status = 'CONDITIONAL'
         else:
             self.score_status = 'REJECTED'
-        
+
         return self.final_score
-    
+
+
+
+
     def save(self, *args, **kwargs):
         # Auto-calculate fields before saving
         if self.apc_score:

@@ -16,6 +16,7 @@ Key Features:
 
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.exceptions import ValidationError
 # from django.contrib.auth.models import User
 from django.utils import timezone
 from datetime import timedelta
@@ -405,6 +406,39 @@ class CreditScore(models.Model):
         if self.apc_score is not None:
             return self.apc_score >= 500
         return False
+
+
+
+
+
+# ========================================
+# DYNAMIC CREDIT SCORE CONFIG MODEL 
+# ========================================
+
+
+class CreditConfig(models.Model):
+    """
+    Stores dynamic credit-related configuration values.
+    """
+    apc_approval_threshold = models.IntegerField(
+        default=500,
+        help_text="Minimum APC/Experian score required for approval"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'credit_config'
+
+    def save(self, *args, **kwargs):
+        if not self.pk and CreditConfig.objects.exists():
+            raise ValidationError("Only one CreditConfig row is allowed.")
+        super().save(*args, **kwargs)        
+
+    def __str__(self):
+        return f"APC Threshold: {self.apc_approval_threshold}"
+
+
 
 
 # ========================================

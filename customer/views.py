@@ -35,6 +35,7 @@ from drf_yasg import openapi
 
 # permisions
 from .permissions import IsAuthenticatedUser
+from products.permissions import IsAdminOrGlobalManager
 
 
 from rest_framework.pagination import PageNumberPagination
@@ -535,13 +536,17 @@ class CreditScoreCheckAPIView(APIView):
 
 
 
-
+# ==============================================
+# CREDIT CONFIG CHANGE VIEW (SET THRESHOLD VALUE)
+# =============================================
 
 
 
 class CreditConfigAPIView(APIView):
-    # permission_classes = [permissions.IsAdminUser]
-    permission_classes=[]
+    permission_classes=[IsAdminOrGlobalManager]
+    """
+    only get and update, adding by injecting to db directly
+    """
 
     @swagger_auto_schema(
         operation_summary="Get current APC threshold",
