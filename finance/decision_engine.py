@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from .models import FinancePlan
+from customer. models import DecisionEngineResult
 
 
 class DecisionEngine:
@@ -44,6 +45,10 @@ class DecisionEngine:
 
         # Save final results
         self.plan.save()
+        
+        # 9️⃣ Save detailed result in DecisionEngineResult
+        self.save_decision_result()
+
         return self.plan
 
     def dynamic_adjustment(self):
@@ -81,3 +86,57 @@ class DecisionEngine:
             self.plan.check_payment_capacity()
             self.plan.validate_conditions()
             self.plan.calculate_final_score()
+
+    """
+    for save decision result in customer/DecisionEngineResult model
+    """
+
+    def save_decision_result(self):
+        """Create and save a DecisionEngineResult from the FinancePlan"""
+        result, created = DecisionEngineResult.objects.update_or_create(
+            credit_application=self.plan.credit_application,
+            defaults={
+                # 1️⃣ APC Score
+                'apc_score_value': self.plan.apc_score,
+                'apc_score_passed': self.plan.risk_tier != 'TIER_D',
+
+                # 2️⃣ Internal Score
+                'internal_score_value': getattr(self.plan, 'internal_score', None),
+                'internal_score_passed': getattr(self.plan, 'internal_score_passed', False),
+
+                # 3️⃣ Identity Validation
+                'document_valid': getattr(self.plan, 'document_valid', False),
+                'biometric_valid': getattr(self.plan, 'biometric_valid', False),
+                'liveness_check_passed': getattr(self.plan, 'liveness_check_passed', False),
+                'identity_validation_passed': getattr(self.plan, 'identity_validation_passed', False),
+
+                # 4️⃣ Payment Capacity
+                'income_amount': self.plan.customer_monthly_income,
+                'installment_amount': self.plan.monthly_installment,
+                'installment_to_income_ratio': self.plan.installment_to_income_ratio,
+                'payment_capacity_passed': self.plan.payment_capacity_passed,
+
+                # 5️⃣ Personal References
+                'valid_references_count': getattr(self.plan, 'valid_references_count', 0),
+                'references_passed': getattr(self.plan, 'references_passed', False),
+
+                # 6️⃣ Anti-fraud
+                'duplicate_id_check': getattr(self.plan, 'duplicate_id_check', True),
+                'duplicate_phone_check': getattr(self.plan, 'duplicate_phone_check', True),
+                'duplicate_imei_check': getattr(self.plan, 'duplicate_imei_check', True),
+                'anti_fraud_passed': getattr(self.plan, 'anti_fraud_passed', False),
+                'anti_fraud_notes': getattr(self.plan, 'anti_fraud_notes', ''),
+
+                # 7️⃣ Commercial Conditions
+                'initial_payment_percentage': self.plan.down_payment_percentage,
+                'loan_term_months': self.plan.selected_term,
+                'is_high_end_device': self.plan.is_high_end_device,
+                'commercial_conditions_passed': getattr(self.plan, 'conditions_met', False),
+
+                # Final Decision
+                'total_score': getattr(self.plan, 'final_score', 0),
+                'final_decision': self.plan.score_status or 'REJECTED',
+                'rejection_reasons': getattr(self.plan, 'rejection_reasons', []),
+            }
+        )
+        return result

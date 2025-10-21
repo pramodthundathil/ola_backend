@@ -1,12 +1,14 @@
 # Django Imports
 from django.conf import settings
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 
 
 # Django REST Framework Imports
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+
 
 # Local  Imports
 from .models import ( Customer,CreditScore,
@@ -481,7 +483,7 @@ class CreditScoreCheckAPIView(APIView):
                 required=True
             ),
         ],
-        tags=['customer']
+        tags=['credit']
     )
 
 
@@ -535,19 +537,19 @@ class CreditScoreCheckAPIView(APIView):
 
 
 
-
 # ==============================================
-# CREDIT CONFIG CHANGE VIEW (SET THRESHOLD VALUE)
+# CREDIT CONFIG GET VIEW (VIEW THRESHOLD VALUE)
 # =============================================
 
 
 
-class CreditConfigAPIView(APIView):
-    permission_classes=[IsAdminOrGlobalManager]
-    """
-    only get and update, adding by injecting to db directly
-    """
 
+class CreditConfigGetAPIView(APIView):
+    permission_classes=[IsAuthenticatedUser]
+    """
+    only get method, permission for all authanticated users
+    """
+    
     @swagger_auto_schema(
         operation_summary="Get current APC threshold",
         operation_description="Fetch the current dynamic APC/Experian approval threshold value.",
@@ -568,7 +570,7 @@ class CreditConfigAPIView(APIView):
                 examples={"application/json": {"detail": "No configuration found"}}
             ),
         },
-        tags=['credit-config']
+        tags=['credit']
     )
 
 
@@ -576,6 +578,64 @@ class CreditConfigAPIView(APIView):
         config = CreditConfig.objects.first()
         serializer = CreditConfigSerializer(config)
         return Response(serializer.data)
+
+
+
+
+# ==============================================
+# CREDIT CONFIG CHANGE VIEW (SET THRESHOLD VALUE)
+# =============================================
+
+
+
+class CreditConfigChangeAPIView(APIView):
+    permission_classes=[IsAdminOrGlobalManager]
+    """
+    only post and patch, post only one time, permission for admin and global manager
+    """
+    @swagger_auto_schema(
+        operation_summary="Create APC threshold configuration",
+        operation_description="Create a new CreditConfig row. Only one configuration is allowed; will return 400 if it already exists.",
+        request_body=CreditConfigSerializer,
+        responses={
+            201: openapi.Response(
+                description="CreditConfig created successfully",
+                examples={
+                    "application/json": {
+                        "id": 1,
+                        "apc_approval_threshold": 500,
+                        "updated_at": "2025-10-21T12:00:00Z"
+                    }
+                }
+            ),
+            400: openapi.Response(
+                description="Configuration already exists or validation error",
+                examples={"application/json": {"detail": "CreditConfig already exists. Only one row allowed."}}
+            ),
+        },
+        tags=['credit']
+    )
+
+
+
+    def post(self, request):
+        # Check if a config already exists
+        if CreditConfig.objects.exists():
+            return Response(
+                {"detail": "CreditConfig already exists. Only one row allowed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = CreditConfigSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            except ValidationError as e:
+                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 

@@ -476,13 +476,13 @@ class FinancePlan(models.Model):
         """
 
         # APC normalization (500-800 → 0-100)
-        apc_norm = min(100, max(0, ((float(self.apc_score) - 500) / 300) * 100))
+        apc_norm = min(100, max(0, ((Decimal(self.apc_score) - 500) / 300) * 100))
 
         # Capacity normalization
         if self.maximum_allowed_installment > 0 and self.monthly_installment is not None:
             # Convert both to float for safe calculation
-            max_installment_f = float(self.maximum_allowed_installment)
-            monthly_installment_f = float(self.monthly_installment)
+            max_installment_f = Decimal(self.maximum_allowed_installment)
+            monthly_installment_f = Decimal(self.monthly_installment)
 
             capacity_norm = min(100, ((max_installment_f - monthly_installment_f) / max_installment_f * 100))
 
@@ -490,9 +490,9 @@ class FinancePlan(models.Model):
             capacity_norm = 0
 
         # Convert biometric, references, geo_behavior to float to be safe
-        biometric_f = float(biometric_confidence)
-        references_f = float(references_score)
-        geo_f = float(geo_behavior)
+        biometric_f = Decimal(biometric_confidence)
+        references_f = Decimal(references_score)
+        geo_f = Decimal(geo_behavior)
         
         # Calculate final score
         self.final_score = int(
