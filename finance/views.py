@@ -3,6 +3,8 @@
 # Standard Library Imports
 # ============================================================
 import logging
+from decimal import Decimal
+from datetime import timedelta
 
 # ============================================================
 # Django Imports
@@ -381,3 +383,116 @@ class PaymentRecordListCreateView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
+
+# --------------------------------------
+# EMI Payment View
+# --------------------------------------
+class FinanceInstallmentPaymentView(APIView):
+    """
+    Handles EMI payment updates and rescheduling logic for Finance Plans.
+    """
+
+    @swagger_auto_schema(
+        operation_summary="Create EMI Payment and Reschedule Future EMIs",
+        operation_description=(
+            "Records a payment for a specific EMI installment. "
+            "If the payment is late, it deletes all future pending EMIs and regenerates them "
+            "starting 15 days after the actual payment date.\n\n"
+            "**Business Rules:**\n"
+            "- Normal case → next EMIs every 15 days\n"
+            "- If EMI is missed (Overdue) → schedule pauses\n"
+            "- Once overdue EMI is paid → next EMI = 15 days after payment\n"
+            "- Schedule resumes every 15 days"
+        ),
+        request_body=PaymentRecordSerializer,
+        responses={
+            200: "Payment recorded successfully and EMI schedule updated.",
+            400: "Bad Request — Invalid data or duplicate payment.",
+            404: "EMI schedule not found.",
+            500: "Internal Server Error",
+        },
+        tags=["Finance"]
+    )
+    def post(self, request, emi_id):
+        """
+        Record payment for a specific EMI and handle rescheduling logic.
+        """
+        try:
+            emi = EMISchedule.objects.select_related('finance_plan').get(id=emi_id)
+            plan = emi.finance_plan
+
+            amount_paid = Decimal(request.data.get('amount_paid', '0.00'))
+            payment_method = request.data.get('payment_method', 'OTHER')
+
+            if emi.status == 'PAID':
+                return Response({"message": "This EMI is already paid."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # ---- Create Payment Record ----
+            payment = PaymentRecord.objects.create(
+                finance_plan=plan,
+                emi_schedule=emi,
+                payment_type='EMI',
+                payment_method=payment_method,
+                payment_amount=amount_paid,
+                payment_date=timezone.now(),
+                payment_status='COMPLETED',
+                processed_by=request.user if request.user.is_authenticated else None,
+                notes=f"Payment for EMI #{emi.installment_number}"
+            )
+
+            # ---- Update EMI ----
+            emi.amount_paid += amount_paid
+            emi.update_status()
+            emi.paid_date = timezone.now().date()
+            emi.save()
+
+            logger.info(f"EMI #{emi.installment_number} paid for plan {plan.id} on {emi.paid_date}")
+
+            # ---- Check for Late Payment ----
+            if emi.due_date < emi.paid_date:
+                logger.warning(f"EMI #{emi.installment_number} was late. Rescheduling future EMIs...")
+
+                # Delete all upcoming unpaid EMIs
+                future_emis = plan.emi_schedule.filter(
+                    installment_number__gt=emi.installment_number
+                ).exclude(status='PAID')
+                deleted_count, _ = future_emis.delete()
+
+                logger.info(f"Deleted {deleted_count} future EMIs for plan {plan.id}")
+
+                # Recreate from new base date
+                next_emi_date = emi.paid_date + timedelta(days=15)
+                self.generate_future_emis(plan, next_emi_date, emi.installment_number + 1)
+
+            return Response(
+                {"message": "Payment recorded successfully and EMI schedule updated."},
+                status=status.HTTP_200_OK
+            )
+        
+        except EMISchedule.DoesNotExist:
+            logger.error("EMI schedule not found.")
+            return Response({"error": "EMI schedule not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            logger.exception("Error processing EMI payment.")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+    def generate_future_emis(self, plan, start_date, start_number):
+        """
+        Dynamically generate future EMIs every 15 days after a late payment.
+        """
+        total_installments = plan.selected_term
+        emi_amount = plan.monthly_installment
+
+        for i in range(start_number, total_installments + 1):
+            EMISchedule.objects.create(
+                finance_plan=plan,
+                installment_number=i,
+                due_date=start_date,
+                installment_amount=emi_amount,
+                balance_remaining=emi_amount,
+                status='UPCOMING'
+            )
+            start_date += timedelta(days=15)
+        logger.info(f"Regenerated EMIs #{start_number}–{total_installments} for plan {plan.id}")
