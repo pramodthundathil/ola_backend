@@ -10,4 +10,6 @@ urlpatterns = [
     path('brand/<int:pk>/', views.ProductBrandDetailView.as_view(), name='brand-detail'),
     path('model/', views.ProductModelListCreateView.as_view(), name='product-model'),
     path('model/<int:pk>/', views.ProductModelDetailView.as_view(), name='model-detail'),
+    path('product-models/<int:pk>/update-prices/', views.ProductModelPriceUpdateView.as_view(), name='productmodel-update-prices'),
+
 ]
