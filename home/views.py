@@ -302,19 +302,103 @@ def verify_otp_and_login(request):
     )
 
 
-# ==================== USER REGISTRATION (ADMIN ONLY) ====================
+# # ==================== USER REGISTRATION (ADMIN ONLY) ====================
+# @swagger_auto_schema(
+#     method='post',
+#     operation_summary="Register New User (Admin Only)",
+#     operation_description="Admin creates a new user account. OTP will be sent for verification.",
+#     request_body=UserRegistrationSerializer,
+#     responses={
+#         200: openapi.Response(
+#             description="Registration initiated successfully",
+#             examples={
+#                 "application/json": {
+#                     "message": "Registration initiated successfully. OTP sent for verification.",
+#                     "identifier": "newuser@example.com"
+#                 }
+#             }
+#         ),
+#         400: "Invalid data or user already exists",
+#         403: "Admin access required"
+#     },
+#     tags=['User Management']
+# )
+# @api_view(['POST'])
+# @permission_classes([IsAdminUser])
+# def admin_create_user(request):
+#     """
+#     Admin-only endpoint to create new users.
+#     Sends OTP for email/phone verification.
+#     """
+#     email = request.data.get('email')
+#     phone = request.data.get('phone')
+    
+#     # Validate required fields
+#     if not email and not phone:
+#         return Response(
+#             {"error": "Email or phone number is required."},
+#             status=status.HTTP_400_BAD_REQUEST
+#         )
+    
+#     # Check if user already exists
+#     if email and User.objects.filter(email=email).exists():
+#         return Response(
+#             {"error": "A user with this email already exists."},
+#             status=status.HTTP_400_BAD_REQUEST
+#         )
+    
+#     if phone and User.objects.filter(phone=phone).exists():
+#         return Response(
+#             {"error": "A user with this phone number already exists."},
+#             status=status.HTTP_400_BAD_REQUEST
+#         )
+    
+#     # Validate data
+#     serializer = UserRegistrationSerializer(data=request.data)
+#     if not serializer.is_valid():
+#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+#     # Store registration data in cache
+#     identifier = email if email else phone
+#     cache.set(f'registration_data_{identifier}', request.data.copy(), timeout=600)
+    
+    
+#     # Generate and send OTP
+#     success, message = generate_and_send_otp(identifier, is_registration=True)
+    
+#     if success:
+#         return Response(
+#             {
+#                 "message": "Registration initiated successfully. OTP sent for verification.",
+#                 "detail": message,
+#                 "identifier": identifier
+#             },
+#             status=status.HTTP_200_OK
+#         )
+#     else:
+#         return Response(
+#             {"error": message},
+#             status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#         )
+
+
+# ==================== Updated User Registration (Temperory)====================
 @swagger_auto_schema(
     method='post',
     operation_summary="Register New User (Admin Only)",
-    operation_description="Admin creates a new user account. OTP will be sent for verification.",
+    operation_description="Admin creates a new user account directly (no OTP).",
     request_body=UserRegistrationSerializer,
     responses={
-        200: openapi.Response(
-            description="Registration initiated successfully",
+        201: openapi.Response(
+            description="User created successfully",
             examples={
                 "application/json": {
-                    "message": "Registration initiated successfully. OTP sent for verification.",
-                    "identifier": "newuser@example.com"
+                    "message": "User created successfully",
+                    "user": {
+                        "id": "uuid",
+                        "email": "newuser@example.com",
+                        "role": "salesperson"
+                    }
                 }
             }
         ),
@@ -324,61 +408,59 @@ def verify_otp_and_login(request):
     tags=['User Management']
 )
 @api_view(['POST'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAdminUser]) 
 def admin_create_user(request):
     """
     Admin-only endpoint to create new users.
-    Sends OTP for email/phone verification.
+    Directly saves the user to the database (no OTP verification).
     """
     email = request.data.get('email')
     phone = request.data.get('phone')
-    
+
     # Validate required fields
     if not email and not phone:
         return Response(
             {"error": "Email or phone number is required."},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
+
     # Check if user already exists
     if email and User.objects.filter(email=email).exists():
         return Response(
             {"error": "A user with this email already exists."},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
+
     if phone and User.objects.filter(phone=phone).exists():
         return Response(
             {"error": "A user with this phone number already exists."},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # Validate data
+
+    # Validate serializer
     serializer = UserRegistrationSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Store registration data in cache
-    identifier = email if email else phone
-    cache.set(f'registration_data_{identifier}', request.data.copy(), timeout=600)
-    
-    # Generate and send OTP
-    success, message = generate_and_send_otp(identifier, is_registration=True)
-    
-    if success:
-        return Response(
-            {
-                "message": "Registration initiated successfully. OTP sent for verification.",
-                "detail": message,
-                "identifier": identifier
-            },
-            status=status.HTTP_200_OK
-        )
-    else:
-        return Response(
-            {"error": message},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+
+    # Save user directly
+    user = serializer.save()
+    user.is_verified = True  # Mark as verified since we’re skipping OTP
+    user.save()
+
+    return Response(
+        {
+            "message": "User created successfully.",
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "role": user.role,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "phone": user.phone,
+            }
+        },
+        status=status.HTTP_201_CREATED
+    )
 
 
 # ==================== VERIFY REGISTRATION OTP ====================
