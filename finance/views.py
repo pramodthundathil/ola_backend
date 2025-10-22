@@ -31,7 +31,7 @@ from drf_yasg.utils import swagger_auto_schema
 from .models import FinancePlan, PaymentRecord, EMISchedule
 from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
-
+from .decision_engine import DecisionEngine
 # ============================================================
 # Logger Setup
 # ============================================================
@@ -55,7 +55,7 @@ class FinancePlanView(APIView):
     - GET: List all finance plans (with pagination)
     - POST: Create a new finance plan
     """
-    permission_classes = [IsAdminOrGlobalManager]
+    permission_classes = [AllowAny]
     serializer_class = FinancePlanSerializer 
  
     @swagger_auto_schema(
@@ -92,11 +92,18 @@ class FinancePlanView(APIView):
     )    
     def post(self, request):
         try:
+
             serializer = self.serializer_class(data=request.data)
             if serializer.is_valid():
-                serializer.save()
+
+                # Create the FinancePlan instance (initial save)
+                plan = serializer.save()
+
+                # Run Decision Engine for risk assessment & EMI calculation
+                engine = DecisionEngine(plan)
+                engine.run()   # executes decision logic
                 return Response(
-                    {"message": "Finance Plan created successfully.", "data": serializer.data},
+                    { "message": "Finance Plan created successfully and evaluated by Decision Engine.", "data": serializer.data},
                     status=status.HTTP_201_CREATED
                 )
             logger.warning(f"Finance Plan creation failed: {serializer.errors}")

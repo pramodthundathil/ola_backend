@@ -8,12 +8,17 @@ from .models import FinancePlan, EMISchedule, PaymentRecord
 class FinancePlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinancePlan
-        fields = '__all__'
-        read_only_fields = [
-            'risk_tier', 'monthly_installment', 'total_amount_payable',
-            'conditions_met', 'requires_adjustment', 'adjustment_notes',
-            'final_score', 'score_status', 'allowed_terms'
+        fields = [
+            'credit_application',
+            'credit_score',
+            'apc_score',
+            'device_price',
+            'is_high_end_device',
+            'selected_term',
+            'customer_monthly_income',
+            'payment_capacity_factor',
         ]
+        read_only_fields = []
 
     def create(self, validated_data):
         finance_plan = FinancePlan.objects.create(**validated_data)
