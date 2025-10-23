@@ -1,6 +1,7 @@
 from django.db import models 
-from customer.models import CreditApplication, Customer
 from django.contrib.auth import get_user_model
+from datetime import timedelta
+from customer.models import CreditApplication, Customer
 
 User = get_user_model()
 
@@ -641,7 +642,7 @@ class EMISchedule(models.Model):
         return self.status
     
     @classmethod
-    def generate_schedule(cls, finance_plan, first_due_date):
+    def generate_schedule_emi(cls, finance_plan, first_due_date):
         """
         Generate complete EMI schedule for a finance plan
         
@@ -666,6 +667,28 @@ class EMISchedule(models.Model):
         # Bulk create all schedules
         cls.objects.bulk_create(schedules)
         return schedules
+    
+    @classmethod
+    def generate_schedule(cls, finance_plan, first_due_date):
+        """
+        Generate EMI schedule — supports 15-day (biweekly) payments.
+        """
+        schedules = []
+
+        for i in range(1, finance_plan.selected_term + 1):
+            due_date = first_due_date + timedelta(days=(i - 1) * 15)
+            schedule = cls(
+                finance_plan=finance_plan,
+                installment_number=i,
+                due_date=due_date,
+                installment_amount=finance_plan.monthly_installment,
+                balance_remaining=finance_plan.monthly_installment
+            )
+            schedules.append(schedule)
+
+        cls.objects.bulk_create(schedules)
+        return schedules
+        
 
 
 # ========================================
