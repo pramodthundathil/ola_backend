@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('customer', '0002_alter_creditscore_max_installment_capacity'),
+        
         ('customer', '0002_remove_paymentrecord_credit_application_and_more'),
     ]
 
