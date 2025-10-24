@@ -1,7 +1,18 @@
-from django.urls import path
+from django.urls import path, include
 from .import views
+from rest_framework.routers import DefaultRouter
+
+from .views import StoreManagerViewSet, SalespersonViewSet
+
+# Create router and register viewsets
+router = DefaultRouter()
+router.register(r'store-managers', StoreManagerViewSet, basename='store-manager')
+router.register(r'salespersons', SalespersonViewSet, basename='salesperson')
 
 urlpatterns = [
+     path('', include(router.urls)),
+    
+
     # Authentication
     path('api/token/', views.MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/generate-otp/', views.generate_otp, name='generate-otp'),

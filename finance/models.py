@@ -9,79 +9,79 @@ User = get_user_model()
 # PAYMENT RECORD MODEL
 # ========================================
 
-class PaymentRecord(models.Model):
-    """
-    Tracks all payments made by customers.
+# class PaymentRecord(models.Model):
+#     """
+#     Tracks all payments made by customers.
     
-    Payment Methods:
-    - Punto Pago
-    - Yappy
-    - Western Union
-    """
+#     Payment Methods:
+#     - Punto Pago
+#     - Yappy
+#     - Western Union
+#     """
     
-    PAYMENT_METHOD_CHOICES = [
-        ('PUNTO_PAGO', 'Punto Pago'),
-        ('YAPPY', 'Yappy'),
-        ('WESTERN_UNION', 'Western Union'),
-        ('CASH', 'Cash'),
-        ('OTHER', 'Other'),
-    ]
+#     PAYMENT_METHOD_CHOICES = [
+#         ('PUNTO_PAGO', 'Punto Pago'),
+#         ('YAPPY', 'Yappy'),
+#         ('WESTERN_UNION', 'Western Union'),
+#         ('CASH', 'Cash'),
+#         ('OTHER', 'Other'),
+#     ]
     
-    PAYMENT_STATUS_CHOICES = [
-        ('PENDING', 'Pending'),
-        ('COMPLETED', 'Completed'),
-        ('FAILED', 'Failed'),
-        ('REFUNDED', 'Refunded'),
-    ]
+#     PAYMENT_STATUS_CHOICES = [
+#         ('PENDING', 'Pending'),
+#         ('COMPLETED', 'Completed'),
+#         ('FAILED', 'Failed'),
+#         ('REFUNDED', 'Refunded'),
+#     ]
     
-   # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    credit_application = models.ForeignKey(
-        CreditApplication,
-        on_delete=models.CASCADE,
-        related_name='payments'
-    )
+#    # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+#     credit_application = models.ForeignKey(
+#         CreditApplication,
+#         on_delete=models.CASCADE,
+#         related_name='payments'
+#     )
     
-    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
-    payment_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    payment_date = models.DateTimeField()
-    payment_status = models.CharField(
-        max_length=20,
-        choices=PAYMENT_STATUS_CHOICES,
-        default='PENDING'
-    )
+#     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
+#     payment_amount = models.DecimalField(max_digits=10, decimal_places=2)
+#     payment_date = models.DateTimeField()
+#     payment_status = models.CharField(
+#         max_length=20,
+#         choices=PAYMENT_STATUS_CHOICES,
+#         default='PENDING'
+#     )
     
-    transaction_reference = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="External payment reference number"
-    )
+#     transaction_reference = models.CharField(
+#         max_length=100,
+#         null=True,
+#         blank=True,
+#         help_text="External payment reference number"
+#     )
     
-    is_initial_payment = models.BooleanField(
-        default=False,
-        help_text="True if this is the initial/down payment"
-    )
-    installment_number = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="Which installment number this payment covers"
-    )
+#     is_initial_payment = models.BooleanField(
+#         default=False,
+#         help_text="True if this is the initial/down payment"
+#     )
+#     installment_number = models.IntegerField(
+#         null=True,
+#         blank=True,
+#         help_text="Which installment number this payment covers"
+#     )
     
-    notes = models.TextField(null=True, blank=True)
+#     notes = models.TextField(null=True, blank=True)
     
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
     
-    class Meta:
-        db_table = 'payment_records'
-        ordering = ['-payment_date']
-        indexes = [
-            models.Index(fields=['credit_application', '-payment_date']),
-            models.Index(fields=['payment_status']),
-        ]
+#     class Meta:
+#         db_table = 'payment_records'
+#         ordering = ['-payment_date']
+#         indexes = [
+#             models.Index(fields=['credit_application', '-payment_date']),
+#             models.Index(fields=['payment_status']),
+#         ]
     
-    def __str__(self):
-        return f"Payment {self.payment_amount} for App {self.credit_application.id}"
+#     def __str__(self):
+#         return f"Payment {self.payment_amount} for App {self.credit_application.id}"
 
 
 # ========================================

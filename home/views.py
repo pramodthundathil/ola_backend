@@ -82,9 +82,13 @@ from .serializers import (
     UserSerializer,
     UserRegistrationSerializer,
     ChangePasswordSerializer,
-    UserProfileUpdateSerializer
+    UserProfileUpdateSerializer,
+    StoreManagerSerializerCreate,
+    SalespersonSerializerCreate,
+    StoreManagerListSerializer,
+    SalespersonListSerializer
 )
-from .permissions import IsAdminUser
+from .permissions import IsAdminUser, IsStoreManager
 
 
 import logging
@@ -915,3 +919,706 @@ def generate_and_send_otp(identifier, is_registration=False):
 
 
 
+#======================create store manager and sales persons ===============================
+
+
+
+class CanManageStoreManagerPermission(permissions.BasePermission):
+    """
+    Custom permission for managing store managers.
+    Only Global Managers, Financial Managers, Sales Advisors, and Admins can manage.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        allowed_roles = [
+            User.GLOBAL_MANAGER,
+            User.FINANCIAL_MANAGER,
+            User.SALES_ADVISOR,
+            User.ADMIN
+        ]
+        
+        return request.user.role in allowed_roles
+
+
+class StoreManagerViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing Store Managers.
+    
+    Permissions:
+    - CREATE: Global Managers, Financial Managers, Sales Advisors, and Admins
+    - LIST/RETRIEVE: Same as above
+    - UPDATE/DELETE: Same as above
+    """
+    queryset = User.objects.filter(role=User.STORE_MANAGER)
+    permission_classes = [permissions.IsAuthenticated, CanManageStoreManagerPermission]
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return StoreManagerSerializerCreate
+        return StoreManagerListSerializer
+    
+    def get_queryset(self):
+        """
+        Filter queryset based on user role.
+        """
+        user = self.request.user
+        queryset = super().get_queryset()
+        
+        # Admins and Global Managers see all store managers
+        if user.role in [User.ADMIN, User.GLOBAL_MANAGER, User.FINANCIAL_MANAGER]:
+            return queryset
+        
+        # Sales Advisors see store managers from their advised stores
+        if user.role == User.SALES_ADVISOR:
+            advised_stores = Store.objects.filter(sales_advisor=user)
+            return queryset.filter(store__in=advised_stores)
+        
+        return queryset.none()
+    
+    @swagger_auto_schema(
+        operation_description="Create a new store manager and assign to a store",
+        operation_summary="Create Store Manager",
+        request_body=StoreManagerSerializerCreate,
+        responses={
+            201: openapi.Response(
+                description="Store manager created successfully",
+                examples={
+                    "application/json": {
+                        "message": "Store manager created successfully.",
+                        "data": {
+                            "id": 1,
+                            "email": "john.manager@example.com",
+                            "full_name": "John Manager",
+                            "first_name": "John",
+                            "last_name": "Manager",
+                            "phone": "+5071234567",
+                            "employee_id": "EMP001",
+                            "store_name": "Downtown Store",
+                            "store_code": "DS001",
+                            "is_active": True,
+                            "date_joined": "2025-10-24T10:30:00Z"
+                        }
+                    }
+                }
+            ),
+            400: "Bad Request - Validation errors or store already has a manager",
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Store Managers']
+    )
+    def create(self, request, *args, **kwargs):
+        """Create a new store manager."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        store_manager = serializer.save()
+        
+        # Return with list serializer
+        output_serializer = StoreManagerListSerializer(store_manager)
+        return Response(
+            {
+                "message": "Store manager created successfully.",
+                "data": output_serializer.data
+            },
+            status=status.HTTP_201_CREATED
+        )
+    
+    @swagger_auto_schema(
+        operation_description="Get a list of all store managers (filtered by user permissions)",
+        operation_summary="List Store Managers",
+        responses={
+            200: StoreManagerListSerializer(many=True),
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Store Managers']
+    )
+    def list(self, request, *args, **kwargs):
+        """List all store managers based on user permissions."""
+        return super().list(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_description="Get details of a specific store manager",
+        operation_summary="Retrieve Store Manager",
+        responses={
+            200: StoreManagerListSerializer(),
+            404: "Not Found - Store manager doesn't exist",
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Store Managers']
+    )
+    def retrieve(self, request, *args, **kwargs):
+        """Retrieve a specific store manager."""
+        return super().retrieve(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_description="Update store manager details (partial update supported)",
+        operation_summary="Update Store Manager",
+        request_body=StoreManagerListSerializer,
+        responses={
+            200: openapi.Response(
+                description="Store manager updated successfully",
+                examples={
+                    "application/json": {
+                        "message": "Store manager updated successfully.",
+                        "data": {
+                            "id": 1,
+                            "email": "john.manager@example.com",
+                            "full_name": "John Manager",
+                            "phone": "+5079876543"
+                        }
+                    }
+                }
+            ),
+            400: "Bad Request - Cannot change role through this endpoint",
+            404: "Not Found - Store manager doesn't exist",
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Store Managers']
+    )
+    def update(self, request, *args, **kwargs):
+        """Update store manager (password excluded)."""
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        
+        # Don't allow changing role or store through this endpoint
+        if 'role' in request.data:
+            return Response(
+                {"error": "Cannot change user role through this endpoint."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        serializer = StoreManagerListSerializer(
+            instance,
+            data=request.data,
+            partial=partial
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        
+        return Response({
+            "message": "Store manager updated successfully.",
+            "data": serializer.data
+        })
+    
+    @swagger_auto_schema(
+        operation_description="Partially update store manager details",
+        operation_summary="Partial Update Store Manager",
+        request_body=StoreManagerListSerializer,
+        responses={
+            200: "Store manager updated successfully",
+            400: "Bad Request",
+            404: "Not Found",
+            403: "Forbidden",
+            401: "Unauthorized"
+        },
+        tags=['Store Managers']
+    )
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update of store manager."""
+        return self.update(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_description="Soft delete by deactivating the store manager",
+        operation_summary="Delete Store Manager",
+        responses={
+            200: openapi.Response(
+                description="Store manager deactivated successfully",
+                examples={
+                    "application/json": {
+                        "message": "Store manager John Manager deactivated successfully."
+                    }
+                }
+            ),
+            404: "Not Found - Store manager doesn't exist",
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Store Managers']
+    )
+    def destroy(self, request, *args, **kwargs):
+        """Soft delete by deactivating the store manager."""
+        instance = self.get_object()
+        instance.is_active = False
+        instance.save()
+        
+        return Response(
+            {"message": f"Store manager {instance.get_full_name()} deactivated successfully."},
+            status=status.HTTP_200_OK
+        )
+    
+    @swagger_auto_schema(
+        method='post',
+        operation_description="Deactivate a store manager",
+        operation_summary="Deactivate Store Manager",
+        responses={
+            200: openapi.Response(
+                description="Store manager deactivated",
+                examples={
+                    "application/json": {
+                        "message": "Store manager John Manager deactivated successfully."
+                    }
+                }
+            ),
+            404: "Not Found",
+            403: "Forbidden",
+            401: "Unauthorized"
+        },
+        tags=['Store Managers']
+    )
+    @action(detail=True, methods=['post'], url_path='deactivate')
+    def deactivate(self, request, pk=None):
+        """Deactivate a store manager."""
+        store_manager = self.get_object()
+        store_manager.is_active = False
+        store_manager.save()
+        
+        return Response(
+            {"message": f"Store manager {store_manager.get_full_name()} deactivated successfully."},
+            status=status.HTTP_200_OK
+        )
+    
+    @swagger_auto_schema(
+        method='post',
+        operation_description="Activate a store manager",
+        operation_summary="Activate Store Manager",
+        responses={
+            200: openapi.Response(
+                description="Store manager activated",
+                examples={
+                    "application/json": {
+                        "message": "Store manager John Manager activated successfully."
+                    }
+                }
+            ),
+            404: "Not Found",
+            403: "Forbidden",
+            401: "Unauthorized"
+        },
+        tags=['Store Managers']
+    )
+    @action(detail=True, methods=['post'], url_path='activate')
+    def activate(self, request, pk=None):
+        """Activate a store manager."""
+        store_manager = self.get_object()
+        store_manager.is_active = True
+        store_manager.save()
+        
+        return Response(
+            {"message": f"Store manager {store_manager.get_full_name()} activated successfully."},
+            status=status.HTTP_200_OK
+        )
+    
+    @swagger_auto_schema(
+        method='get',
+        operation_description="Get all salespersons under this store manager",
+        operation_summary="Get Store Manager's Salespersons",
+        responses={
+            200: openapi.Response(
+                description="List of salespersons",
+                examples={
+                    "application/json": {
+                        "store": {
+                            "id": "550e8400-e29b-41d4-a716-446655440000",
+                            "name": "Downtown Store",
+                            "code": "DS001"
+                        },
+                        "total_salespersons": 2,
+                        "salespersons": []
+                    }
+                }
+            ),
+            400: "Bad Request - Store manager not assigned to store",
+            404: "Not Found",
+            403: "Forbidden",
+            401: "Unauthorized"
+        },
+        tags=['Store Managers']
+    )
+    @action(detail=True, methods=['get'], url_path='salespersons')
+    def get_salespersons(self, request, pk=None):
+        """Get all salespersons under this store manager."""
+        store_manager = self.get_object()
+        
+        if not store_manager.store:
+            return Response(
+                {"error": "Store manager is not assigned to any store."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        salespersons = User.objects.filter(
+            role=User.SALESPERSON,
+            store=store_manager.store,
+            is_active=True
+        )
+        
+        serializer = SalespersonListSerializer(salespersons, many=True)
+        return Response({
+            "store": {
+                "id": store_manager.store.id,
+                "name": store_manager.store.name,
+                "code": store_manager.store.code
+            },
+            "total_salespersons": salespersons.count(),
+            "salespersons": serializer.data
+        })
+
+
+class SalespersonViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing Salespersons.
+    
+    Permissions:
+    - CREATE: Store Managers only (automatically assigns to their store)
+    - LIST/RETRIEVE: Store Managers (their store), Global Managers, Financial Managers, Admins
+    - UPDATE/DELETE: Store Managers (their store), Global Managers, Admins
+    """
+    queryset = User.objects.filter(role=User.SALESPERSON)
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return SalespersonSerializerCreate
+        return SalespersonListSerializer
+    
+    def get_permissions(self):
+        """
+        Set permissions based on action.
+        """
+        if self.action == 'create':
+            # Only Store Managers can create salespersons
+            permission_classes = [permissions.IsAuthenticated, IsStoreManager]
+        elif self.action in ['update', 'partial_update', 'destroy']:
+            # Store Managers, Global Managers, and Admins can update/delete
+            permission_classes = [permissions.IsAuthenticated]
+        else:
+            # List and retrieve
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+    
+    def get_queryset(self):
+        """
+        Filter queryset based on user role.
+        Store managers only see salespersons from their store.
+        """
+        user = self.request.user
+        queryset = super().get_queryset()
+        
+        # Admins and Global Managers see all salespersons
+        if user.role in [User.ADMIN, User.GLOBAL_MANAGER, User.FINANCIAL_MANAGER]:
+            return queryset
+        
+        # Store Managers see only their store's salespersons
+        if user.role == User.STORE_MANAGER:
+            if user.store:
+                return queryset.filter(store=user.store)
+            return queryset.none()
+        
+        # Sales Advisors see salespersons from their advised stores
+        if user.role == User.SALES_ADVISOR:
+            advised_stores = Store.objects.filter(sales_advisor=user)
+            return queryset.filter(store__in=advised_stores)
+        
+        return queryset.none()
+    
+    @swagger_auto_schema(
+        operation_description="Create a new salesperson. Store is automatically assigned from the authenticated store manager's store. Only Store Managers can create salespersons.",
+        operation_summary="Create Salesperson (Store Manager Only)",
+        request_body=SalespersonSerializerCreate,
+        responses={
+            201: openapi.Response(
+                description="Salesperson created successfully",
+                examples={
+                    "application/json": {
+                        "message": "Salesperson created successfully.",
+                        "data": {
+                            "id": 10,
+                            "email": "alice.sales@example.com",
+                            "full_name": "Alice Salesperson",
+                            "first_name": "Alice",
+                            "last_name": "Salesperson",
+                            "phone": "+5071111111",
+                            "employee_id": "SP001",
+                            "commission_rate": "5.00",
+                            "store_name": "Downtown Store",
+                            "store_code": "DS001",
+                            "is_active": True,
+                            "date_joined": "2025-10-24T11:00:00Z"
+                        }
+                    }
+                }
+            ),
+            400: "Bad Request - Store manager not assigned to store",
+            403: "Forbidden - Only store managers can create salespersons",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Salespersons']
+    )
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new salesperson.
+        Store is automatically assigned from the store manager's store.
+        Only Store Managers can create salespersons.
+        """
+        # Verify user is a store manager with an assigned store
+        if request.user.role != User.STORE_MANAGER:
+            return Response(
+                {"error": "Only store managers can create salespersons."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if not request.user.store:
+            return Response(
+                {"error": "You must be assigned to a store to create salespersons."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        salesperson = serializer.save()
+        
+        # Return with list serializer
+        output_serializer = SalespersonListSerializer(salesperson)
+        return Response(
+            {
+                "message": "Salesperson created successfully.",
+                "data": output_serializer.data
+            },
+            status=status.HTTP_201_CREATED
+        )
+    
+    @swagger_auto_schema(
+        operation_description="Get a list of all salespersons (filtered by user permissions). Store Managers see only their store's salespersons.",
+        operation_summary="List Salespersons",
+        responses={
+            200: SalespersonListSerializer(many=True),
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Salespersons']
+    )
+    def list(self, request, *args, **kwargs):
+        """List all salespersons based on user permissions."""
+        return super().list(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_description="Get details of a specific salesperson",
+        operation_summary="Retrieve Salesperson",
+        responses={
+            200: SalespersonListSerializer(),
+            404: "Not Found - Salesperson doesn't exist",
+            403: "Forbidden - User doesn't have permission",
+            401: "Unauthorized - Authentication required"
+        },
+        tags=['Salespersons']
+    )
+    def retrieve(self, request, *args, **kwargs):
+        """Retrieve a specific salesperson."""
+        return super().retrieve(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_description="Update salesperson details. Store Managers can only update their own store's salespersons.",
+        operation_summary="Update Salesperson",
+        request_body=SalespersonListSerializer,
+        responses={
+            200: openapi.Response(
+                description="Salesperson updated successfully",
+                examples={
+                    "application/json": {
+                        "message": "Salesperson updated successfully.",
+                        "data": {
+                            "id": 10,
+                            "email": "alice.sales@example.com",
+                            "phone": "+5079999999"
+                        }
+                    }
+                }
+            ),
+            400: "Bad Request - Cannot change role or store",
+            403: "Forbidden - Can only update own store's salespersons",
+            404: "Not Found",
+            401: "Unauthorized"
+        },
+        tags=['Salespersons']
+    )
+    def update(self, request, *args, **kwargs):
+        """Update salesperson details."""
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        
+        # Store managers can only update their own store's salespersons
+        if request.user.role == User.STORE_MANAGER:
+            if instance.store != request.user.store:
+                return Response(
+                    {"error": "You can only update salespersons from your store."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        # Don't allow changing role or store through this endpoint
+        if 'role' in request.data or 'store' in request.data:
+            return Response(
+                {"error": "Cannot change user role or store through this endpoint."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        serializer = SalespersonListSerializer(
+            instance,
+            data=request.data,
+            partial=partial
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        
+        return Response({
+            "message": "Salesperson updated successfully.",
+            "data": serializer.data
+        })
+    
+    @swagger_auto_schema(
+        operation_description="Partially update salesperson details",
+        operation_summary="Partial Update Salesperson",
+        request_body=SalespersonListSerializer,
+        responses={
+            200: "Salesperson updated successfully",
+            400: "Bad Request",
+            403: "Forbidden",
+            404: "Not Found",
+            401: "Unauthorized"
+        },
+        tags=['Salespersons']
+    )
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update of salesperson."""
+        return self.update(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_description="Soft delete by deactivating the salesperson. Store Managers can only delete their own store's salespersons.",
+        operation_summary="Delete Salesperson",
+        responses={
+            200: openapi.Response(
+                description="Salesperson deactivated successfully",
+                examples={
+                    "application/json": {
+                        "message": "Salesperson Alice Salesperson deactivated successfully."
+                    }
+                }
+            ),
+            403: "Forbidden - Can only delete own store's salespersons",
+            404: "Not Found",
+            401: "Unauthorized"
+        },
+        tags=['Salespersons']
+    )
+    def destroy(self, request, *args, **kwargs):
+        """Soft delete by deactivating the salesperson."""
+        instance = self.get_object()
+        
+        # Store managers can only delete their own store's salespersons
+        if request.user.role == User.STORE_MANAGER:
+            if instance.store != request.user.store:
+                return Response(
+                    {"error": "You can only delete salespersons from your store."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        instance.is_active = False
+        instance.save()
+        
+        return Response(
+            {"message": f"Salesperson {instance.get_full_name()} deactivated successfully."},
+            status=status.HTTP_200_OK
+        )
+    
+    @swagger_auto_schema(
+        method='post',
+        operation_description="Activate a salesperson",
+        operation_summary="Activate Salesperson",
+        responses={
+            200: openapi.Response(
+                description="Salesperson activated",
+                examples={
+                    "application/json": {
+                        "message": "Salesperson Alice Salesperson activated successfully."
+                    }
+                }
+            ),
+            404: "Not Found",
+            403: "Forbidden",
+            401: "Unauthorized"
+        },
+        tags=['Salespersons']
+    )
+    @action(detail=True, methods=['post'], url_path='activate')
+    def activate(self, request, pk=None):
+        """Activate a salesperson."""
+        salesperson = self.get_object()
+        salesperson.is_active = True
+        salesperson.save()
+        
+        return Response(
+            {"message": f"Salesperson {salesperson.get_full_name()} activated successfully."},
+            status=status.HTTP_200_OK
+        )
+    
+    @swagger_auto_schema(
+        method='get',
+        operation_description="Get all salespersons in the authenticated store manager's store. Only accessible by Store Managers.",
+        operation_summary="Get My Team (Store Manager Only)",
+        responses={
+            200: openapi.Response(
+                description="Store manager's team details",
+                examples={
+                    "application/json": {
+                        "store": {
+                            "id": "550e8400-e29b-41d4-a716-446655440000",
+                            "name": "Downtown Store",
+                            "code": "DS001"
+                        },
+                        "total_salespersons": 2,
+                        "active_salespersons": 2,
+                        "salespersons": []
+                    }
+                }
+            ),
+            400: "Bad Request - Store manager not assigned to store",
+            403: "Forbidden - Only store managers can access",
+            401: "Unauthorized"
+        },
+        tags=['Salespersons']
+    )
+    @action(detail=False, methods=['get'], url_path='my-team')
+    def my_team(self, request):
+        """Get all salespersons in the store manager's store."""
+        if request.user.role != User.STORE_MANAGER:
+            return Response(
+                {"error": "Only store managers can access this endpoint."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if not request.user.store:
+            return Response(
+                {"error": "You are not assigned to any store."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        salespersons = User.objects.filter(
+            role=User.SALESPERSON,
+            store=request.user.store
+        )
+        
+        serializer = SalespersonListSerializer(salespersons, many=True)
+        return Response({
+            "store": {
+                "id": str(request.user.store.id),
+                "name": request.user.store.name,
+                "code": request.user.store.code
+            },
+            "total_salespersons": salespersons.count(),
+            "active_salespersons": salespersons.filter(is_active=True).count(),
+            "salespersons": serializer.data
+        })

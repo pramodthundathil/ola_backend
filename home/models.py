@@ -125,13 +125,21 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
     
     # Store Assignment
-    store_id = models.CharField(
-        max_length=50,
+    # store_id = models.CharField(
+    #     max_length=50,
+    #     blank=True,
+    #     null=True,
+    #     help_text='Associated store ID for salespeople and managers'
+    # )
+    
+    store = models.ForeignKey(
+        'store.Store',  # Use string reference to avoid circular import
+        on_delete=models.SET_NULL,
         blank=True,
         null=True,
-        help_text='Associated store ID for salespeople and managers'
+        related_name='employeess',
+        
     )
-    
     # Status Fields
     is_active = models.BooleanField(
         default=True,
