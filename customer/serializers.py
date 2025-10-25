@@ -22,6 +22,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             'email', 
             'phone_number', 
             'status',
+            'latitude',
+            'longitude',
             'created_by',
             'created_at',
             'updated_at',
