@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import ( Customer,CreditScore,
-                     CreditConfig,
+                     CreditConfig,PersonalReference
                      )
 
 
@@ -103,9 +103,45 @@ class CreditScoreSerializer(serializers.ModelSerializer):
 
 
 
-
+# ========== SERIALZER FOR SET CREDIT THRESHOLD=============
 
 class CreditConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = CreditConfig
         fields = ['id', 'apc_approval_threshold', 'updated_at']       
+
+
+
+
+# ================SERIALZER FOR PERSONAL REFERENCES======
+
+
+class PersonalReferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PersonalReference
+        fields = [
+            "id",
+            "full_name",
+            "phone_number",
+            "relationship",
+            "is_valid",
+            "validation_notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_phone_number(self, value):
+        """
+        Ensure the phone number is unique for this customer.
+        """
+        customer = self.instance.customer if self.instance else self.initial_data.get('customer')
+        if not customer:
+            return value  
+
+        qs = PersonalReference.objects.filter(customer=customer, phone_number=value)
+        if self.instance:
+            qs = qs.exclude(id=self.instance.id)
+        if qs.exists():
+            raise serializers.ValidationError("This phone number is already used for another reference.")
+        return value

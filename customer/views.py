@@ -12,13 +12,14 @@ from rest_framework import status
 
 # Local  Imports
 from .models import ( Customer,CreditScore,
-                     CreditConfig,
+                     CreditConfig,PersonalReference,
                      )
 from .serializers import (
      CustomerSerializer,
      CreditScoreSerializer,
      CustomerStatusSerializer,
      CreditConfigSerializer,
+     PersonalReferenceSerializer,
      )
 from .utils import fetch_credit_score_from_experian
 
@@ -188,6 +189,8 @@ class CustomerManagementView(APIView):
                 properties={
                     'document_number': openapi.Schema(type=openapi.TYPE_STRING, description="ID card with hyphens (e.g., 8-123-456) or passport number"),
                     'document_type': openapi.Schema(type=openapi.TYPE_STRING, description="Type of document: PANAMA_ID, PASSPORT, FOREIGNER_ID"),
+                    'latitude': openapi.Schema(type=openapi.TYPE_NUMBER, format=openapi.FORMAT_FLOAT),
+                    'longitude': openapi.Schema(type=openapi.TYPE_NUMBER, format=openapi.FORMAT_FLOAT),
                     'first_name': openapi.Schema(type=openapi.TYPE_STRING),
                     'last_name': openapi.Schema(type=openapi.TYPE_STRING),
                     'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
@@ -249,6 +252,8 @@ class CustomerManagementView(APIView):
                 properties={
                     'document_number': openapi.Schema(type=openapi.TYPE_STRING),
                     'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                    'latitude': openapi.Schema(type=openapi.TYPE_NUMBER, format=openapi.FORMAT_FLOAT),
+                    'longitude': openapi.Schema(type=openapi.TYPE_NUMBER, format=openapi.FORMAT_FLOAT),
                     'first_name': openapi.Schema(type=openapi.TYPE_STRING),
                     'last_name': openapi.Schema(type=openapi.TYPE_STRING),
                     'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
@@ -671,3 +676,225 @@ class CreditConfigChangeAPIView(APIView):
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+
+
+
+
+
+
+# =====================================================
+#  PERSONAL REFERENCE LIST + CREATE
+# =====================================================
+
+class PersonalReferenceListCreateAPIView(APIView):
+    """
+    Handles listing and creating personal references for a specific customer.
+    """
+    permission_classes = [IsAuthenticatedUser]
+
+    @swagger_auto_schema(
+        operation_summary="List all personal references of a customer",
+        operation_description="Fetch all personal references by providing a customer ID.",
+        manual_parameters=[
+            openapi.Parameter(
+                'customer_id',
+                openapi.IN_PATH,
+                description="Customer ID to fetch personal references for",
+                type=openapi.TYPE_INTEGER
+            )
+        ],
+        responses={
+            200: openapi.Response(
+                description="List of personal references for a given customer",
+                examples={
+                    "application/json": [
+                        {
+                            "id": 1,
+                            "customer": 12,
+                            "name": "John Doe",
+                            "relationship": "Friend",
+                            "phone": "+91-9876543210",
+                            "address": "Bangalore, India"
+                        }
+                    ]
+                }
+            ),
+            404: openapi.Response(
+                description="Customer not found",
+                examples={"application/json": {"detail": "Customer not found"}}
+            )
+        },
+        tags=['personal-reference']
+    )
+    def get(self, request, customer_id):
+        """
+        Returns all personal references for a given customer.
+        """
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        references = PersonalReference.objects.filter(customer=customer)
+        serializer = PersonalReferenceSerializer(references, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @swagger_auto_schema(
+        operation_summary="Create a new personal reference",
+        operation_description="Create a new personal reference entry for a specific customer.",
+        manual_parameters=[
+            openapi.Parameter(
+                'customer_id',
+                openapi.IN_PATH,
+                description="Customer ID for whom the reference is being created",
+                type=openapi.TYPE_INTEGER
+            )
+        ],
+        request_body=PersonalReferenceSerializer,
+        responses={
+            201: openapi.Response(
+                description="Personal reference created successfully",
+                examples={
+                    "application/json": {
+                        "id": 2,
+                        "customer": 12,
+                        "name": "Jane Smith",
+                        "relationship": "Colleague",
+                        "phone": "+91-8888888888",
+                        "address": "Hyderabad, India"
+                    }
+                }
+            ),
+            400: openapi.Response(
+                description="Validation error",
+                examples={"application/json": {"name": ["This field is required."]}}
+            ),
+            404: openapi.Response(
+                description="Customer not found",
+                examples={"application/json": {"detail": "Customer not found"}}
+            ),
+        },
+        tags=['personal-reference']
+    )
+    def post(self, request, customer_id):
+        """
+        Creates a personal reference linked to the specified customer.
+        """
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = PersonalReferenceSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(customer=customer)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# =====================================================
+#  PERSONAL REFERENCE DETAIL (GET / PATCH / DELETE)
+# =====================================================
+
+class PersonalReferenceDetailAPIView(APIView):
+    """
+    Retrieve, update, or delete a personal reference by its ID.
+    """
+    permission_classes = [IsAuthenticatedUser]
+
+    def get_object(self, pk):
+        try:
+            return PersonalReference.objects.get(id=pk)
+        except PersonalReference.DoesNotExist:
+            return None
+
+    @swagger_auto_schema(
+        operation_summary="Retrieve a personal reference by ID",
+        operation_description="Get details of a single personal reference using its ID.",
+        responses={
+            200: openapi.Response(
+                description="Personal reference details",
+                examples={
+                    "application/json": {
+                        "id": 5,
+                        "customer": 12,
+                        "name": "Amit Verma",
+                        "relationship": "Brother",
+                        "phone": "+91-9999999999",
+                        "address": "Delhi, India"
+                    }
+                }
+            ),
+            404: openapi.Response(
+                description="Reference not found",
+                examples={"application/json": {"detail": "Reference not found"}}
+            )
+        },
+        tags=['personal-reference']
+    )
+    def get(self, request, pk):
+        reference = self.get_object(pk)
+        if not reference:
+            return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PersonalReferenceSerializer(reference)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @swagger_auto_schema(
+        operation_summary="Update an existing personal reference",
+        operation_description="Partially update personal reference fields (PATCH).",
+        request_body=PersonalReferenceSerializer,
+        responses={
+            200: openapi.Response(
+                description="Reference updated successfully",
+                examples={
+                    "application/json": {
+                        "id": 5,
+                        "customer": 12,
+                        "name": "Amit Verma",
+                        "relationship": "Brother",
+                        "phone": "+91-9000000000",
+                        "address": "Updated address"
+                    }
+                }
+            ),
+            400: openapi.Response(
+                description="Validation error",
+                examples={"application/json": {"phone": ["Invalid format."]}}
+            ),
+            404: openapi.Response(
+                description="Reference not found",
+                examples={"application/json": {"detail": "Reference not found"}}
+            )
+        },
+        tags=['personal-reference']
+    )
+    def patch(self, request, pk):
+        reference = self.get_object(pk)
+        if not reference:
+            return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PersonalReferenceSerializer(reference, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @swagger_auto_schema(
+        operation_summary="Delete a personal reference",
+        operation_description="Delete a personal reference by its ID.",
+
+        responses={
+            204: openapi.Response(description="Reference deleted successfully"),
+            404: openapi.Response(
+                description="Reference not found",
+                examples={"application/json": {"detail": "Reference not found"}}
+            )
+        },
+        tags=['personal-reference']
+    )
+    def delete(self, request, pk):
+        reference = self.get_object(pk)
+        if not reference:
+            return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
+        reference.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
