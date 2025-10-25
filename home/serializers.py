@@ -2,6 +2,8 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from .models import CustomUser as User
+from rest_framework import serializers
+from store.models import Store
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -31,11 +33,19 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'date_joined', 'full_name']
 
 
+
+
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """
     Serializer for user registration.
+    Requires store field only for store_manager and salesperson roles.
     """
-    store_id = serializers.UUIDField(write_only=True, required=True)
+    store = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(),
+        required=False,
+        allow_null=True,
+        help_text="Required for store managers and salespersons"
+    )
     password = serializers.CharField(
         write_only=True,
         required=True,
@@ -47,7 +57,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         required=True,
         style={'input_type': 'password'}
     )
-    
+
     class Meta:
         model = User
         fields = [
@@ -58,26 +68,87 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'last_name',
             'phone',
             'role',
-            'store_id'
+            'store'
         ]
-    
+        extra_kwargs = {
+            'email': {'required': True},
+            'first_name': {'required': True},
+            'last_name': {'required': True},
+        }
+
     def validate(self, attrs):
         """
-        Verify that passwords match.
+        Validate password match and conditional store requirement.
         """
+        # Check password match
         if attrs['password'] != attrs['password_confirm']:
             raise serializers.ValidationError({
                 "password": "Password fields didn't match."
             })
+
+        # Get role and store from validated data
+        role = attrs.get('role')
+        store = attrs.get('store')
+
+        # Roles that require store assignment
+        STORE_REQUIRED_ROLES = [
+            User.STORE_MANAGER,  # 'store_manager'
+            User.SALESPERSON,     # 'salesperson'
+        ]
+
+        # Enforce store requirement for specific roles
+        if role in STORE_REQUIRED_ROLES and not store:
+            raise serializers.ValidationError({
+                "store": f"Store assignment is required for {role} role."
+            })
+
+        # Prevent store assignment for roles that don't need it
+        if role not in STORE_REQUIRED_ROLES and store:
+            raise serializers.ValidationError({
+                "store": f"Store assignment is not allowed for {role} role."
+            })
+
         return attrs
-    
+
     def create(self, validated_data):
         """
         Create user with encrypted password.
         """
+        # Remove password_confirm as it's not needed for user creation
         validated_data.pop('password_confirm')
-        user = User.objects.create_user(**validated_data)
+
+        # Extract password for separate handling
+        password = validated_data.pop('password')
+
+        # Remove store if role doesn't require it
+        role = validated_data.get('role')
+        STORE_REQUIRED_ROLES = [User.STORE_MANAGER, User.SALESPERSON]
+        
+        if role not in STORE_REQUIRED_ROLES:
+            validated_data.pop('store', None)
+
+        # Create user with hashed password
+        user = User.objects.create_user(
+            password=password,
+            **validated_data
+        )
+        
         return user
+
+    def to_representation(self, instance):
+        """
+        Customize output representation.
+        """
+        representation = super().to_representation(instance)
+        
+        # Add store details if store exists
+        if instance.store:
+            representation['store'] = {
+                'id': str(instance.store.id),
+                'name': instance.store.name,
+            }
+        
+        return representation
 
 
 class ChangePasswordSerializer(serializers.Serializer):
