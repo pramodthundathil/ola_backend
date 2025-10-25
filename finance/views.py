@@ -28,9 +28,9 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 # Local Application Imports
 # ============================================================
-from .models import FinancePlan, PaymentRecord, EMISchedule
+from .models import FinancePlan, PaymentRecord, EMISchedule, FinancePlanTerm
 from customer.models import Customer, CreditApplication, CreditScore
-from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
+from .serializers import FinancePlanSerializer, FinancePlanTermSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
 # ============================================================
@@ -47,17 +47,20 @@ class FinancePlanPagination(PageNumberPagination):
     max_page_size = 100
 
 
+# ============================================================
+# Tier-based finance plans with multiple terms
+# ============================================================
 class AutoFinancePlanView(APIView):
     """
-    Automatically creates Finance Plan for each term and runs the Decision Engine
-    based only on the given Customer ID.
+    Automatically creates Finance Plan Terms for a customer using Decision Engine.
     """
     permission_classes = [IsAdminOrGlobalManager]
+
     @swagger_auto_schema(
-        operation_summary="Create a new Finance Plan",       
-        request_body=FinancePlanCreateSerializer,  # your serializer for input
+        operation_summary="Create Finance Plan Terms",
+        request_body=FinancePlanCreateSerializer,
         responses={
-            201: FinancePlanSerializer,  # your serializer for response
+            201: FinancePlanTermSerializer(many=True),
             400: "Validation Error",
             500: "Internal Server Error",
         },
@@ -65,73 +68,50 @@ class AutoFinancePlanView(APIView):
     )
     def post(self, request):
         try:
-            # Validate input
-            customer_id = request.data.get("customer_id")
-            if not customer_id:
-                return Response({"error": "customer_id is required."}, status=400)
+            serializer = FinancePlanCreateSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            customer_id = serializer.validated_data["customer_id"]
 
-            # Fetch customer
             customer = get_object_or_404(Customer, id=customer_id)
 
-             #Get latest CreditScore if exists and not expired
+            # Get latest credit score
             credit_score_obj = (
-                CreditScore.objects
-                .filter(customer=customer, is_expired=False)
+                CreditScore.objects.filter(customer=customer, is_expired=False)
                 .order_by("-created_at")
                 .first()
             )
 
-            credit_score_value = credit_score_obj.final_credit_status if credit_score_obj else None
-            apc_score_value = credit_score_obj.apc_score if credit_score_obj else None
+            credit_score = credit_score_obj if credit_score_obj else None
+            apc_score = credit_score_obj.apc_score if credit_score_obj else None
 
-            # Get or create active CreditApplication (within last 2 days)
+            # Get or create active credit application
             credit_app = (
-                CreditApplication.objects
-                .filter(customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"])
+                CreditApplication.objects.filter(customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"])
                 .order_by("-created_at")
                 .first()
             )
-
             if not credit_app or credit_app.is_expired():
-                credit_app = CreditApplication.objects.create(
-                    customer=customer,
-                    device_price=0,  # default value
-                )
-
-            # Create FinancePlan (linked to credit_app)
-            finance_plan = FinancePlan.objects.create(
-                customer=customer,
-                credit_application=credit_app,
-                device_price=credit_app.device_price or 0,
-                customer_monthly_income=getattr(customer, "monthly_income", 3000),#temp value need to calculate
-                credit_score=credit_score_value,
-                apc_score=apc_score_value,
-                actual_down_payment=800,#temp value need to calculate
-            )
+                credit_app = CreditApplication.objects.create(customer=customer, device_price=0)
 
             # Run Decision Engine
-            engine = DecisionEngine(finance_plan)
-            result = engine.run()  # internally saves DecisionEngineResult
+            engine = DecisionEngine(customer, credit_application=credit_app, credit_score=credit_score)
+            decision_results = engine.run()  # returns list of dicts for each term/frequency
 
-            # Prepare response with required fields
-            response_data = {
-                "credit_application": credit_app.id,
-                "credit_score": getattr(finance_plan, "credit_score", None),
-                "apc_score": getattr(finance_plan.decision_engine_result, "apc_score_value", None)
-                              if hasattr(finance_plan, "decision_engine_result") else None,
-                "device_price": finance_plan.device_price,
-                "actual_down_payment": finance_plan.actual_down_payment,
-                "customer_monthly_income": finance_plan.customer_monthly_income,
-            }
+            # Save to FinancePlanTerm
+            term_serializer = FinancePlanTermSerializer(data=decision_results, many=True)
+            term_serializer.is_valid(raise_exception=True)
+            term_serializer.save()
 
-            return Response(response_data, status=status.HTTP_201_CREATED)
+            return Response({"message": "Finance Plan Terms created successfully", "data": term_serializer.data},
+                            status=status.HTTP_201_CREATED)
 
         except Exception as e:
-            logger.error(f"Error in AutoFinancePlanAPIView: {str(e)}")
+            logger.error(f"Error in AutoFinancePlanView: {str(e)}")
             return Response(
-                {"detail": "Internal server error while creating finance plan."},
+                {"detail": "Internal server error while creating finance plan terms."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
 
 # ============================================================
 # Finance Plan List & Create View
@@ -175,31 +155,79 @@ class FinancePlanView(APIView):
             400: "Validation Error",
             500: "Internal Server Error"
         },
-        tags=["Finance"]
-    )    
+        tags=["Finance"]    
+    )
     def post(self, request):
         try:
+            customer_id = request.data.get("customer_id")
+            term = request.data.get("term")
+            frequency = request.data.get("installment_frequency_days")
 
-            serializer = self.serializer_class(data=request.data)
-            if serializer.is_valid():
-
-                # Create the FinancePlan instance (initial save)
-                plan = serializer.save()
-
-                # Run Decision Engine for risk assessment & EMI calculation
-                engine = DecisionEngine(plan)
-                engine.run()   # executes decision logic
+            if not (customer_id and term and frequency):
                 return Response(
-                    { "message": "Finance Plan created successfully and evaluated by Decision Engine.", "data": serializer.data},
-                    status=status.HTTP_201_CREATED
+                    {"error": "customer_id, term, and installment_frequency_days are required."},
+                    status=status.HTTP_400_BAD_REQUEST
                 )
-            logger.warning(f"Finance Plan creation failed: {serializer.errors}")
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            # Verify customer exists
+            customer = Customer.objects.filter(id=customer_id).first()
+            if not customer:
+                return Response({"error": "Customer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            # Retrieve all FinancePlanTerm records based on user input
+            plan_terms = FinancePlanTerm.objects.filter(
+                credit_application__customer=customer,
+                selected_term=term,
+                installment_frequency_days=frequency
+            ).order_by('-created_at')
+
+            if not plan_terms.exists():
+                return Response(
+                    {"error": "No Finance Plan Terms found for the given criteria."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Save or update FinancePlan for each term
+            saved_plans = []
+            for plan_term in plan_terms:
+                finance_plan, created = FinancePlan.objects.update_or_create(
+                    credit_application=plan_term.credit_application,
+                    defaults={
+                        'credit_score': plan_term.credit_score,
+                        'apc_score': plan_term.apc_score,
+                        'device_price': plan_term.device_price,
+                        'is_high_end_device': plan_term.is_high_end_device,
+                        'minimum_down_payment_percentage': plan_term.minimum_down_payment_percentage,
+                        'actual_down_payment': plan_term.actual_down_payment,
+                        'down_payment_percentage': plan_term.down_payment_percentage,
+                        'amount_to_finance': plan_term.amount_to_finance,
+                        'allowed_terms': plan_term.allowed_terms,
+                        'selected_term': plan_term.selected_term,
+                        'installment_frequency_days': plan_term.installment_frequency_days,
+                        'monthly_installment': plan_term.monthly_installment,
+                        'total_amount_payable': plan_term.total_amount_payable,
+                        'customer_monthly_income': plan_term.customer_monthly_income,
+                        'payment_capacity_factor': plan_term.payment_capacity_factor,
+                        'maximum_allowed_installment': plan_term.maximum_allowed_installment,
+                        'installment_to_income_ratio': plan_term.installment_to_income_ratio,
+                        'payment_capacity_passed': plan_term.payment_capacity_passed,
+                        'conditions_met': plan_term.conditions_met,
+                        'requires_adjustment': plan_term.requires_adjustment,
+                        'adjustment_notes': plan_term.adjustment_notes,
+                        'final_score': plan_term.final_score,
+                        'score_status': plan_term.score_status,
+                    }
+                )
+                saved_plans.append(finance_plan)
+
+            # Serialize and return all saved plans
+            serializer = FinancePlanSerializer(saved_plans, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error creating finance plan: {str(e)}")
+            logger.error(f"Error retrieving and saving Finance Plans: {str(e)}")
             return Response(
-                {"detail": "Internal server error while creating finance plan."},
+                {"detail": "Internal server error while fetching and saving finance plans."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

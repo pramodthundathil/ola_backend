@@ -1,34 +1,85 @@
 from datetime import date
 from rest_framework import serializers
-from .models import FinancePlan, EMISchedule, PaymentRecord
+from .models import FinancePlan, EMISchedule, PaymentRecord, FinancePlanTerm
 
 
 # ------------------------------
 # Finance Plan Serializer
 # ------------------------------
-class FinancePlanSerializer(serializers.ModelSerializer):
+class FinancePlanSerializer(serializers.ModelSerializer): 
+    """
+    Detailed serializer for displaying a customer's finance plan
+    (based on customer_id, term, and installment frequency).
+    """
+
+    credit_application_id = serializers.IntegerField(source='credit_application.id', read_only=True)
+    credit_score_id = serializers.IntegerField(source='credit_score.id', read_only=True)
+
     class Meta:
         model = FinancePlan
         fields = [
-            'credit_application',
-            'credit_score',
+            # Identifiers
+            'id',
+            'credit_application_id',
+            'credit_score_id',
+
+            # Risk Details
             'apc_score',
+            'risk_tier',
+
+            # Device Details
             'device_price',
             'is_high_end_device',
+
+            # Down Payment Info
+            'minimum_down_payment_percentage',
+            'actual_down_payment',
+            'down_payment_percentage',
+
+            # Financing Details
+            'amount_to_finance',
+            'allowed_terms',
             'selected_term',
+            'installment_frequency_days',
+
+            # EMI Details
+            'monthly_installment',
+            'total_amount_payable',
+
+            # Payment Capacity
             'customer_monthly_income',
             'payment_capacity_factor',
+            'maximum_allowed_installment',
+            'installment_to_income_ratio',
+            'payment_capacity_passed',
+
+            # Approval & Scoring
+            'conditions_met',
+            'requires_adjustment',
+            'adjustment_notes',
+            'final_score',
+            'score_status',
+
+            # Timestamps
+            'created_at',
+            'updated_at',
         ]
-        read_only_fields = []
-
-    def create(self, validated_data):
-        finance_plan = FinancePlan.objects.create(**validated_data)
-        first_due_date = date.today()
-        EMISchedule.generate_schedule(finance_plan, first_due_date)
-        return finance_plan
+        read_only_fields = fields
 
 
-# Minimal input serializer for creating finance plan
+# --------------------------------------------------------
+# Finance Plan Term Serializer
+# --------------------------------------------------------
+class FinancePlanTermSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FinancePlanTerm
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']  
+
+
+# --------------------------------------------------------
+# Creating Tier-Term Based Finance Plan Serializer
+# --------------------------------------------------------
 class FinancePlanCreateSerializer(serializers.Serializer):
     customer_id = serializers.IntegerField()
 

@@ -197,6 +197,11 @@ class FinancePlan(models.Model):
         (6, '6 Months'),
         (8, '8 Months'),
     ]
+    FREQUENCY_CHOICES = [
+        (10, '10 Days'),
+        (15, '15 Days (Bi-Monthly)'),
+        (30, '30 Days (Monthly)'),
+    ]
     
     credit_application = models.OneToOneField(
         CreditApplication,
@@ -257,6 +262,11 @@ class FinancePlan(models.Model):
     selected_term = models.IntegerField(
         choices=TERM_CHOICES,
         help_text="Selected term in months"
+    )
+    installment_frequency_days = models.IntegerField(
+        choices=FREQUENCY_CHOICES,
+        default=30,
+        help_text="Installment frequency: 10 days or 15 days (bi-monthly) or 30 days (monthly)"
     )
     
     # EMI Calculation (Interest-Free)
@@ -807,3 +817,99 @@ class PaymentRecord(models.Model):
                 self.emi_schedule.paid_date = self.payment_date.date()
             
             self.emi_schedule.save()
+
+
+# ========================================
+# FINANCE PLAN TERM MODEL
+# ========================================    
+class FinancePlanTerm(models.Model):
+    """
+    Stores finance plan details per term for a customer.
+    Data comes directly from Decision Engine API response.
+    """
+    RISK_TIER_CHOICES = [
+        ('TIER_A', 'Tier A - Low Risk (APC ≥ 600)'),
+        ('TIER_B', 'Tier B - Medium Risk (APC 550-599)'),
+        ('TIER_C', 'High Risk (APC 500-549)'),
+        ('TIER_D', 'Very High Risk (APC < 500)'),
+    ]
+    
+    TERM_CHOICES = [
+        (4, '4 Months'),
+        (6, '6 Months'),
+        (8, '8 Months'),
+    ]
+
+    FREQUENCY_CHOICES = [
+        (15, '15 Days (Bi-Monthly)'),
+        (30, '30 Days (Monthly)'),
+    ]
+
+    # Customer reference
+    customer_id = models.IntegerField()
+
+    # Risk Assessment
+    credit_score = models.IntegerField(null=True, blank=True)
+    apc_score = models.IntegerField(null=True, blank=True)
+    risk_tier = models.CharField(max_length=10, choices=RISK_TIER_CHOICES, null=True, blank=True)
+
+    # Device and Pricing
+    device_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    is_high_end_device = models.BooleanField(default=False)
+
+    # Down Payment
+    minimum_down_payment_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    actual_down_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    down_payment_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
+    # Financing Amount
+    amount_to_finance = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    # Term and Installments
+    allowed_terms = models.JSONField(default=list)
+    selected_term = models.IntegerField(choices=TERM_CHOICES, null=True, blank=True)
+    installment_frequency_days = models.IntegerField(choices=FREQUENCY_CHOICES, default=30)
+
+    # EMI Calculation
+    monthly_installment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    total_amount_payable = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    # Payment Capacity Check
+    customer_monthly_income = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    payment_capacity_factor = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    maximum_allowed_installment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    installment_to_income_ratio = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    payment_capacity_passed = models.BooleanField(default=False)
+
+    # Approval Status
+    conditions_met = models.BooleanField(default=False)
+    requires_adjustment = models.BooleanField(default=False)
+    adjustment_notes = models.TextField(null=True, blank=True)
+
+    # Scoring
+    final_score = models.IntegerField(null=True, blank=True)
+    score_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('APPROVED', 'Approved (≥80)'),
+            ('CONDITIONAL', 'Approved with Conditions (60-79)'),
+            ('REJECTED', 'Rejected (<60)'),
+        ],
+        null=True,
+        blank=True
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'term_finance_plans'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['customer_id']),
+            models.Index(fields=['risk_tier']),
+            models.Index(fields=['apc_score']),
+        ]
+
+    def __str__(self):
+        return f"Finance Plan for Customer {self.customer_id} - {self.risk_tier} ({self.installment_frequency_days} days)"
