@@ -29,7 +29,7 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule
-from customer.models import Customer, CreditApplication, DecisionEngineResult
+from customer.models import Customer, CreditApplication, CreditScore
 from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
@@ -73,6 +73,17 @@ class AutoFinancePlanView(APIView):
             # Fetch customer
             customer = get_object_or_404(Customer, id=customer_id)
 
+             #Get latest CreditScore if exists and not expired
+            credit_score_obj = (
+                CreditScore.objects
+                .filter(customer=customer, is_expired=False)
+                .order_by("-created_at")
+                .first()
+            )
+
+            credit_score_value = credit_score_obj.final_credit_status if credit_score_obj else None
+            apc_score_value = credit_score_obj.apc_score if credit_score_obj else None
+
             # Get or create active CreditApplication (within last 2 days)
             credit_app = (
                 CreditApplication.objects
@@ -92,10 +103,10 @@ class AutoFinancePlanView(APIView):
                 customer=customer,
                 credit_application=credit_app,
                 device_price=credit_app.device_price or 0,
-                customer_monthly_income=getattr(customer, "monthly_income", 0),#temp value need to calculate
-                credit_score=0,#temp value need to calculate
-                apc_score=0,#temp value need to calculate
-                actual_down_payment=0,#temp value need to calculate
+                customer_monthly_income=getattr(customer, "monthly_income", 3000),#temp value need to calculate
+                credit_score=credit_score_value,
+                apc_score=apc_score_value,
+                actual_down_payment=800,#temp value need to calculate
             )
 
             # Run Decision Engine
