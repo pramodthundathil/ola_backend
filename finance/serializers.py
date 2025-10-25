@@ -67,6 +67,14 @@ class FinancePlanSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+# -----------------------------------------
+# Serializer for Fetching Finance Plan
+#---------------------------------------
+class FinancePlanFetchSerializer(serializers.Serializer):
+    customer_id = serializers.IntegerField()
+    term = serializers.IntegerField()
+    installment_frequency_days = serializers.IntegerField()
+
 # --------------------------------------------------------
 # Finance Plan Term Serializer
 # --------------------------------------------------------

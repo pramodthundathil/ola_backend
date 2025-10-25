@@ -30,7 +30,7 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule, FinancePlanTerm
 from customer.models import Customer, CreditApplication, CreditScore
-from .serializers import FinancePlanSerializer, FinancePlanTermSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
+from .serializers import FinancePlanSerializer, FinancePlanFetchSerializer, FinancePlanTermSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
 # ============================================================
@@ -149,25 +149,23 @@ class FinancePlanView(APIView):
     #---------Create Finance Plan ----------------
     @swagger_auto_schema(
         operation_summary="Create a new Finance Plan",
-        request_body=FinancePlanSerializer,
+        request_body=FinancePlanFetchSerializer,  # <--- Updated here
         responses={
-            201: FinancePlanSerializer,
+            200: FinancePlanSerializer(many=True),
             400: "Validation Error",
+            404: "No Finance Plan Terms found",
             500: "Internal Server Error"
         },
-        tags=["Finance"]    
+        tags=["Finance"]
     )
     def post(self, request):
         try:
-            customer_id = request.data.get("customer_id")
-            term = request.data.get("term")
-            frequency = request.data.get("installment_frequency_days")
-
-            if not (customer_id and term and frequency):
-                return Response(
-                    {"error": "customer_id, term, and installment_frequency_days are required."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            # Use the new serializer
+            serializer = FinancePlanFetchSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            customer_id = serializer.validated_data["customer_id"]
+            term = serializer.validated_data["term"]
+            frequency = serializer.validated_data["installment_frequency_days"]
 
             # Verify customer exists
             customer = Customer.objects.filter(id=customer_id).first()
@@ -230,7 +228,6 @@ class FinancePlanView(APIView):
                 {"detail": "Internal server error while fetching and saving finance plans."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 # ============================================================
 # Finance Analytics Overview for Plans
