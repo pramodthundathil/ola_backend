@@ -29,7 +29,8 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule
-from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
+from customer.models import Customer, CreditApplication, DecisionEngineResult
+from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
 # ============================================================
@@ -45,6 +46,81 @@ class FinancePlanPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 
+
+class AutoFinancePlanView(APIView):
+    """
+    Automatically creates Finance Plan for each term and runs the Decision Engine
+    based only on the given Customer ID.
+    """
+    permission_classes = [IsAdminOrGlobalManager]
+    @swagger_auto_schema(
+        operation_summary="Create a new Finance Plan",       
+        request_body=FinancePlanCreateSerializer,  # your serializer for input
+        responses={
+            201: FinancePlanSerializer,  # your serializer for response
+            400: "Validation Error",
+            500: "Internal Server Error",
+        },
+        tags=["Finance"]
+    )
+    def post(self, request):
+        try:
+            # Validate input
+            customer_id = request.data.get("customer_id")
+            if not customer_id:
+                return Response({"error": "customer_id is required."}, status=400)
+
+            # Fetch customer
+            customer = get_object_or_404(Customer, id=customer_id)
+
+            # Get or create active CreditApplication (within last 2 days)
+            credit_app = (
+                CreditApplication.objects
+                .filter(customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"])
+                .order_by("-created_at")
+                .first()
+            )
+
+            if not credit_app or credit_app.is_expired():
+                credit_app = CreditApplication.objects.create(
+                    customer=customer,
+                    device_price=0,  # default value
+                )
+
+            # Create FinancePlan (linked to credit_app)
+            finance_plan = FinancePlan.objects.create(
+                customer=customer,
+                credit_application=credit_app,
+                device_price=credit_app.device_price or 0,
+                customer_monthly_income=getattr(customer, "monthly_income", 0),#temp value need to calculate
+                credit_score=0,#temp value need to calculate
+                apc_score=0,#temp value need to calculate
+                actual_down_payment=0,#temp value need to calculate
+            )
+
+            # Run Decision Engine
+            engine = DecisionEngine(finance_plan)
+            result = engine.run()  # internally saves DecisionEngineResult
+
+            # Prepare response with required fields
+            response_data = {
+                "credit_application": credit_app.id,
+                "credit_score": getattr(finance_plan, "credit_score", None),
+                "apc_score": getattr(finance_plan.decision_engine_result, "apc_score_value", None)
+                              if hasattr(finance_plan, "decision_engine_result") else None,
+                "device_price": finance_plan.device_price,
+                "actual_down_payment": finance_plan.actual_down_payment,
+                "customer_monthly_income": finance_plan.customer_monthly_income,
+            }
+
+            return Response(response_data, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.error(f"Error in AutoFinancePlanAPIView: {str(e)}")
+            return Response(
+                {"detail": "Internal server error while creating finance plan."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 # ============================================================
 # Finance Plan List & Create View

@@ -3,7 +3,8 @@ from .import views
 
 urlpatterns = [  
     
-    path('plans/', views.FinancePlanView.as_view(), name='finance-plan'),  
+    path('auto-plan/', views.AutoFinancePlanView.as_view(), name='finance-auto-plan'),
+    path('plans/', views.FinancePlanView.as_view(), name='finance-plan'),    
     path('analytics/overview/', views.FinanceOverviewAPIView.as_view(), name='finance-overview'),  
     path('analytics/risk-tiers/', views.FinanceRiskTierView.as_view(), name='finance-risk-tier'),
     path("analytics/collections/", views.FinanceCollectionsView.as_view(), name="finance_analytics_collections"),

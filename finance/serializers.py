@@ -28,6 +28,11 @@ class FinancePlanSerializer(serializers.ModelSerializer):
         return finance_plan
 
 
+# Minimal input serializer for creating finance plan
+class FinancePlanCreateSerializer(serializers.Serializer):
+    customer_id = serializers.IntegerField()
+
+
 # ------------------------------
 # EMI Schedule Serializer
 # ------------------------------
