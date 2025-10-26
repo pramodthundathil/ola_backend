@@ -90,6 +90,7 @@ class FinancePlanTermSerializer(serializers.ModelSerializer):
 # --------------------------------------------------------
 class FinancePlanCreateSerializer(serializers.Serializer):
     customer_id = serializers.IntegerField()
+    actual_down_payment = serializers.DecimalField(max_digits=10, decimal_places=2)
 
 
 # ------------------------------

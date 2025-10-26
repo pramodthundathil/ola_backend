@@ -29,7 +29,7 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule, FinancePlanTerm
-from customer.models import Customer, CreditApplication, CreditScore
+from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
 from .serializers import FinancePlanSerializer, FinancePlanFetchSerializer, FinancePlanTermSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
@@ -70,8 +70,11 @@ class AutoFinancePlanView(APIView):
         try:
             serializer = FinancePlanCreateSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            customer_id = serializer.validated_data["customer_id"]
 
+            customer_id = serializer.validated_data["customer_id"]
+            actual_down_payment = serializer.validated_data["actual_down_payment"]
+
+            # Get customer instance
             customer = get_object_or_404(Customer, id=customer_id)
 
             # Get latest credit score
@@ -91,10 +94,24 @@ class AutoFinancePlanView(APIView):
                 .first()
             )
             if not credit_app or credit_app.is_expired():
-                credit_app = CreditApplication.objects.create(customer=customer, device_price=0)
+                credit_app = CreditApplication.objects.create(customer=customer, device_price=0)           
+            
+            # To get monthly income of customer
+            document_number = customer.document_number
+            monthly_income = CustomerIncome.get_income_by_document(document_number)
+            
+             # Create FinancePlan (linked to credit_app)
+            finance_plan = FinancePlan.objects.create(
+                customer=customer,
+                credit_application=credit_app,
+                device_price=credit_app.device_price or 0,
+                customer_monthly_income=monthly_income,
+                apc_score=apc_score,
+                actual_down_payment=actual_down_payment,#temp value need to calculate
+            )
 
             # Run Decision Engine
-            engine = DecisionEngine(customer, credit_application=credit_app, credit_score=credit_score)
+            engine = DecisionEngine(finance_plan)
             decision_results = engine.run()  # returns list of dicts for each term/frequency
 
             # Save to FinancePlanTerm
