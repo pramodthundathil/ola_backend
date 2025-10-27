@@ -665,7 +665,7 @@ class CreditConfigChangeAPIView(APIView):
                 examples={"application/json": {"apc_approval_threshold": ["This field is required."]}}
             ),
         },
-        tags=['credit-config']
+        tags=['credit']
         )
 
 
