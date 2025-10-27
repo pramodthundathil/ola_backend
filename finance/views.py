@@ -643,8 +643,7 @@ class ReportsAPIView(APIView):
     Generates a summarized financial and customer report for Admin, 
     Global Manager, and Finance Manager.
     """
-    #permission_classes = [CanViewReports]
-    permission_classes = [AllowAny]
+    permission_classes = [CanViewReports]    
 
     @swagger_auto_schema(
         operation_summary="Get Common Reports (Admin / Global / Finance Manager)",
