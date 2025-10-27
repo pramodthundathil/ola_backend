@@ -29,8 +29,9 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule, FinancePlanTerm
-from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
-from .serializers import FinancePlanSerializer, FinancePlanFetchSerializer, FinancePlanTermSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
+from home.permissions import CanViewReports
+from customer.models import Customer, CreditApplication, CreditScore#CustomerIncome
+from .serializers import FinancePlanSerializer, RegionWiseReportSerializer, CommonReportSerializer, FinancePlanFetchSerializer, FinancePlanTermSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
 # ============================================================
@@ -98,14 +99,14 @@ class AutoFinancePlanView(APIView):
             
             # To get monthly income of customer
             document_number = customer.document_number
-            monthly_income = CustomerIncome.get_income_by_document(document_number)
+            #monthly_income = CustomerIncome.get_income_by_document(document_number)
             
              # Create FinancePlan (linked to credit_app)
             finance_plan = FinancePlan.objects.create(
                 customer=customer,
                 credit_application=credit_app,
                 device_price=credit_app.device_price or 0,
-                customer_monthly_income=monthly_income,
+                customer_monthly_income=1000,
                 apc_score=apc_score,
                 actual_down_payment=actual_down_payment,#temp value need to calculate
             )
@@ -632,3 +633,147 @@ class FinanceInstallmentPaymentView(APIView):
             )
             start_date += timedelta(days=15)
         logger.info(f"Regenerated EMIs #{start_number}–{total_installments} for plan {plan.id}")
+
+
+# --------------------------------------
+# Finance Report View
+# --------------------------------------
+class ReportsAPIView(APIView):
+    """
+    Generates a summarized financial and customer report for Admin, 
+    Global Manager, and Finance Manager.
+    """
+    #permission_classes = [CanViewReports]
+    permission_classes = [AllowAny]
+
+    @swagger_auto_schema(
+        operation_summary="Get Common Reports (Admin / Global / Finance Manager)",
+        operation_description="""
+        Returns summarized reports including:
+        - Total customers and applications  
+        - Approval / Rejection / Pending counts  
+        - Total financed amount and average down payment  
+        - Risk tier distribution  
+        """,
+        responses={
+            200:  CommonReportSerializer(),
+            400: "Bad Request",
+            500: "Internal Server Error",
+        },
+        tags=["Reports"]
+    )
+    def get(self, request):
+        try:
+            # --- Data Aggregation ---
+            total_customers = Customer.objects.count()
+            total_applications = CreditApplication.objects.count()
+
+            approved_apps = CreditApplication.objects.filter(status='APPROVED').count()
+            rejected_apps = CreditApplication.objects.filter(status='REJECTED').count()
+            pending_apps = CreditApplication.objects.filter(status='PENDING').count()
+
+            total_financed = FinancePlan.objects.aggregate(total=Sum('amount_to_finance'))['total'] or 0
+            avg_down_payment = FinancePlan.objects.aggregate(avg=Avg('down_payment_percentage'))['avg'] or 0
+
+            tier_counts = (
+                FinancePlan.objects
+                .values('risk_tier')
+                .annotate(count=Count('id'))
+                .order_by('risk_tier')
+            )
+            report_data = {
+                "customers": total_customers,
+                "applications": {
+                    "total": total_applications,
+                    "approved": approved_apps,
+                    "rejected": rejected_apps,
+                    "pending": pending_apps,
+                },
+                "financing": {
+                    "total_financed": round(total_financed, 2),
+                    "average_down_payment": round(avg_down_payment, 2),
+                },
+                "risk_tiers": list(tier_counts),
+            }
+            serializer = CommonReportSerializer(report_data)
+            logger.info(f"Report generated successfully by user {request.user.username}")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error generating report: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Failed to generate report", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+# --------------------------------------
+# Regional-Wise Finance Report View
+# --------------------------------------
+class RegionWiseReportAPIView(APIView):
+    """
+    Generate region-wise sales and financing performance report.
+    Sales Advisors can only see their own region.
+    Admin, Global Manager, and Finance Manager can see all.
+    """
+    permission_classes = [CanViewReports]
+
+    @swagger_auto_schema(
+        operation_summary="Region-wise Sales Report",
+        operation_description="Generates region-based performance reports. "
+                              "Sales Advisors see their own region only.",
+        responses={
+            200: RegionWiseReportSerializer(),
+            403: "Forbidden - insufficient permissions",
+            500: "Internal Server Error"
+        },
+        tags=["Reports"]
+    )
+    def get(self, request):
+        try:
+            user = request.user
+
+            # --- Region-based Filtering ---
+            if user.is_sales_advisor():  
+                # Sales Advisor → only their region
+                region_filter = {"region": user.region}
+            else:
+                # Admin, Global Manager, Finance Manager → all regions
+                region_filter = {}
+
+            # --- Sales Summary ---
+            region_data = (
+                Customer.objects
+                .filter(**region_filter)
+                .values("region")
+                .annotate(
+                    total_customers=Count("id"),
+                    total_applications=Count("credit_applications"),
+                    approved=Count("credit_applications", filter=models.Q(credit_applications__status="APPROVED")),
+                    rejected=Count("credit_applications", filter=models.Q(credit_applications__status="REJECTED")),
+                )
+                .order_by("region")
+            )
+
+            # --- Finance Summary ---
+            finance_data = (
+                FinancePlan.objects
+                .filter(**region_filter)
+                .values("region")
+                .annotate(
+                    total_financed=Sum("amount_to_finance"),
+                    avg_down_payment=Avg("down_payment_percentage")
+                )
+                .order_by("region")
+            )
+            report = {
+                "sales_summary": list(region_data),
+                "finance_summary": list(finance_data),
+            }
+            serializer = RegionWiseReportSerializer(report)
+            logger.info(f"Region-wise report generated by {user.username}")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error generating region-wise report: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

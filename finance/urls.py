@@ -10,6 +10,8 @@ urlpatterns = [
     path("analytics/collections/", views.FinanceCollectionsView.as_view(), name="finance_analytics_collections"),
     path("analytics/overdue/", views.FinanceOverdueView.as_view(), name="finance_analytics_overdue"),
     path("payments/", views.PaymentRecordListCreateView.as_view(), name="payments-record"),  
-    path('payments/emi/<int:emi_id>/', views.FinanceInstallmentPaymentView.as_view(), name='emi_payment'),  
+    path('payments/emi/<int:emi_id>/', views.FinanceInstallmentPaymentView.as_view(), name='emi_payment'), 
+    path("reports/common/", views.ReportsAPIView.as_view(), name="common-reports"),
+    path("reports/region/", views.RegionWiseReportAPIView.as_view(), name="region-reports"),
 
 ]

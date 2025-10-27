@@ -177,3 +177,51 @@ class FinanceOverdueSerializer(serializers.Serializer):
     total_overdue_installments = serializers.IntegerField()
     total_overdue_amount = serializers.FloatField()
     customers_with_overdue = serializers.IntegerField()
+
+
+# --------------------------------------
+# Common Report Serializers
+# --------------------------------------
+class ApplicationSummarySerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    approved = serializers.IntegerField()
+    rejected = serializers.IntegerField()
+    pending = serializers.IntegerField()
+
+
+class FinancingSummarySerializer(serializers.Serializer):
+    total_financed = serializers.DecimalField(max_digits=12, decimal_places=2)
+    average_down_payment = serializers.DecimalField(max_digits=5, decimal_places=2)
+
+
+class RiskTierSerializer(serializers.Serializer):
+    risk_tier = serializers.CharField()
+    count = serializers.IntegerField()
+
+
+class CommonReportSerializer(serializers.Serializer):
+    customers = serializers.IntegerField()
+    applications = ApplicationSummarySerializer()
+    financing = FinancingSummarySerializer()
+    risk_tiers = RiskTierSerializer(many=True)
+
+# --------------------------------------
+# Region-wise Report Serializers
+# --------------------------------------
+class RegionSalesSummarySerializer(serializers.Serializer):
+    region = serializers.CharField()
+    total_customers = serializers.IntegerField()
+    total_applications = serializers.IntegerField()
+    approved = serializers.IntegerField()
+    rejected = serializers.IntegerField()
+
+
+class RegionFinanceSummarySerializer(serializers.Serializer):
+    region = serializers.CharField()
+    total_financed = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    avg_down_payment = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+
+
+class RegionWiseReportSerializer(serializers.Serializer):
+    sales_summary = RegionSalesSummarySerializer(many=True)
+    finance_summary = RegionFinanceSummarySerializer(many=True)
