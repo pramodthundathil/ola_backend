@@ -3,77 +3,26 @@ from rest_framework import serializers
 from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan
 
 
-# ------------------------------
-# Finance Plan Serializer
-# ------------------------------
-class FinancePlanSerializer(serializers.ModelSerializer): 
-    """
-    Detailed serializer for displaying a customer's finance plan
-    (based on customer_id, term, and installment frequency).
-    """
+# --------------------------------------------------------
+# Finance Plan Create from AutoFinancePlan Serializer
+# --------------------------------------------------------
+class FinancePlanCreateSerializer(serializers.Serializer):
+    temp_plan_id = serializers.IntegerField()
+    device_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    actual_down_payment = serializers.DecimalField(max_digits=10, decimal_places=2)
+    choosed_allowed_plans = serializers.DictField(
+        child=serializers.IntegerField(),
+        help_text='Example: {"selected_term": 6, "installment_frequency_days": 30}'
+    )
 
-    credit_application_id = serializers.IntegerField(source='credit_application.id', read_only=True)
-    credit_score_id = serializers.IntegerField(source='credit_score.id', read_only=True)
 
+# --------------------------------------------------------
+# Finance Plan Create from AutoFinancePlan Serializer
+# --------------------------------------------------------
+class FinancePlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinancePlan
-        fields = [
-            # Identifiers
-            'id',
-            'credit_application_id',
-            'credit_score_id',
-
-            # Risk Details
-            'apc_score',
-            'risk_tier',
-
-            # Device Details
-            'device_price',
-            'is_high_end_device',
-
-            # Down Payment Info
-            'minimum_down_payment_percentage',
-            'actual_down_payment',
-            'down_payment_percentage',
-
-            # Financing Details
-            'amount_to_finance',
-            'allowed_terms',
-            'selected_term',
-            'installment_frequency_days',
-
-            # EMI Details
-            'monthly_installment',
-            'total_amount_payable',
-
-            # Payment Capacity
-            'customer_monthly_income',
-            'payment_capacity_factor',
-            'maximum_allowed_installment',
-            'installment_to_income_ratio',
-            'payment_capacity_passed',
-
-            # Approval & Scoring
-            'conditions_met',
-            'requires_adjustment',
-            'adjustment_notes',
-            'final_score',
-            'score_status',
-
-            # Timestamps
-            'created_at',
-            'updated_at',
-        ]
-        read_only_fields = fields
-
-
-# -----------------------------------------
-# Serializer for Fetching Finance Plan
-#---------------------------------------
-class FinancePlanFetchSerializer(serializers.Serializer):
-    customer_id = serializers.IntegerField()
-    term = serializers.IntegerField()
-    installment_frequency_days = serializers.IntegerField()
+        fields = '__all__'
 
 
 # --------------------------------------------------------

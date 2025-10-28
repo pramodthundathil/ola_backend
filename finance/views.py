@@ -35,7 +35,7 @@ from .serializers import (
     FinancePlanSerializer,
     RegionWiseReportSerializer,
     CommonReportSerializer,
-    FinancePlanFetchSerializer,
+    FinancePlanCreateSerializer,
     AutoFinancePlanCreateSerializer,
     FinanceOverviewSerializer,
     AutoFinancePlanSerializer,
@@ -169,124 +169,116 @@ class AutoFinancePlanView(APIView):
             return Response(
                 {"detail": "Internal server error while creating finance plan terms."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            )        
 
 
-# ============================================================
-# Finance Plan List & Create View
-# ============================================================
-class FinancePlanView(APIView):
+# --------------------------------------------------------
+# API: Create or Get Finance Plan
+# --------------------------------------------------------
+class FinancePlanAPIView(APIView):
     """
-    API View for listing and creating Finance Plans.
-    - GET: List all finance plans (with pagination)
-    - POST: Create a new finance plan
+    API to create a Finance Plan using Decision Engine from AutoFinancePlan data,
+    and retrieve all or specific Finance Plans.
     """
-    permission_classes = [AllowAny]
-    serializer_class = FinancePlanSerializer 
- 
-    @swagger_auto_schema(
-        operation_summary="List all Finance Plans",
-        responses={200: FinancePlanSerializer(many=True)},
-        tags=["Finance"]
-    )
 
-    #-------List All Finance Plans----------
-    def get(self, request):        
-        try:
-            financeplan = FinancePlan.objects.all().order_by('-created_at')
-            paginator = FinancePlanPagination()            
-            result_page = paginator.paginate_queryset(financeplan, request)
-            serializer = self.serializer_class(result_page, many=True, context={'request': request})    
-            return paginator.get_paginated_response(serializer.data)           
-        except Exception as e:
-            logger.error(f"Error fetching finance plans: {str(e)}")
-            return Response(
-                {"detail": "Internal server error while fetching finance plans."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-    #---------Create Finance Plan ----------------
+    # --------------------------------------------
+    # CREATE FINANCE PLAN
+    # --------------------------------------------
     @swagger_auto_schema(
-        operation_summary="Create a new Finance Plan",
-        request_body=FinancePlanFetchSerializer,  # <--- Updated here
+        operation_summary="Create Finance Plan",
+        operation_description="""
+        Creates a new Finance Plan using AutoFinancePlan data and Decision Engine results.
+        Input:
+        - plan_id (AutoFinancePlan ID)
+        - device_price
+        - actual_down_payment
+        - choosed_allowed_plans: {"selected_term": 6, "installment_frequency_days": 30}
+        """,
+        request_body=FinancePlanCreateSerializer(),
         responses={
-            200: FinancePlanSerializer(many=True),
+            201: FinancePlanSerializer(),
             400: "Validation Error",
-            404: "No Finance Plan Terms found",
-            500: "Internal Server Error"
+            404: "AutoFinancePlan not found",
+            500: "Internal Server Error",
         },
         tags=["Finance"]
     )
     def post(self, request):
         try:
-            # Use the new serializer
-            serializer = FinancePlanFetchSerializer(data=request.data)
+            # Validate input
+            serializer = FinancePlanCreateSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            customer_id = serializer.validated_data["customer_id"]
-            term = serializer.validated_data["term"]
-            frequency = serializer.validated_data["installment_frequency_days"]
+            data = serializer.validated_data
 
-            # Verify customer exists
-            customer = Customer.objects.filter(id=customer_id).first()
-            if not customer:
-                return Response({"error": "Customer not found."}, status=status.HTTP_404_NOT_FOUND)
+            # Fetch AutoFinancePlan by ID
+            auto_finance_plan = get_object_or_404(AutoFinancePlan, id=data["plan_id"])
 
-            # Retrieve all FinancePlanTerm records based on user input
-            plan_terms = FinancePlanTerm.objects.filter(
-                credit_application__customer=customer,
-                selected_term=term,
-                installment_frequency_days=frequency
-            ).order_by('-created_at')
+            # Prepare DecisionEngine input
+            engine_input = {
+                "credit_application": auto_finance_plan.credit_application,
+                "credit_score": auto_finance_plan.credit_score,
+                "apc_score": auto_finance_plan.apc_score,
+                "device_price": data["device_price"],
+                "actual_down_payment": data["actual_down_payment"],
+                "customer_monthly_income": auto_finance_plan.customer_monthly_income,
+                "selected_term": data["choosed_allowed_plans"]["selected_term"],
+                "installment_frequency_days": data["choosed_allowed_plans"]["installment_frequency_days"],
+            }
+            logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
-            if not plan_terms.exists():
-                return Response(
-                    {"error": "No Finance Plan Terms found for the given criteria."},
-                    status=status.HTTP_404_NOT_FOUND
-                )
+            # Run Decision Engine
+            engine = DecisionEngine(engine_input)
+            engine_output = engine.run()  # Expected output: dict of calculated finance data
 
-            # Save or update FinancePlan for each term
-            saved_plans = []
-            for plan_term in plan_terms:
-                finance_plan, created = FinancePlan.objects.update_or_create(
-                    credit_application=plan_term.credit_application,
-                    defaults={
-                        'credit_score': plan_term.credit_score,
-                        'apc_score': plan_term.apc_score,
-                        'device_price': plan_term.device_price,
-                        'is_high_end_device': plan_term.is_high_end_device,
-                        'minimum_down_payment_percentage': plan_term.minimum_down_payment_percentage,
-                        'actual_down_payment': plan_term.actual_down_payment,
-                        'down_payment_percentage': plan_term.down_payment_percentage,
-                        'amount_to_finance': plan_term.amount_to_finance,
-                        'allowed_terms': plan_term.allowed_terms,
-                        'selected_term': plan_term.selected_term,
-                        'installment_frequency_days': plan_term.installment_frequency_days,
-                        'monthly_installment': plan_term.monthly_installment,
-                        'total_amount_payable': plan_term.total_amount_payable,
-                        'customer_monthly_income': plan_term.customer_monthly_income,
-                        'payment_capacity_factor': plan_term.payment_capacity_factor,
-                        'maximum_allowed_installment': plan_term.maximum_allowed_installment,
-                        'installment_to_income_ratio': plan_term.installment_to_income_ratio,
-                        'payment_capacity_passed': plan_term.payment_capacity_passed,
-                        'conditions_met': plan_term.conditions_met,
-                        'requires_adjustment': plan_term.requires_adjustment,
-                        'adjustment_notes': plan_term.adjustment_notes,
-                        'final_score': plan_term.final_score,
-                        'score_status': plan_term.score_status,
-                    }
-                )
-                saved_plans.append(finance_plan)
-
-            # Serialize and return all saved plans
-            serializer = FinancePlanSerializer(saved_plans, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-
+            # Save new FinancePlan and return 
+            finance_plan_serializer = FinancePlanSerializer(data=engine_output)
+            finance_plan_serializer.is_valid(raise_exception=True)
+            finance_plan = finance_plan_serializer.save()
+            logger.info(f"[FinancePlanAPI] Finance Plan created successfully (ID={finance_plan.id})")
+            return Response(finance_plan_serializer.data, status=status.HTTP_201_CREATED)
+        except AutoFinancePlan.DoesNotExist:
+            logger.error("[FinancePlanAPI] AutoFinancePlan not found.")
+            return Response({"error": "AutoFinancePlan not found."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            logger.error(f"Error retrieving and saving Finance Plans: {str(e)}")
-            return Response(
-                {"detail": "Internal server error while fetching and saving finance plans."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            logger.exception("[FinancePlanAPI] Error creating Finance Plan.")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # --------------------------------------------------------
+    # GET: List All or Retrieve by ID
+    # --------------------------------------------------------
+    @swagger_auto_schema(
+        operation_summary="Retrieve Finance Plan(s)",
+        operation_description="""
+        Retrieves either all Finance Plans or a specific one by ID.
+
+        **Examples:**
+        - `GET /api/finance/plan/` → list all
+        - `GET /api/finance/plan/?id=5` → retrieve FinancePlan with ID=5
+        """,
+        responses={200: FinancePlanSerializer(many=True)},
+        tags=["Finance"]
+    )
+    def get(self, request):
+        try:
+            plan_id = request.query_params.get("id")
+            if plan_id:
+                # Retrieve specific plan
+                finance_plan = get_object_or_404(FinancePlan, id=plan_id)
+                serializer = FinancePlanSerializer(finance_plan)
+                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan ID={plan_id}")
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+           # Paginated list of plans
+            finance_plans = FinancePlan.objects.all().order_by("-created_at")
+            paginator = FinancePlanPagination()
+            paginated_qs = paginator.paginate_queryset(finance_plans, request)
+            serializer = FinancePlanSerializer(paginated_qs, many=True)
+            logger.info(f"[FinancePlanAPI] Retrieved {len(paginated_qs)} finance plans (paginated).")
+            return paginator.get_paginated_response(serializer.data)
+        except Exception as e:
+            logger.exception("[FinancePlanAPI] Error retrieving Finance Plans.")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 # ============================================================
 # Finance Analytics Overview for Plans
