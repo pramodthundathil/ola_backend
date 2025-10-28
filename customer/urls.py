@@ -11,6 +11,10 @@ urlpatterns = [
     path('credit-config-change/', views.CreditConfigChangeAPIView.as_view(), name='credit-config-change'),
     path('<int:customer_id>/credit-score/', views.CreditScoreCheckAPIView.as_view(), name='credit-score-check'),
 
+    #  CUSTEMER REFENCES
+    path('personal-references/<int:customer_id>/', views.PersonalReferenceListCreateAPIView.as_view(), name='personal-reference-list-create'),
+    path('personal-references/detail/<int:pk>/', views.PersonalReferenceDetailAPIView.as_view(), name='personal-reference-detail'),
+
 
 ]
 

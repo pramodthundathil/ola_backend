@@ -1,17 +1,67 @@
-
-
 from decimal import Decimal
 from .models import FinancePlan
 from customer. models import DecisionEngineResult
 
 
+
+
+
+# ==================================================
+#  1st step (FOR RUN TEMPERAROY TABLE) 
+# ==================================================
+
+class AutoDecisionEngine:
+    """
+    Handles computation of financing plan details for a given TempFinancePlan.
+    """
+
+    def __init__(self, temp_plan):
+        self.plan = temp_plan
+
+    def run(self):
+        """
+        Runs all calculations and updates the TempFinancePlan object fields.
+        """
+        # Step 1: Determine risk tier
+        self.plan.determine_risk_tier()
+
+        # Step 2: Get tier rules
+        rules = self.plan.get_tier_rules()
+        self.plan.payment_capacity_factor = rules["payment_capacity_factor"]
+        self.plan.minimum_down_payment_percentage = rules["min_down_payment"]
+        self.plan.high_end_extra_percentage = rules["high_end_extra"]
+
+        # Step 3: Calculate maximum allowed installment
+        self.plan.maximum_allowed_installment = (
+            self.plan.customer_monthly_income * self.plan.payment_capacity_factor
+        )
+
+        # Step 4: Allowed plans (with intervals)
+        allowed_terms = rules["allowed_terms"]
+        intervals = [15, 30]
+        plans = [
+            {"months": term, "interval_days": interval}
+            for term in allowed_terms
+            for interval in intervals
+        ]
+        self.plan.allowed_plans = plans
+
+        # Step 5: Save
+        self.plan.save()
+
+        return self.plan 
+    
+
+# ==================================================
+#  2nd step (FOR FINANCEPLAN)
+# ==================================================
 class DecisionEngine:
     """
     Engine to make financing decisions based on APC, income, device price, and term.
     Uses helper methods from FinancePlan model.
     """
 
-    def __init__(self, finance_plan: FinancePlan):
+    def __init__(self, finance_plan):
         self.plan = finance_plan
 
     def run(self, dynamic_adjustment=True):
@@ -24,8 +74,18 @@ class DecisionEngine:
         # 2️⃣ Check if device is high-end
         self.plan.is_high_end_device = self.plan.device_price > Decimal('300.00')
 
+        self.plan.get_tier_rules()
+
         # 3️⃣ Calculate Minimum Down Payment
         self.plan.calculate_minimum_down_payment()
+
+        biometric_conf = getattr(
+            getattr(self.credit_application.customer, "identity_verification", None),
+            "face_match_score",
+            0
+        )
+        reference_score = 0
+        geo_behavior = 0
 
         # 4️⃣ Calculate EMI (monthly installment)
         self.plan.calculate_emi()
@@ -50,6 +110,8 @@ class DecisionEngine:
         self.save_decision_result()
 
         return self.plan
+
+# ============ DYNAMIC ADJESTMENT===========
 
     def dynamic_adjustment(self):
         """

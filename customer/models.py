@@ -20,6 +20,7 @@ from django.core.exceptions import ValidationError
 # from django.contrib.auth.models import User
 from django.utils import timezone
 from datetime import timedelta
+from decimal import Decimal
 from django.contrib.auth import get_user_model
 import uuid
 
@@ -407,8 +408,11 @@ class CreditScore(models.Model):
     
     def check_apc_approval(self):
         """Check if APC score meets approval criteria (≥500)"""
+        from customer.models import CreditConfig
+        config = CreditConfig.objects.first()
+        threshold = config.apc_approval_threshold if config else 500
         if self.apc_score is not None:
-            return self.apc_score >= 500
+            return self.apc_score >= threshold
         return False
 
 
@@ -843,3 +847,29 @@ class DeviceEnrollment(models.Model):
         return self.locking_system
 
 
+
+
+# ========================================
+#  CUSTOMER MONTHLY INCOME MODEL
+# ========================================
+
+
+
+class CustomerIncome(models.Model):
+    document_id = models.CharField(max_length=64, unique=True)   
+    employer = models.CharField(max_length=255, blank=True)
+    monthly_income = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.document_id} — {self.monthly_income}"
+    
+    # to get income
+    @classmethod
+    def get_income_by_document(cls, document_id):
+        try:
+            return cls.objects.get(document_id=document_id).monthly_income
+        except cls.DoesNotExist:
+            return None
