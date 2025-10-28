@@ -1,6 +1,6 @@
 from datetime import date
 from rest_framework import serializers
-from .models import FinancePlan, EMISchedule, PaymentRecord, FinancePlanTerm
+from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan
 
 
 # ------------------------------
@@ -75,22 +75,40 @@ class FinancePlanFetchSerializer(serializers.Serializer):
     term = serializers.IntegerField()
     installment_frequency_days = serializers.IntegerField()
 
+
 # --------------------------------------------------------
-# Finance Plan Term Serializer
+# Auto Finance Plan Serializer (for output)
 # --------------------------------------------------------
-class FinancePlanTermSerializer(serializers.ModelSerializer):
+class AutoFinancePlanSerializer(serializers.ModelSerializer):
     class Meta:
-        model = FinancePlanTerm
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']  
+        model = AutoFinancePlan
+        fields = [
+            "id",
+            "credit_application",
+            "credit_score",
+            "apc_score",
+            "risk_tier",
+            "customer_monthly_income",
+            "payment_capacity_factor",
+            "maximum_allowed_installment",
+            "minimum_down_payment_percentage",
+            "allowed_plans",
+            "high_end_extra_percentage",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
 
 
 # --------------------------------------------------------
-# Creating Tier-Term Based Finance Plan Serializer
+# Input Serializer (for creating temp finance plan)
 # --------------------------------------------------------
-class FinancePlanCreateSerializer(serializers.Serializer):
+class AutoFinancePlanCreateSerializer(serializers.Serializer):
+    """
+    Input: customer_id only
+    Used to fetch credit application, score, etc.
+    """
     customer_id = serializers.IntegerField()
-    actual_down_payment = serializers.DecimalField(max_digits=10, decimal_places=2)
 
 
 # ------------------------------

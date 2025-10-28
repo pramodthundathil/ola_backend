@@ -820,12 +820,12 @@ class PaymentRecord(models.Model):
 
 
 # ========================================
-# FINANCE PLAN TERM MODEL
-# ========================================    
-class FinancePlanTerm(models.Model):
+# BASIC FINANCE PLAN MODEL
+# ========================================
+class AutoFinancePlan(models.Model):
     """
-    Stores finance plan details per term for a customer.
-    Data comes directly from Decision Engine API response.
+    Temporary Finance Plan holding pre-calculated financial data
+    before creating actual FinancePlan terms.
     """
     RISK_TIER_CHOICES = [
         ('TIER_A', 'Tier A - Low Risk (APC ≥ 600)'),
@@ -833,83 +833,97 @@ class FinancePlanTerm(models.Model):
         ('TIER_C', 'High Risk (APC 500-549)'),
         ('TIER_D', 'Very High Risk (APC < 500)'),
     ]
-    
-    TERM_CHOICES = [
-        (4, '4 Months'),
-        (6, '6 Months'),
-        (8, '8 Months'),
-    ]
-
-    FREQUENCY_CHOICES = [
-        (15, '15 Days (Bi-Monthly)'),
-        (30, '30 Days (Monthly)'),
-    ]
-
-    # Customer reference
-    customer_id = models.IntegerField()
-
-    # Risk Assessment
-    credit_score = models.IntegerField(null=True, blank=True)
-    apc_score = models.IntegerField(null=True, blank=True)
-    risk_tier = models.CharField(max_length=10, choices=RISK_TIER_CHOICES, null=True, blank=True)
-
-    # Device and Pricing
-    device_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    is_high_end_device = models.BooleanField(default=False)
-
-    # Down Payment
-    minimum_down_payment_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    actual_down_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    down_payment_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-
-    # Financing Amount
-    amount_to_finance = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
-    # Term and Installments
-    allowed_terms = models.JSONField(default=list)
-    selected_term = models.IntegerField(choices=TERM_CHOICES, null=True, blank=True)
-    installment_frequency_days = models.IntegerField(choices=FREQUENCY_CHOICES, default=30)
-
-    # EMI Calculation
-    monthly_installment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    total_amount_payable = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
-    # Payment Capacity Check
-    customer_monthly_income = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    payment_capacity_factor = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
-    maximum_allowed_installment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    installment_to_income_ratio = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    payment_capacity_passed = models.BooleanField(default=False)
-
-    # Approval Status
-    conditions_met = models.BooleanField(default=False)
-    requires_adjustment = models.BooleanField(default=False)
-    adjustment_notes = models.TextField(null=True, blank=True)
-
-    # Scoring
-    final_score = models.IntegerField(null=True, blank=True)
-    score_status = models.CharField(
-        max_length=20,
-        choices=[
-            ('APPROVED', 'Approved (≥80)'),
-            ('CONDITIONAL', 'Approved with Conditions (60-79)'),
-            ('REJECTED', 'Rejected (<60)'),
-        ],
-        null=True,
-        blank=True
+    customer = models.ForeignKey(
+    Customer,
+    on_delete=models.CASCADE,
+    related_name='auto_finance_plans'
     )
-
+    credit_application = models.OneToOneField(
+        CreditApplication,
+        on_delete=models.CASCADE,
+        related_name='auto_finance_plan'
+    )
+    credit_score = models.ForeignKey(
+        CreditScore,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='auto_finance_plans'
+    )    
+    # Risk Assessment
+    apc_score = models.IntegerField(help_text="APC score from credit bureau")
+    risk_tier = models.CharField(max_length=10, choices=RISK_TIER_CHOICES)
+    
+    # Payment Capacity Check
+    customer_monthly_income = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Validated or declared monthly income"
+    )
+    payment_capacity_factor = models.DecimalField(
+        max_digits=4,
+        decimal_places=2,
+        help_text="k factor based on risk tier (0.10-0.30)"
+    )
+    maximum_allowed_installment = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="k × monthly_income"
+    )
+    # Down Payment
+    minimum_down_payment_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        help_text="Minimum % required based on risk tier"
+    )
+       
+    # Now stores EMI details for different terms & frequencies
+    allowed_plans = models.JSONField(default=list, blank=True)
+    
+    high_end_extra_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        db_table = 'term_finance_plans'
-        ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['customer_id']),
-            models.Index(fields=['risk_tier']),
-            models.Index(fields=['apc_score']),
-        ]
-
     def __str__(self):
-        return f"Finance Plan for Customer {self.customer_id} - {self.risk_tier} ({self.installment_frequency_days} days)"
+        return f"AutoFinancePlan - {self.customer.document_number if self.customer else 'N/A'}"
+
+    def determine_risk_tier(self):
+        """Determine risk tier based on APC score"""
+        if self.apc_score >= 600:
+            self.risk_tier = 'TIER_A'
+        elif self.apc_score >= 550:
+            self.risk_tier = 'TIER_B'
+        elif self.apc_score >= 500:
+            self.risk_tier = 'TIER_C'
+        else:
+            self.risk_tier = 'TIER_D'
+        return self.risk_tier
+    
+    def get_tier_rules(self):
+        """Get financing rules based on risk tier"""
+        tier_rules = {
+            'TIER_A': {
+                'min_down_payment': Decimal('20.00'),
+                'allowed_terms': [4, 6, 8],
+                'payment_capacity_factor': Decimal('0.30'),
+                'high_end_extra': Decimal('0.00'),
+            },
+            'TIER_B': {
+                'min_down_payment': Decimal('20.00'),
+                'allowed_terms': [6, 8],
+                'payment_capacity_factor': Decimal('0.20'),
+                'high_end_extra': Decimal('5.00'),  # Extra 5% for high-end
+            },
+            'TIER_C': {
+                'min_down_payment': Decimal('25.00'),
+                'allowed_terms': [8],
+                'payment_capacity_factor': Decimal('0.15'),
+                'high_end_extra': Decimal('10.00'),  # Extra 10% for high-end
+            },
+            'TIER_D': {
+                'min_down_payment': Decimal('100.00'),  # Reject
+                'allowed_terms': [],
+                'payment_capacity_factor': Decimal('0.00'),
+                'high_end_extra': Decimal('0.00'),
+            },
+        }
+        return tier_rules.get(self.risk_tier, tier_rules['TIER_D'])
