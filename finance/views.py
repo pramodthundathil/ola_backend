@@ -28,9 +28,22 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 # Local Application Imports
 # ============================================================
-from .models import FinancePlan, PaymentRecord, EMISchedule
-from customer.models import Customer, CreditApplication, CreditScore
-from .serializers import FinancePlanSerializer, FinanceOverviewSerializer, FinancePlanCreateSerializer, PaymentRecordSerializer, FinanceRiskTierSerializer, FinanceCollectionSerializer, FinanceOverdueSerializer
+from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan
+from home.permissions import CanViewReports
+from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
+from .serializers import (
+    FinancePlanSerializer,
+    RegionWiseReportSerializer,
+    CommonReportSerializer,
+    FinancePlanFetchSerializer,
+    AutoFinancePlanCreateSerializer,
+    FinanceOverviewSerializer,
+    AutoFinancePlanSerializer,
+    PaymentRecordSerializer,
+    FinanceRiskTierSerializer,
+    FinanceCollectionSerializer,
+    FinanceOverdueSerializer,
+)
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine
 # ============================================================
@@ -47,17 +60,19 @@ class FinancePlanPagination(PageNumberPagination):
     max_page_size = 100
 
 
+# ============================================================
+# Tier-based finance plans with multiple terms
+# ============================================================
 class AutoFinancePlanView(APIView):
     """
-    Automatically creates Finance Plan for each term and runs the Decision Engine
-    based only on the given Customer ID.
+    Automatically creates Finance Plan Terms for a customer.
     """
     permission_classes = [IsAdminOrGlobalManager]
     @swagger_auto_schema(
-        operation_summary="Create a new Finance Plan",       
-        request_body=FinancePlanCreateSerializer,  # your serializer for input
+        operation_summary="Create Finance Plan Terms",
+        request_body=AutoFinancePlanCreateSerializer(),
         responses={
-            201: FinancePlanSerializer,  # your serializer for response
+            201: AutoFinancePlanSerializer(many=True),
             400: "Validation Error",
             500: "Internal Server Error",
         },
@@ -65,73 +80,97 @@ class AutoFinancePlanView(APIView):
     )
     def post(self, request):
         try:
-            # Validate input
-            customer_id = request.data.get("customer_id")
-            if not customer_id:
-                return Response({"error": "customer_id is required."}, status=400)
+            # Validate Input
+            serializer = AutoFinancePlanCreateSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            customer_id = serializer.validated_data["customer_id"]
 
-            # Fetch customer
+            # Get Customer
             customer = get_object_or_404(Customer, id=customer_id)
 
-             #Get latest CreditScore if exists and not expired
-            credit_score_obj = (
-                CreditScore.objects
-                .filter(customer=customer, is_expired=False)
+            # Get latest credit score (non-expired)
+            credit_score = (
+                CreditScore.objects.filter(customer=customer, is_expired=False)
                 .order_by("-created_at")
                 .first()
             )
+            if not credit_score:
+                return Response(
+                    {"detail": "No active credit score found for this customer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            apc_score = credit_score.apc_score
 
-            credit_score_value = credit_score_obj.final_credit_status if credit_score_obj else None
-            apc_score_value = credit_score_obj.apc_score if credit_score_obj else None
-
-            # Get or create active CreditApplication (within last 2 days)
+            # Get or create an active credit application
             credit_app = (
-                CreditApplication.objects
-                .filter(customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"])
+                CreditApplication.objects.filter(
+                    customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"]
+                )
                 .order_by("-created_at")
                 .first()
             )
-
             if not credit_app or credit_app.is_expired():
                 credit_app = CreditApplication.objects.create(
-                    customer=customer,
-                    device_price=0,  # default value
+                    customer=customer, device_price=0
                 )
 
-            # Create FinancePlan (linked to credit_app)
-            finance_plan = FinancePlan.objects.create(
-                customer=customer,
-                credit_application=credit_app,
-                device_price=credit_app.device_price or 0,
-                customer_monthly_income=getattr(customer, "monthly_income", 3000),#temp value need to calculate
-                credit_score=credit_score_value,
-                apc_score=apc_score_value,
-                actual_down_payment=800,#temp value need to calculate
-            )
+            # To get monthly income of customer
+            document_number = customer.document_number
+            monthly_income = CustomerIncome.get_income_by_document(document_number)
+
+            # Input of Decision Engine
+            engine_input = {
+                "credit_application": credit_app,
+                "credit_score": credit_score,
+                "apc_score": apc_score,
+                "monthly_income": monthly_income            
+            }           
 
             # Run Decision Engine
-            engine = DecisionEngine(finance_plan)
-            result = engine.run()  # internally saves DecisionEngineResult
+            engine = DecisionEngine(engine_input)
+            decision_output = engine.run()  # returns list of dicts for each term/frequency
 
-            # Prepare response with required fields
-            response_data = {
-                "credit_application": credit_app.id,
-                "credit_score": getattr(finance_plan, "credit_score", None),
-                "apc_score": getattr(finance_plan.decision_engine_result, "apc_score_value", None)
-                              if hasattr(finance_plan, "decision_engine_result") else None,
-                "device_price": finance_plan.device_price,
-                "actual_down_payment": finance_plan.actual_down_payment,
-                "customer_monthly_income": finance_plan.customer_monthly_income,
-            }
+            #Save all data to AutoFinancePlan            
+            auto_plan = AutoFinancePlan.objects.create(
+                customer=customer,
+                credit_application=credit_app,
+                credit_score=credit_score,
+                apc_score=apc_score,
+                risk_tier=decision_output.get("risk_tier"),
+                customer_monthly_income=monthly_income,
+                payment_capacity_factor=decision_output.get("payment_capacity_factor", Decimal('0.00')),
+                maximum_allowed_installment=decision_output.get("maximum_allowed_installment", Decimal('0.00')),
+                minimum_down_payment_percentage=decision_output.get("minimum_down_payment_percentage", Decimal('0.00')),
+                allowed_plans=decision_output.get("allowed_plans", []),
+                high_end_extra_percentage=decision_output.get("high_end_extra_percentage", Decimal('0.00')),
+            )
 
-            return Response(response_data, status=status.HTTP_201_CREATED)
-
-        except Exception as e:
-            logger.error(f"Error in AutoFinancePlanAPIView: {str(e)}")
+            #Return success response           
             return Response(
-                {"detail": "Internal server error while creating finance plan."},
+                {
+                    "message": "Auto Finance Plan generated successfully.",
+                    "customer": customer.id,
+                    "credit_application": credit_app.id,
+                    "apc_score": apc_score,
+                    "data": {
+                        "risk_tier": auto_plan.risk_tier,
+                        "monthly_income": str(auto_plan.customer_monthly_income),
+                        "payment_capacity_factor": str(auto_plan.payment_capacity_factor),
+                        "maximum_allowed_installment": str(auto_plan.maximum_allowed_installment),
+                        "minimum_down_payment_percentage": str(auto_plan.minimum_down_payment_percentage),
+                        "allowed_plans": auto_plan.allowed_plans,
+                        "high_end_extra_percentage": str(auto_plan.high_end_extra_percentage),
+                    },
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except Exception as e:
+            logger.error(f"Error in AutoFinancePlanView: {str(e)}")
+            return Response(
+                {"detail": "Internal server error while creating finance plan terms."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
 
 # ============================================================
 # Finance Plan List & Create View
@@ -169,40 +208,85 @@ class FinancePlanView(APIView):
     #---------Create Finance Plan ----------------
     @swagger_auto_schema(
         operation_summary="Create a new Finance Plan",
-        request_body=FinancePlanSerializer,
+        request_body=FinancePlanFetchSerializer,  # <--- Updated here
         responses={
-            201: FinancePlanSerializer,
+            200: FinancePlanSerializer(many=True),
             400: "Validation Error",
+            404: "No Finance Plan Terms found",
             500: "Internal Server Error"
         },
         tags=["Finance"]
-    )    
+    )
     def post(self, request):
         try:
+            # Use the new serializer
+            serializer = FinancePlanFetchSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            customer_id = serializer.validated_data["customer_id"]
+            term = serializer.validated_data["term"]
+            frequency = serializer.validated_data["installment_frequency_days"]
 
-            serializer = self.serializer_class(data=request.data)
-            if serializer.is_valid():
+            # Verify customer exists
+            customer = Customer.objects.filter(id=customer_id).first()
+            if not customer:
+                return Response({"error": "Customer not found."}, status=status.HTTP_404_NOT_FOUND)
 
-                # Create the FinancePlan instance (initial save)
-                plan = serializer.save()
+            # Retrieve all FinancePlanTerm records based on user input
+            plan_terms = FinancePlanTerm.objects.filter(
+                credit_application__customer=customer,
+                selected_term=term,
+                installment_frequency_days=frequency
+            ).order_by('-created_at')
 
-                # Run Decision Engine for risk assessment & EMI calculation
-                engine = DecisionEngine(plan)
-                engine.run()   # executes decision logic
+            if not plan_terms.exists():
                 return Response(
-                    { "message": "Finance Plan created successfully and evaluated by Decision Engine.", "data": serializer.data},
-                    status=status.HTTP_201_CREATED
+                    {"error": "No Finance Plan Terms found for the given criteria."},
+                    status=status.HTTP_404_NOT_FOUND
                 )
-            logger.warning(f"Finance Plan creation failed: {serializer.errors}")
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            # Save or update FinancePlan for each term
+            saved_plans = []
+            for plan_term in plan_terms:
+                finance_plan, created = FinancePlan.objects.update_or_create(
+                    credit_application=plan_term.credit_application,
+                    defaults={
+                        'credit_score': plan_term.credit_score,
+                        'apc_score': plan_term.apc_score,
+                        'device_price': plan_term.device_price,
+                        'is_high_end_device': plan_term.is_high_end_device,
+                        'minimum_down_payment_percentage': plan_term.minimum_down_payment_percentage,
+                        'actual_down_payment': plan_term.actual_down_payment,
+                        'down_payment_percentage': plan_term.down_payment_percentage,
+                        'amount_to_finance': plan_term.amount_to_finance,
+                        'allowed_terms': plan_term.allowed_terms,
+                        'selected_term': plan_term.selected_term,
+                        'installment_frequency_days': plan_term.installment_frequency_days,
+                        'monthly_installment': plan_term.monthly_installment,
+                        'total_amount_payable': plan_term.total_amount_payable,
+                        'customer_monthly_income': plan_term.customer_monthly_income,
+                        'payment_capacity_factor': plan_term.payment_capacity_factor,
+                        'maximum_allowed_installment': plan_term.maximum_allowed_installment,
+                        'installment_to_income_ratio': plan_term.installment_to_income_ratio,
+                        'payment_capacity_passed': plan_term.payment_capacity_passed,
+                        'conditions_met': plan_term.conditions_met,
+                        'requires_adjustment': plan_term.requires_adjustment,
+                        'adjustment_notes': plan_term.adjustment_notes,
+                        'final_score': plan_term.final_score,
+                        'score_status': plan_term.score_status,
+                    }
+                )
+                saved_plans.append(finance_plan)
+
+            # Serialize and return all saved plans
+            serializer = FinancePlanSerializer(saved_plans, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error creating finance plan: {str(e)}")
+            logger.error(f"Error retrieving and saving Finance Plans: {str(e)}")
             return Response(
-                {"detail": "Internal server error while creating finance plan."},
+                {"detail": "Internal server error while fetching and saving finance plans."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 # ============================================================
 # Finance Analytics Overview for Plans
@@ -590,3 +674,146 @@ class FinanceInstallmentPaymentView(APIView):
             )
             start_date += timedelta(days=15)
         logger.info(f"Regenerated EMIs #{start_number}–{total_installments} for plan {plan.id}")
+
+
+# --------------------------------------
+# Finance Report View
+# --------------------------------------
+class ReportsAPIView(APIView):
+    """
+    Generates a summarized financial and customer report for Admin, 
+    Global Manager, and Finance Manager.
+    """
+    permission_classes = [CanViewReports]    
+
+    @swagger_auto_schema(
+        operation_summary="Get Common Reports (Admin / Global / Finance Manager)",
+        operation_description="""
+        Returns summarized reports including:
+        - Total customers and applications  
+        - Approval / Rejection / Pending counts  
+        - Total financed amount and average down payment  
+        - Risk tier distribution  
+        """,
+        responses={
+            200:  CommonReportSerializer(),
+            400: "Bad Request",
+            500: "Internal Server Error",
+        },
+        tags=["Reports"]
+    )
+    def get(self, request):
+        try:
+            # --- Data Aggregation ---
+            total_customers = Customer.objects.count()
+            total_applications = CreditApplication.objects.count()
+
+            approved_apps = CreditApplication.objects.filter(status='APPROVED').count()
+            rejected_apps = CreditApplication.objects.filter(status='REJECTED').count()
+            pending_apps = CreditApplication.objects.filter(status='PENDING').count()
+
+            total_financed = FinancePlan.objects.aggregate(total=Sum('amount_to_finance'))['total'] or 0
+            avg_down_payment = FinancePlan.objects.aggregate(avg=Avg('down_payment_percentage'))['avg'] or 0
+
+            tier_counts = (
+                FinancePlan.objects
+                .values('risk_tier')
+                .annotate(count=Count('id'))
+                .order_by('risk_tier')
+            )
+            report_data = {
+                "customers": total_customers,
+                "applications": {
+                    "total": total_applications,
+                    "approved": approved_apps,
+                    "rejected": rejected_apps,
+                    "pending": pending_apps,
+                },
+                "financing": {
+                    "total_financed": round(total_financed, 2),
+                    "average_down_payment": round(avg_down_payment, 2),
+                },
+                "risk_tiers": list(tier_counts),
+            }
+            serializer = CommonReportSerializer(report_data)
+            logger.info(f"Report generated successfully by user {request.user.username}")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error generating report: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Failed to generate report", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+# --------------------------------------
+# Regional-Wise Finance Report View
+# --------------------------------------
+class RegionWiseReportAPIView(APIView):
+    """
+    Generate region-wise sales and financing performance report.
+    Sales Advisors can only see their own region.
+    Admin, Global Manager, and Finance Manager can see all.
+    """
+    permission_classes = [CanViewReports]
+
+    @swagger_auto_schema(
+        operation_summary="Region-wise Sales Report",
+        operation_description="Generates region-based performance reports. "
+                              "Sales Advisors see their own region only.",
+        responses={
+            200: RegionWiseReportSerializer(),
+            403: "Forbidden - insufficient permissions",
+            500: "Internal Server Error"
+        },
+        tags=["Reports"]
+    )
+    def get(self, request):
+        try:
+            user = request.user
+
+            # --- Region-based Filtering ---
+            if user.is_sales_advisor():  
+                # Sales Advisor → only their region
+                region_filter = {"region": user.region}
+            else:
+                # Admin, Global Manager, Finance Manager → all regions
+                region_filter = {}
+
+            # --- Sales Summary ---
+            region_data = (
+                Customer.objects
+                .filter(**region_filter)
+                .values("region")
+                .annotate(
+                    total_customers=Count("id"),
+                    total_applications=Count("credit_applications"),
+                    approved=Count("credit_applications", filter=models.Q(credit_applications__status="APPROVED")),
+                    rejected=Count("credit_applications", filter=models.Q(credit_applications__status="REJECTED")),
+                )
+                .order_by("region")
+            )
+
+            # --- Finance Summary ---
+            finance_data = (
+                FinancePlan.objects
+                .filter(**region_filter)
+                .values("region")
+                .annotate(
+                    total_financed=Sum("amount_to_finance"),
+                    avg_down_payment=Avg("down_payment_percentage")
+                )
+                .order_by("region")
+            )
+            report = {
+                "sales_summary": list(region_data),
+                "finance_summary": list(finance_data),
+            }
+            serializer = RegionWiseReportSerializer(report)
+            logger.info(f"Region-wise report generated by {user.username}")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error generating region-wise report: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
