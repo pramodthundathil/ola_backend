@@ -408,9 +408,7 @@ class CreditScore(models.Model):
     
     def check_apc_approval(self):
         """Check if APC score meets approval criteria (≥500)"""
-        from customer.models import CreditConfig
-        config = CreditConfig.objects.first()
-        threshold = config.apc_approval_threshold if config else 500
+        threshold = 500
         if self.apc_score is not None:
             return self.apc_score >= threshold
         return False
@@ -420,33 +418,54 @@ class CreditScore(models.Model):
 
 
 # ========================================
-# DYNAMIC CREDIT SCORE CONFIG MODEL 
+# DYNAMIC CREDIT SCORE  FOR TIAR CONFIG MODEL 
 # ========================================
 
 
 class CreditConfig(models.Model):
     """
-    Stores dynamic credit-related configuration values.
+    Stores dynamic APC score thresholds for each risk tier.
+    Only one record allowed.
     """
-    apc_approval_threshold = models.IntegerField(
-        default=500,
-        help_text="Minimum APC/Experian score required for approval"
-    )
+
+    tier_a_min_score = models.IntegerField(default=600, help_text="Minimum APC score for Tier A")
+    tier_b_min_score = models.IntegerField(default=550, help_text="Minimum APC score for Tier B")
+    tier_c_min_score = models.IntegerField(default=500, help_text="Minimum APC score for Tier C")
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'credit_config'
+        db_table = "credit_config"
+
+    def clean(self):
+        """
+        Ensure logical ordering: Tier A > Tier B > Tier C.
+        """
+        if not (
+            self.tier_a_min_score > self.tier_b_min_score > self.tier_c_min_score
+        ):
+            raise ValidationError(
+                "Invalid tier configuration: "
+                "Tier A must have a higher threshold than Tier B, "
+                "and Tier B must have a higher threshold than Tier C."
+            )
 
     def save(self, *args, **kwargs):
+        # Only one config allowed
         if not self.pk and CreditConfig.objects.exists():
             raise ValidationError("Only one CreditConfig row is allowed.")
-        super().save(*args, **kwargs)        
+
+        # Validate tier order before saving
+        self.full_clean()
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"APC Threshold: {self.apc_approval_threshold}"
-
-
+        return (
+            f"Tiers: A≥{self.tier_a_min_score}, "
+            f"B≥{self.tier_b_min_score}, "
+            f"C≥{self.tier_c_min_score}"
+        )
 
 
 # ========================================

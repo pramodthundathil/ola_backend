@@ -543,47 +543,43 @@ class CreditScoreCheckAPIView(APIView):
 
 
 # ==============================================
-# CREDIT CONFIG GET VIEW (VIEW THRESHOLD VALUE)
+# CREDIT CONFIG GET VIEW (VIEW THRESHOLD VALUES)
 # =============================================
 
 
-
-
 class CreditConfigGetAPIView(APIView):
-    permission_classes=[IsAuthenticatedUser]
-    """
-    only get method, permission for all authanticated users
-    """
-    
+    permission_classes = [IsAuthenticatedUser]
+
     @swagger_auto_schema(
-        operation_summary="Get current APC threshold",
-        operation_description="Fetch the current dynamic APC/Experian approval threshold value.",
+        operation_summary="Get current APC tier thresholds",
+        operation_description="Fetch the current tier configuration (A, B, C).",
         responses={
             200: openapi.Response(
-                description="Current APC threshold fetched successfully",
+                description="Current APC tier thresholds fetched successfully",
                 examples={
                     "application/json": {
                         "id": 1,
-                        "apc_approval_threshold": 500,
+                        "tier_a_min_score": 600,
+                        "tier_b_min_score": 550,
+                        "tier_c_min_score": 500,
                         "updated_at": "2025-10-20T14:30:00Z",
                         "created_at": "2025-10-15T10:00:00Z"
                     }
-                }
+                },
             ),
             404: openapi.Response(
                 description="Configuration not found",
-                examples={"application/json": {"detail": "No configuration found"}}
+                examples={"application/json": {"detail": "No configuration found"}},
             ),
         },
-        tags=['credit']
+        tags=["credit"],
     )
-
-
     def get(self, request):
         config = CreditConfig.objects.first()
+        if not config:
+            return Response({"detail": "No configuration found"}, status=404)
         serializer = CreditConfigSerializer(config)
-        return Response(serializer.data)
-
+        return Response(serializer.data, status=200)
 
 
 
@@ -594,93 +590,93 @@ class CreditConfigGetAPIView(APIView):
 
 
 class CreditConfigChangeAPIView(APIView):
-    permission_classes=[IsAdminOrGlobalManager]
-    """
-    only post and patch, post only one time, permission for admin and global manager
-    """
+    permission_classes = [IsAdminOrGlobalManager]
+
     @swagger_auto_schema(
-        operation_summary="Create APC threshold configuration",
-        operation_description="Create a new CreditConfig row. Only one configuration is allowed; will return 400 if it already exists.",
+        operation_summary="Create APC tier configuration",
+        operation_description="Create a new tier configuration (A, B, C). Only one allowed.",
         request_body=CreditConfigSerializer,
         responses={
             201: openapi.Response(
-                description="CreditConfig created successfully",
+                description="Configuration created successfully",
                 examples={
                     "application/json": {
                         "id": 1,
-                        "apc_approval_threshold": 500,
-                        "updated_at": "2025-10-21T12:00:00Z"
+                        "tier_a_min_score": 600,
+                        "tier_b_min_score": 550,
+                        "tier_c_min_score": 500
                     }
-                }
+                },
             ),
             400: openapi.Response(
-                description="Configuration already exists or validation error",
-                examples={"application/json": {"detail": "CreditConfig already exists. Only one row allowed."}}
+                description="Already exists or validation error",
+                examples={"application/json": {"detail": "CreditConfig already exists. Only one row allowed."}},
             ),
         },
-        tags=['credit']
+        tags=["credit"],
     )
 
-
-
     def post(self, request):
-        # Check if a config already exists
-        if CreditConfig.objects.exists():
-            return Response(
-                {"detail": "CreditConfig already exists. Only one row allowed."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            if CreditConfig.objects.exists():
+                return Response(
+                    {"detail": "CreditConfig already exists. Only one row allowed."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        serializer = CreditConfigSerializer(data=request.data)
-        if serializer.is_valid():
-            try:
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            except ValidationError as e:
-                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            serializer = CreditConfigSerializer(data=request.data)
+            if serializer.is_valid():
+                try:
+                    serializer.save()
+                    return Response(serializer.data, status=status.HTTP_201_CREATED)
+                except ValidationError as e:
+                    # Catch model clean() validation error here
+                    message = (
+                        e.message_dict.get("__all__")[0]
+                        if hasattr(e, "message_dict") and "__all__" in e.message_dict
+                        else str(e)
+                    )
+                    return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @swagger_auto_schema(
-        operation_summary="Update APC threshold",
-        operation_description="Update the dynamic APC/Experian approval threshold value. Only one configuration row exists; updates are applied to it.",
+        operation_summary="Update APC tier thresholds",
+        operation_description="Update existing APC tier thresholds (A, B, C).",
         request_body=CreditConfigSerializer,
         responses={
             200: openapi.Response(
-                description="APC threshold updated successfully",
+                description="Thresholds updated successfully",
                 examples={
                     "application/json": {
                         "id": 1,
-                        "apc_approval_threshold": 520,
-                        "updated_at": "2025-10-20T15:00:00Z",
-                        "created_at": "2025-10-15T10:00:00Z"
+                        "tier_a_min_score": 620,
+                        "tier_b_min_score": 560,
+                        "tier_c_min_score": 510,
                     }
-                }
-            ),
-            400: openapi.Response(
-                description="Validation error",
-                examples={"application/json": {"apc_approval_threshold": ["This field is required."]}}
+                },
             ),
         },
-        tags=['credit']
-        )
-
+        tags=["credit"],
+    )
 
     def patch(self, request):
         config = CreditConfig.objects.first()
+        if not config:
+            return Response({"detail": "No configuration found"}, status=404)
+
         serializer = CreditConfigSerializer(config, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-
-
-
-
+            try:
+                serializer.save()
+                return Response(serializer.data, status=200)
+            except ValidationError as e:
+                message = (
+                    e.message_dict.get("__all__")[0]
+                    if hasattr(e, "message_dict") and "__all__" in e.message_dict
+                    else str(e)
+                )
+                return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=400)
 
 
 # =====================================================
