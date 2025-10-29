@@ -4,91 +4,114 @@ from customer. models import DecisionEngineResult
 
 
 
-class DecisionEngine:
+
+
+# ==================================================
+#  1st step (FOR RUN TEMPERAROY TABLE) 
+# ==================================================
+
+class AutoDecisionEngine:
     """
-    Calculates financing options for all allowed terms without saving to DB.
-    Returns a list of dicts with all fields of the temp finance plan.
+    Handles computation of financing plan details for a given TempFinancePlan.
     """
-    interval_options = [15, 30]
 
     def __init__(self, temp_plan):
         self.plan = temp_plan
-        self.results = []
 
-    def run(self, dynamic_adjustment=True):
-        # 1️⃣ Determine risk tier
+    def run(self):
+        """
+        Runs all calculations and updates the TempFinancePlan object fields.
+        """
+        # Step 1: Determine risk tier
         self.plan.determine_risk_tier()
 
-        # 2️⃣ Check high-end device
+        # Step 2: Get tier rules
+        rules = self.plan.get_tier_rules()
+        self.plan.payment_capacity_factor = rules["payment_capacity_factor"]
+        self.plan.minimum_down_payment_percentage = rules["min_down_payment"]
+        self.plan.high_end_extra_percentage = rules["high_end_extra"]
+
+        # Step 3: Calculate maximum allowed installment
+        self.plan.maximum_allowed_installment = (
+            self.plan.customer_monthly_income * self.plan.payment_capacity_factor
+        )
+
+        # Step 4: Allowed plans (with intervals)
+        allowed_terms = rules["allowed_terms"]
+        intervals = [15, 30]
+        plans = [
+            {"months": term, "interval_days": interval}
+            for term in allowed_terms
+            for interval in intervals
+        ]
+        self.plan.allowed_plans = plans
+
+        # Step 5: Save
+        self.plan.save()
+
+        return self.plan 
+    
+
+# ==================================================
+#  2nd step (FOR FINANCEPLAN)
+# ==================================================
+class DecisionEngine:
+    """
+    Engine to make financing decisions based on APC, income, device price, and term.
+    Uses helper methods from FinancePlan model.
+    """
+
+    def __init__(self, finance_plan):
+        self.plan = finance_plan
+
+    def run(self, dynamic_adjustment=True):
+        """
+        Executes the full decision logic step by step.
+        """
+        # 1️⃣ Determine Risk Tier
+        self.plan.determine_risk_tier()
+
+        # 2️⃣ Check if device is high-end
         self.plan.is_high_end_device = self.plan.device_price > Decimal('300.00')
 
-        # 3️⃣ Calculate minimum down payment
+        self.plan.get_tier_rules()
+
+        # 3️⃣ Calculate Minimum Down Payment
         self.plan.calculate_minimum_down_payment()
-
-        # 4️⃣ Get allowed terms
-        allowed_terms = self.plan.get_tier_rules()['allowed_terms']
-
-        # fetch  scores of geo_behavior,references_score,biometric_confidence
 
         biometric_conf = getattr(
             getattr(self.credit_application.customer, "identity_verification", None),
             "face_match_score",
             0
         )
-
-        # reference_score = getattr(
-        #     getattr(getattr(self.plan, 'credit_application', None), 'user', None),
-        #     'reference_score',
-        #     0
-        # )
-        # geo_behavior = getattr(
-        #     getattr(getattr(self.plan, 'credit_application', None), 'user', None),
-        #     'geo_behavior_score',
-        #     0
-        # )
         reference_score = 0
         geo_behavior = 0
 
-        for term in allowed_terms:
-            for interval in self.interval_options:
-                # Temporarily assign term and interval to the plan
-                self.plan.selected_term = term
-                self.plan.installment_frequency_days = interval
+        # 4️⃣ Calculate EMI (monthly installment)
+        self.plan.calculate_emi()
 
-                # Calculate EMI, capacity, conditions, final score
-                self.plan.calculate_emi()
-                self.plan.check_payment_capacity()
-                self.plan.validate_conditions()
-                self.plan.calculate_final_score(
-                    biometric_confidence=biometric_conf,
-                    references_score=reference_score,
-                    geo_behavior=geo_behavior
-                )
+        # 5️⃣ Check Payment Capacity
+        self.plan.check_payment_capacity()
 
-                # Handle dynamic adjustment
-                if dynamic_adjustment and self.plan.score_status == 'CONDITIONAL':
-                    self.plan.dynamic_adjustment()
+        # 6️⃣ Validate Tier Conditions
+        self.plan.validate_conditions()
 
-                # Convert plan to dict with **all fields**
-                term_result = {
-                    field.name: getattr(self.plan, field.name)
-                    for field in self.plan._meta.get_fields()
-                    if hasattr(self.plan, field.name)
-                }
+        # 7️⃣ Calculate Final Score
+        self.plan.calculate_final_score()
 
-                # Ensure interval is included explicitly
-                term_result['installment_frequency_days'] = interval
+        # 8️⃣ Handle Dynamic Adjustment (if needed)
+        if dynamic_adjustment and self.plan.score_status == 'CONDITIONAL':
+            self.dynamic_adjustment()
 
-                # Add to results
-                self.results.append(term_result)
+        # Save final results
+        self.plan.save()
+        
+        # 9️⃣ Save detailed result in DecisionEngineResult
+        self.save_decision_result()
 
-        # Prepare output
-        output = list(self.results)
-        self.results.clear()  
+        return self.plan
 
-        return output
-
-
+# ============ DYNAMIC ADJESTMENT===========
 
     def dynamic_adjustment(self):
         """
