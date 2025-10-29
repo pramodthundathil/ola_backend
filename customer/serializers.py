@@ -101,16 +101,19 @@ class CreditScoreSerializer(serializers.ModelSerializer):
         ]
 
 
-
-
-# ========== SERIALZER FOR SET CREDIT THRESHOLD=============
+# ========== SERIALZER FOR SET CREDIT THRESHOLD=============    
 
 class CreditConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = CreditConfig
-        fields = ['id', 'apc_approval_threshold', 'updated_at']       
-
-
+        fields = [
+            "id",
+            "tier_a_min_score",
+            "tier_b_min_score",
+            "tier_c_min_score",
+            "updated_at",
+            "created_at",
+        ]
 
 
 # ================SERIALZER FOR PERSONAL REFERENCES======
