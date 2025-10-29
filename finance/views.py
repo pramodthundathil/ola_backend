@@ -6,6 +6,12 @@ import logging
 from decimal import Decimal
 from datetime import timedelta
 
+# swagger settup
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+
+from customer.permissions import IsAuthenticatedUser
+
 # ============================================================
 # Django Imports
 # ============================================================
@@ -45,7 +51,7 @@ from .serializers import (
     FinanceOverdueSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
-from .decision_engine import DecisionEngine
+from .decision_engine import DecisionEngine, AutoDecisionEngine
 # ============================================================
 # Logger Setup
 # ============================================================
@@ -67,7 +73,7 @@ class AutoFinancePlanView(APIView):
     """
     Automatically creates Finance Plan Terms for a customer.
     """
-    permission_classes = [IsAdminOrGlobalManager]
+    permission_classes = [IsAuthenticatedUser]
     @swagger_auto_schema(
         operation_summary="Create Finance Plan Terms",
         request_body=AutoFinancePlanCreateSerializer(),
@@ -118,32 +124,35 @@ class AutoFinancePlanView(APIView):
             document_number = customer.document_number
             monthly_income = CustomerIncome.get_income_by_document(document_number)
 
-            # Input of Decision Engine
-            engine_input = {
-                "credit_application": credit_app,
-                "credit_score": credit_score,
-                "apc_score": apc_score,
-                "monthly_income": monthly_income            
-            }           
-
-            # Run Decision Engine
-            engine = DecisionEngine(engine_input)
-            decision_output = engine.run()  # returns list of dicts for each term/frequency
-
-            #Save all data to AutoFinancePlan            
-            auto_plan = AutoFinancePlan.objects.create(
+            engine_input, created = AutoFinancePlan.objects.get_or_create(
                 customer=customer,
                 credit_application=credit_app,
                 credit_score=credit_score,
                 apc_score=apc_score,
-                risk_tier=decision_output.get("risk_tier"),
+                risk_tier="",
                 customer_monthly_income=monthly_income,
-                payment_capacity_factor=decision_output.get("payment_capacity_factor", Decimal('0.00')),
-                maximum_allowed_installment=decision_output.get("maximum_allowed_installment", Decimal('0.00')),
-                minimum_down_payment_percentage=decision_output.get("minimum_down_payment_percentage", Decimal('0.00')),
-                allowed_plans=decision_output.get("allowed_plans", []),
-                high_end_extra_percentage=decision_output.get("high_end_extra_percentage", Decimal('0.00')),
+                maximum_allowed_installment=Decimal("0.00"),
+                minimum_down_payment_percentage=Decimal("0.00"),
             )
+
+            # Run Decision Engine
+            engine = AutoDecisionEngine(engine_input)
+            decision_output = engine.run()  
+
+            #Save all data to AutoFinancePlan      
+            # auto_plan, created = AutoFinancePlan.objects.get_or_create(
+            #     credit_application=credit_app,
+            #     defaults={
+            #         "customer": customer,
+            #         "credit_score": credit_score,
+            #         "apc_score": apc_score,
+            #         "risk_tier": "",
+            #         "customer_monthly_income": monthly_income,
+            #         "maximum_allowed_installment": Decimal("0.00"),
+            #         "minimum_down_payment_percentage": Decimal("0.00"),
+            #     }
+            # )    
+            auto_plan=engine_input
 
             #Return success response           
             return Response(
@@ -176,25 +185,48 @@ class AutoFinancePlanView(APIView):
 # API: Create or Get Finance Plan
 # --------------------------------------------------------
 class FinancePlanAPIView(APIView):
+    permission_classes=[IsAuthenticatedUser]
     """
     API to create a Finance Plan using Decision Engine from AutoFinancePlan data,
     and retrieve all or specific Finance Plans.
     """
 
-    # --------------------------------------------
-    # CREATE FINANCE PLAN
-    # --------------------------------------------
     @swagger_auto_schema(
         operation_summary="Create Finance Plan",
         operation_description="""
         Creates a new Finance Plan using AutoFinancePlan data and Decision Engine results.
-        Input:
-        - plan_id (AutoFinancePlan ID)
-        - device_price
-        - actual_down_payment
-        - choosed_allowed_plans: {"selected_term": 6, "installment_frequency_days": 30}
+        Input example shows how 'choosed_allowed_plans' should be structured.
         """,
-        request_body=FinancePlanCreateSerializer(),
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["temp_plan_id", "device_price", "actual_down_payment", "choosed_allowed_plans"],
+            properties={
+                "temp_plan_id": openapi.Schema(type=openapi.TYPE_INTEGER, description="Temporary AutoFinancePlan ID"),
+                "device_price": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DECIMAL, description="Device price"),
+                "actual_down_payment": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DECIMAL, description="Down payment made by customer"),
+                "choosed_allowed_plans": openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    description="Allowed plan selection with term and frequency",
+                    properties={
+                        "selected_term": openapi.Schema(type=openapi.TYPE_INTEGER, description="Selected term in months (e.g. 6)"),
+                        "installment_frequency_days": openapi.Schema(type=openapi.TYPE_INTEGER, description="Installment frequency in days (e.g. 30)"),
+                    },
+                    example={
+                        "selected_term": 6,
+                        "installment_frequency_days": 30
+                    }
+                ),
+            },
+            example={
+                "temp_plan_id": 1,
+                "device_price": "25000.00",
+                "actual_down_payment": "5000.00",
+                "choosed_allowed_plans": {
+                    "selected_term": 6,
+                    "installment_frequency_days": 30
+                }
+            }
+        ),
         responses={
             201: FinancePlanSerializer(),
             400: "Validation Error",
@@ -203,6 +235,8 @@ class FinancePlanAPIView(APIView):
         },
         tags=["Finance"]
     )
+
+
     def post(self, request):
         try:
             # Validate input
@@ -211,30 +245,42 @@ class FinancePlanAPIView(APIView):
             data = serializer.validated_data
 
             # Fetch AutoFinancePlan by ID
-            auto_finance_plan = get_object_or_404(AutoFinancePlan, id=data["plan_id"])
+            auto_finance_plan = get_object_or_404(AutoFinancePlan, id=data.get('temp_plan_id'))
 
             # Prepare DecisionEngine input
-            engine_input = {
-                "credit_application": auto_finance_plan.credit_application,
-                "credit_score": auto_finance_plan.credit_score,
-                "apc_score": auto_finance_plan.apc_score,
-                "device_price": data["device_price"],
-                "actual_down_payment": data["actual_down_payment"],
-                "customer_monthly_income": auto_finance_plan.customer_monthly_income,
-                "selected_term": data["choosed_allowed_plans"]["selected_term"],
-                "installment_frequency_days": data["choosed_allowed_plans"]["installment_frequency_days"],
-            }
+
+            engine_input = FinancePlan(
+                credit_application=auto_finance_plan.credit_application,
+                credit_score=auto_finance_plan.credit_score,
+                apc_score=auto_finance_plan.apc_score,
+                device_price=data["device_price"],
+                actual_down_payment=data["actual_down_payment"],
+                customer_monthly_income=auto_finance_plan.customer_monthly_income,
+                selected_term=data["choosed_allowed_plans"]["selected_term"],
+                installment_frequency_days=data["choosed_allowed_plans"]["installment_frequency_days"],
+                risk_tier="",
+                minimum_down_payment_percentage=Decimal("0.00"),
+                down_payment_percentage=Decimal("0.00"),
+                amount_to_finance=Decimal("0.00"),
+                monthly_installment=Decimal("0.00"),
+                total_amount_payable=Decimal("0.00"),
+                payment_capacity_factor=Decimal("0.00"),
+                maximum_allowed_installment=Decimal("0.00"),
+                installment_to_income_ratio=Decimal("0.00"),
+            )
+
+
             logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
             # Run Decision Engine
             engine = DecisionEngine(engine_input)
-            engine_output = engine.run()  # Expected output: dict of calculated finance data
+            engine_output = engine.run()  
+
+            final_plan = engine_output  
+            final_plan.save()   
 
             # Save new FinancePlan and return 
-            finance_plan_serializer = FinancePlanSerializer(data=engine_output)
-            finance_plan_serializer.is_valid(raise_exception=True)
-            finance_plan = finance_plan_serializer.save()
-            logger.info(f"[FinancePlanAPI] Finance Plan created successfully (ID={finance_plan.id})")
+            finance_plan_serializer = FinancePlanSerializer(final_plan)
             return Response(finance_plan_serializer.data, status=status.HTTP_201_CREATED)
         except AutoFinancePlan.DoesNotExist:
             logger.error("[FinancePlanAPI] AutoFinancePlan not found.")
@@ -242,6 +288,7 @@ class FinancePlanAPIView(APIView):
         except Exception as e:
             logger.exception("[FinancePlanAPI] Error creating Finance Plan.")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
     # --------------------------------------------------------
     # GET: List All or Retrieve by ID
@@ -258,14 +305,12 @@ class FinancePlanAPIView(APIView):
         responses={200: FinancePlanSerializer(many=True)},
         tags=["Finance"]
     )
-    def get(self, request):
+    def get(self, request,id=None):
         try:
-            plan_id = request.query_params.get("id")
-            if plan_id:
-                # Retrieve specific plan
-                finance_plan = get_object_or_404(FinancePlan, id=plan_id)
-                serializer = FinancePlanSerializer(finance_plan)
-                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan ID={plan_id}")
+            if id:
+                plan = get_object_or_404(FinancePlan, id=id)
+                serializer = FinancePlanSerializer(plan)
+                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan ID={id}")
                 return Response(serializer.data, status=status.HTTP_200_OK)
 
            # Paginated list of plans
