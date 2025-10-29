@@ -115,5 +115,23 @@ class CanConfigureSystem(permissions.BasePermission):
             request.user.is_authenticated and
             request.user.can_configure_system()
         )
-    
+
+
+class CanViewReports(permissions.BasePermission):
+    """
+    Permission for Admin, Global Manager, and Financial Manager
+    to access common reports.
+    """
+    def has_permission(self, request, view):
+        user = request.user
+        return (
+            user
+            and user.is_authenticated
+            and (
+                user.is_admin_user()
+                or user.is_global_manager()
+                or user.is_financial_manager()
+            )
+        )
+
 

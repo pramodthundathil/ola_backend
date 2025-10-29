@@ -13,7 +13,7 @@ from django.shortcuts import get_object_or_404
 # ============================================================
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, filters
 from rest_framework.permissions import AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.pagination import PageNumberPagination
@@ -54,6 +54,39 @@ class ProductCategoryCreateView(APIView):
     # For testing pupose permission_classes = [AllowAny] can be used.
     permission_classes = [IsAdminOrGlobalManager]    
     parser_classes = [MultiPartParser, FormParser]
+    # Enable filter, search, ordering
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+
+    # Fields to filter by (?field=value)
+    filterset_fields = [
+        'brand',                # filter by brand id
+        'brand__category',      # filter by category id
+        'condition',            # NEW, REFURBISHED, LIKE_NEW, USED
+        'is_active',
+        'is_featured',
+        'ram',
+        'storage',
+        'processor',
+        'release_year'
+    ]
+
+    # Fields to search by (?search=query)
+    search_fields = [
+        'model_name',
+        'brand__name',
+        'brand__category__name',
+        'ola_code',
+        'tags'
+    ]
+
+    # Fields to order by (?ordering=field or ?ordering=-field)
+    ordering_fields = [
+        'suggested_price',
+        'release_year',
+        'display_order',
+        'created_at'
+    ]
+    ordering = ['-created_at']
 
     @swagger_auto_schema(
         operation_summary="List all Product Categories",
@@ -225,6 +258,21 @@ class ProductBrandCreateView(APIView):
     # For testing pupose permission_classes = [AllowAny] can be used.    
     permission_classes = [IsAdminOrGlobalManagerOrReadOnly]    
     parser_classes = [MultiPartParser, FormParser]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    # Enable search, filter, and ordering
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+
+    # Fields that can be filtered using query params
+    filterset_fields = ['brand', 'condition', 'is_active', 'ram', 'storage', 'processor']
+
+    # Fields that can be searched using ?search=
+    search_fields = ['model_name', 'brand__name', 'ola_code', 'tags']
+
+    # Fields that can be ordered using ?ordering=
+    ordering_fields = ['suggested_price', 'release_year', 'display_order', 'created_at']
+
+    # Default ordering if not provided in request
+    ordering = ['-created_at']
 
     @swagger_auto_schema(
         operation_summary="List all Product Brands",
@@ -392,6 +440,18 @@ class ProductModelListCreateView(APIView):
     """
     permission_classes = [IsAdminOrGlobalManagerOrReadOnly]
     parser_classes = [MultiPartParser, FormParser]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+
+    # Include all fields you want to be searchable
+    search_fields = [
+        'brand__name', 'model_name', 'model_number', 'sku', 'ram', 'storage', 'processor',
+        'screen_size', 'operating_system', 'color', 'weight', 'dimensions', 'condition',
+        'warranty_period', 'warranty_provider', 'suggested_price', 'minimum_price_to_sell',
+        'maximum_price', 'currency', 'description', 'key_features', 'whats_in_box', 'tags', 'ola_code', 'slug'
+    ]
+
+    ordering_fields = ['model_name', 'created_at', 'suggested_price']
+    filterset_fields = ['brand', 'release_year', 'condition', 'is_active', 'is_featured']
 
     @swagger_auto_schema(
         operation_summary="List all Product Models",

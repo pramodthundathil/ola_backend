@@ -197,6 +197,11 @@ class FinancePlan(models.Model):
         (6, '6 Months'),
         (8, '8 Months'),
     ]
+    FREQUENCY_CHOICES = [
+        (10, '10 Days'),
+        (15, '15 Days (Bi-Monthly)'),
+        (30, '30 Days (Monthly)'),
+    ]
     
     credit_application = models.OneToOneField(
         CreditApplication,
@@ -257,6 +262,11 @@ class FinancePlan(models.Model):
     selected_term = models.IntegerField(
         choices=TERM_CHOICES,
         help_text="Selected term in months"
+    )
+    installment_frequency_days = models.IntegerField(
+        choices=FREQUENCY_CHOICES,
+        default=30,
+        help_text="Installment frequency: 10 days or 15 days (bi-monthly) or 30 days (monthly)"
     )
     
     # EMI Calculation (Interest-Free)
@@ -807,3 +817,113 @@ class PaymentRecord(models.Model):
                 self.emi_schedule.paid_date = self.payment_date.date()
             
             self.emi_schedule.save()
+
+
+# ========================================
+# BASIC FINANCE PLAN MODEL
+# ========================================
+class AutoFinancePlan(models.Model):
+    """
+    Temporary Finance Plan holding pre-calculated financial data
+    before creating actual FinancePlan terms.
+    """
+    RISK_TIER_CHOICES = [
+        ('TIER_A', 'Tier A - Low Risk (APC ≥ 600)'),
+        ('TIER_B', 'Tier B - Medium Risk (APC 550-599)'),
+        ('TIER_C', 'High Risk (APC 500-549)'),
+        ('TIER_D', 'Very High Risk (APC < 500)'),
+    ]
+    customer = models.ForeignKey(
+    Customer,
+    on_delete=models.CASCADE,
+    related_name='auto_finance_plans'
+    )
+    credit_application = models.OneToOneField(
+        CreditApplication,
+        on_delete=models.CASCADE,
+        related_name='auto_finance_plan'
+    )
+    credit_score = models.ForeignKey(
+        CreditScore,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='auto_finance_plans'
+    )    
+    # Risk Assessment
+    apc_score = models.IntegerField(help_text="APC score from credit bureau")
+    risk_tier = models.CharField(max_length=10, choices=RISK_TIER_CHOICES)
+    
+    # Payment Capacity Check
+    customer_monthly_income = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Validated or declared monthly income"
+    )
+    payment_capacity_factor = models.DecimalField(
+        max_digits=4,
+        decimal_places=2,
+        help_text="k factor based on risk tier (0.10-0.30)"
+    )
+    maximum_allowed_installment = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="k × monthly_income"
+    )
+    # Down Payment
+    minimum_down_payment_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        help_text="Minimum % required based on risk tier"
+    )
+       
+    # Now stores EMI details for different terms & frequencies
+    allowed_plans = models.JSONField(default=list, blank=True)
+    
+    high_end_extra_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"AutoFinancePlan - {self.customer.document_number if self.customer else 'N/A'}"
+
+    def determine_risk_tier(self):
+        """Determine risk tier based on APC score"""
+        if self.apc_score >= 600:
+            self.risk_tier = 'TIER_A'
+        elif self.apc_score >= 550:
+            self.risk_tier = 'TIER_B'
+        elif self.apc_score >= 500:
+            self.risk_tier = 'TIER_C'
+        else:
+            self.risk_tier = 'TIER_D'
+        return self.risk_tier
+    
+    def get_tier_rules(self):
+        """Get financing rules based on risk tier"""
+        tier_rules = {
+            'TIER_A': {
+                'min_down_payment': Decimal('20.00'),
+                'allowed_terms': [4, 6, 8],
+                'payment_capacity_factor': Decimal('0.30'),
+                'high_end_extra': Decimal('0.00'),
+            },
+            'TIER_B': {
+                'min_down_payment': Decimal('20.00'),
+                'allowed_terms': [6, 8],
+                'payment_capacity_factor': Decimal('0.20'),
+                'high_end_extra': Decimal('5.00'),  # Extra 5% for high-end
+            },
+            'TIER_C': {
+                'min_down_payment': Decimal('25.00'),
+                'allowed_terms': [8],
+                'payment_capacity_factor': Decimal('0.15'),
+                'high_end_extra': Decimal('10.00'),  # Extra 10% for high-end
+            },
+            'TIER_D': {
+                'min_down_payment': Decimal('100.00'),  # Reject
+                'allowed_terms': [],
+                'payment_capacity_factor': Decimal('0.00'),
+                'high_end_extra': Decimal('0.00'),
+            },
+        }
+        return tier_rules.get(self.risk_tier, tier_rules['TIER_D'])
