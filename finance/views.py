@@ -196,13 +196,19 @@ class FinancePlanAPIView(APIView):
         operation_description="""
         Creates a new Finance Plan using AutoFinancePlan data and Decision Engine results.
         Input example shows how 'choosed_allowed_plans' should be structured.
+        Device is mandatory, device_price is optional (will be auto-calculated if not provided).
         """,
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
-            required=["temp_plan_id", "device_price", "actual_down_payment", "choosed_allowed_plans"],
+            required=["temp_plan_id", "device", "actual_down_payment", "choosed_allowed_plans"],
             properties={
                 "temp_plan_id": openapi.Schema(type=openapi.TYPE_INTEGER, description="Temporary AutoFinancePlan ID"),
-                "device_price": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DECIMAL, description="Device price"),
+                "device": openapi.Schema(type=openapi.TYPE_INTEGER, description="Product Model ID (required)"),
+                "device_price": openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    format=openapi.FORMAT_DECIMAL, 
+                    description="Device price (optional - will be auto-calculated from device if not provided)"
+                ),
                 "actual_down_payment": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DECIMAL, description="Down payment made by customer"),
                 "choosed_allowed_plans": openapi.Schema(
                     type=openapi.TYPE_OBJECT,
@@ -219,6 +225,7 @@ class FinancePlanAPIView(APIView):
             },
             example={
                 "temp_plan_id": 1,
+                "device": 5,
                 "device_price": "25000.00",
                 "actual_down_payment": "5000.00",
                 "choosed_allowed_plans": {
@@ -236,7 +243,6 @@ class FinancePlanAPIView(APIView):
         tags=["Finance"]
     )
 
-
     def post(self, request):
         try:
             # Validate input
@@ -247,13 +253,22 @@ class FinancePlanAPIView(APIView):
             # Fetch AutoFinancePlan by ID
             auto_finance_plan = get_object_or_404(AutoFinancePlan, id=data.get('temp_plan_id'))
 
-            # Prepare DecisionEngine input
+            # Get device_price - either from input or auto-calculate
+            device = data["device"]
+            device_price = data.get("device_price")
+            
+            if not device_price:
+                # Auto-calculate device price with 7% ITBMS tax
+                base_price = device.suggested_price
+                device_price = base_price + (base_price * Decimal('0.07'))
 
+            # Prepare DecisionEngine input
             engine_input = FinancePlan(
                 credit_application=auto_finance_plan.credit_application,
                 credit_score=auto_finance_plan.credit_score,
                 apc_score=auto_finance_plan.apc_score,
-                device_price=data["device_price"],
+                device=device,
+                device_price=device_price,
                 actual_down_payment=data["actual_down_payment"],
                 customer_monthly_income=auto_finance_plan.customer_monthly_income,
                 selected_term=data["choosed_allowed_plans"]["selected_term"],
@@ -268,7 +283,6 @@ class FinancePlanAPIView(APIView):
                 maximum_allowed_installment=Decimal("0.00"),
                 installment_to_income_ratio=Decimal("0.00"),
             )
-
 
             logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
@@ -305,7 +319,7 @@ class FinancePlanAPIView(APIView):
         responses={200: FinancePlanSerializer(many=True)},
         tags=["Finance"]
     )
-    def get(self, request,id=None):
+    def get(self, request, id=None):
         try:
             if id:
                 plan = get_object_or_404(FinancePlan, id=id)
@@ -323,8 +337,6 @@ class FinancePlanAPIView(APIView):
         except Exception as e:
             logger.exception("[FinancePlanAPI] Error retrieving Finance Plans.")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 # ============================================================
 # Finance Analytics Overview for Plans
 # ============================================================

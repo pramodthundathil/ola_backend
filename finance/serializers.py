@@ -1,6 +1,7 @@
 from datetime import date
 from rest_framework import serializers
 from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan
+from products.models import ProductModel
 
 
 # --------------------------------------------------------
@@ -8,7 +9,17 @@ from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan
 # --------------------------------------------------------
 class FinancePlanCreateSerializer(serializers.Serializer):
     temp_plan_id = serializers.IntegerField()
-    device_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    device = serializers.PrimaryKeyRelatedField(
+        queryset=ProductModel.objects.all(),
+        help_text='Product model ID - required'
+    )
+    device_price = serializers.DecimalField(
+        max_digits=10, 
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        help_text='Optional - will be auto-calculated from device if not provided'
+    )
     actual_down_payment = serializers.DecimalField(max_digits=10, decimal_places=2)
     choosed_allowed_plans = serializers.DictField(
         child=serializers.IntegerField(),
@@ -20,6 +31,17 @@ class FinancePlanCreateSerializer(serializers.Serializer):
 # Finance Plan Create from AutoFinancePlan Serializer
 # --------------------------------------------------------
 class FinancePlanSerializer(serializers.ModelSerializer):
+    device = serializers.PrimaryKeyRelatedField(
+        queryset=ProductModel.objects.all(),
+        required=True
+    )
+    device_price = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        required=False,
+        allow_null=True
+    )
+    
     class Meta:
         model = FinancePlan
         fields = '__all__'

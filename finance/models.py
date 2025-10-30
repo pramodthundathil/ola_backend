@@ -160,6 +160,7 @@ from decimal import Decimal
 from dateutil.relativedelta import relativedelta
 from customer.models import CreditApplication, Customer, CreditScore
 from django.contrib.auth import get_user_model
+from products.models import ProductModel
 
 User = get_user_model()
 
@@ -225,6 +226,8 @@ class FinancePlan(models.Model):
         decimal_places=2,
         help_text="Total device price including 7% ITBMS tax"
     )
+
+    device = models.ForeignKey(ProductModel, on_delete=models.DO_NOTHING, null=True, blank = True)
     is_high_end_device = models.BooleanField(
         default=False,
         help_text="Device price > $300"
@@ -526,10 +529,23 @@ class FinancePlan(models.Model):
         return self.final_score
 
 
-
+    def calculate_device_price(self):
+        """
+        Automatically calculate device price from ProductModel including 7% ITBMS tax
+        Formula: device_price = suggested_price + (suggested_price × 0.07)
+        """
+        if self.device:
+            base_price = self.device.suggested_price
+            tax = base_price * Decimal('0.07')
+            self.device_price = base_price 
+        return self.device_price
 
     def save(self, *args, **kwargs):
         # Auto-calculate fields before saving
+
+        if self.device and not self.device_price:
+            self.calculate_device_price()
+
         if self.apc_score:
             self.determine_risk_tier()
         
