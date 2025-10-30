@@ -639,12 +639,13 @@ class DeviceLockAPIView(APIView):
 # --------------------------------------------------------
 # APC Score API View
 # --------------------------------------------------------
+from rest_framework.permissions import AllowAny
 class APCScoreAPIView(APIView):
     """
     APC Score Generation
     - POST: Generate random APC score for a document number
     """
-    permission_classes = [IsAuthenticatedUser]
+    permission_classes = [AllowAny]
     
     @swagger_auto_schema(
         operation_summary="Generate APC Score",
