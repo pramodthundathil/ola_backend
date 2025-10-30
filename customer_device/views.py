@@ -22,6 +22,7 @@ from finance.models import FinancePlan
 from customer.models import Customer
 from home.permissions import  IsAdminUser, IsGlobalManager
 from customer.permissions import  IsAuthenticatedUser
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -632,3 +633,66 @@ class DeviceLockAPIView(APIView):
                 }
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+
+
+# --------------------------------------------------------
+# APC Score API View
+# --------------------------------------------------------
+class APCScoreAPIView(APIView):
+    """
+    APC Score Generation
+    - POST: Generate random APC score for a document number
+    """
+    permission_classes = [IsAuthenticatedUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Generate APC Score",
+        operation_description="Generate a random APC score between 400-900 for a given document number",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["document_number"],
+            properties={
+                "document_number": openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="Document number to generate score for"
+                ),
+            }
+        ),
+        responses={
+            200: openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    "document_number": openapi.Schema(type=openapi.TYPE_STRING),
+                    "apc_score": openapi.Schema(type=openapi.TYPE_INTEGER)
+                }
+            ),
+            400: "Validation Error"
+        },
+        tags=["APC Score"]
+    )
+    def post(self, request):
+        try:
+            document_number = request.data.get('document_number')
+            
+            if not document_number:
+                return Response(
+                    {"error": "document_number is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            apc_score = random.randint(400, 900)
+            
+            logger.info(f"[APCScore] Generated score {apc_score} for document {document_number}")
+            
+            return Response({
+                "document_number": document_number,
+                "apc_score": apc_score
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.exception("[APCScore] Error generating score")
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

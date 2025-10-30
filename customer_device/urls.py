@@ -9,4 +9,7 @@ urlpatterns = [
     # Device Lock/Unlock (Admin only)
     path('device-lock/', views.DeviceLockAPIView.as_view(), name='device-lock'),
     path('device-unlock/', views.DeviceLockAPIView.as_view(), name='device-unlock'),
+
+
+    path("experian/score/test/",views.APCScoreAPIView.as_view(),name="experian_score_test")
 ]
