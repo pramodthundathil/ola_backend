@@ -46,9 +46,11 @@ from .serializers import (
     FinanceOverviewSerializer,
     AutoFinancePlanSerializer,
     PaymentRecordSerializer,
+    PaymentRecordSerializerPlan,
     FinanceRiskTierSerializer,
     FinanceCollectionSerializer,
     FinanceOverdueSerializer,
+    EMIScheduleSerializerPlan,
 )
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
@@ -337,6 +339,76 @@ class FinancePlanAPIView(APIView):
         except Exception as e:
             logger.exception("[FinancePlanAPI] Error retrieving Finance Plans.")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+
+    @swagger_auto_schema(
+        operation_summary="Get Finance Plan by Customer ID",
+        operation_description="""
+        Retrieve the finance plan for a specific customer.
+        Pass customer_id as query parameter.
+        
+        **Example:**
+        - `GET /api/finance/plan/customer/?customer_id=5`
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'customer_id',
+                openapi.IN_QUERY,
+                description="Customer ID",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            )
+        ],
+        responses={
+            200: FinancePlanSerializer(),
+            404: "Finance Plan not found for this customer",
+            400: "customer_id parameter is required"
+        },
+        tags=["Finance"]
+    )
+    def get(self, request, id=None):
+        try:
+            # Check if customer_id is provided
+            customer_id = request.query_params.get('customer_id')
+            
+            if customer_id:
+                # Get customer
+                customer = get_object_or_404(Customer, id=customer_id)
+                
+                # Get finance plan through credit application
+                finance_plan = FinancePlan.objects.filter(
+                    credit_application__customer=customer
+                ).order_by('-created_at').first()
+                
+                if not finance_plan:
+                    return Response(
+                        {"error": f"No finance plan found for customer ID {customer_id}"}, 
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+                
+                serializer = FinancePlanSerializer(finance_plan)
+                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan for Customer ID={customer_id}")
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            
+            # Existing logic for getting by ID
+            if id:
+                plan = get_object_or_404(FinancePlan, id=id)
+                serializer = FinancePlanSerializer(plan)
+                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan ID={id}")
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+            # Paginated list of plans
+            finance_plans = FinancePlan.objects.all().order_by("-created_at")
+            paginator = FinancePlanPagination()
+            paginated_qs = paginator.paginate_queryset(finance_plans, request)
+            serializer = FinancePlanSerializer(paginated_qs, many=True)
+            logger.info(f"[FinancePlanAPI] Retrieved {len(paginated_qs)} finance plans (paginated).")
+            return paginator.get_paginated_response(serializer.data)
+            
+        except Exception as e:
+            logger.exception("[FinancePlanAPI] Error retrieving Finance Plans.")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 # ============================================================
 # Finance Analytics Overview for Plans
 # ============================================================
@@ -611,6 +683,151 @@ class PaymentRecordListCreateView(APIView):
             )
         
 
+
+
+# --------------------------------------------------------
+# API: Get EMI Schedule by Customer ID
+# --------------------------------------------------------
+class EMIScheduleAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Get EMI Schedule by Customer ID",
+        operation_description="""
+        Retrieve all EMI schedules (upcoming, due, paid, overdue) for a specific customer.
+        
+        **Query Parameters:**
+        - `customer_id` (required): Customer ID
+        - `status` (optional): Filter by status (UPCOMING, DUE, PAID, OVERDUE, PARTIALLY_PAID)
+        
+        **Examples:**
+        - `GET /api/finance/emi-schedule/?customer_id=5` → Get all EMI schedules
+        - `GET /api/finance/emi-schedule/?customer_id=5&status=PAID` → Get only paid EMIs
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'customer_id',
+                openapi.IN_QUERY,
+                description="Customer ID",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'status',
+                openapi.IN_QUERY,
+                description="Filter by EMI status",
+                type=openapi.TYPE_STRING,
+                enum=['UPCOMING', 'DUE', 'PAID', 'OVERDUE', 'PARTIALLY_PAID'],
+                required=False
+            )
+        ],
+        responses={
+            200: openapi.Response(
+                description="EMI Schedule list with summary",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'customer_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'customer_name': openapi.Schema(type=openapi.TYPE_STRING),
+                        'finance_plan_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'summary': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'total_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'paid_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'upcoming_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'overdue_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'total_amount': openapi.Schema(type=openapi.TYPE_STRING),
+                                'amount_paid': openapi.Schema(type=openapi.TYPE_STRING),
+                                'balance_remaining': openapi.Schema(type=openapi.TYPE_STRING),
+                            }
+                        ),
+                        'schedules': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_OBJECT))
+                    }
+                )
+            ),
+            400: "customer_id parameter is required",
+            404: "No EMI schedules found for this customer"
+        },
+        tags=["Finance"]
+    )
+    def get(self, request):
+        try:
+            customer_id = request.query_params.get('customer_id')
+            status_filter = request.query_params.get('status')
+            
+            if not customer_id:
+                return Response(
+                    {"error": "customer_id parameter is required"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get customer
+            customer = get_object_or_404(Customer, id=customer_id)
+            
+            # Get finance plan for customer
+            finance_plan = FinancePlan.objects.filter(
+                credit_application__customer=customer
+            ).order_by('-created_at').first()
+            
+            if not finance_plan:
+                return Response(
+                    {"error": f"No finance plan found for customer ID {customer_id}"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get EMI schedules
+            emi_schedules = EMISchedule.objects.filter(
+                finance_plan=finance_plan
+            ).order_by('installment_number')
+            
+            # Apply status filter if provided
+            if status_filter:
+                emi_schedules = emi_schedules.filter(status=status_filter.upper())
+            
+            if not emi_schedules.exists():
+                return Response(
+                    {"error": f"No EMI schedules found for customer ID {customer_id}"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Calculate summary
+            total_installments = emi_schedules.count()
+            paid_count = emi_schedules.filter(status='PAID').count()
+            upcoming_count = emi_schedules.filter(status='UPCOMING').count()
+            overdue_count = emi_schedules.filter(status='OVERDUE').count()
+            
+            total_amount = sum(emi.installment_amount for emi in emi_schedules)
+            amount_paid = sum(emi.amount_paid for emi in emi_schedules)
+            balance_remaining = sum(emi.balance_remaining for emi in emi_schedules)
+            
+            # Serialize data
+            serializer = EMIScheduleSerializerPlan(emi_schedules, many=True)
+            
+            response_data = {
+                'customer_id': customer.id,
+                'customer_name': f"{customer.first_name} {customer.last_name}",
+                'finance_plan_id': finance_plan.id,
+                'summary': {
+                    'total_installments': total_installments,
+                    'paid_installments': paid_count,
+                    'upcoming_installments': upcoming_count,
+                    'overdue_installments': overdue_count,
+                    'total_amount': str(total_amount),
+                    'amount_paid': str(amount_paid),
+                    'balance_remaining': str(balance_remaining),
+                },
+                'schedules': serializer.data
+            }
+            
+            logger.info(f"[EMIScheduleAPI] Retrieved {total_installments} EMI schedules for Customer ID={customer_id}")
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.exception("[EMIScheduleAPI] Error retrieving EMI schedules.")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 # --------------------------------------
 # EMI Payment View
 # --------------------------------------
@@ -866,3 +1083,188 @@ class RegionWiseReportAPIView(APIView):
                 {"error": "Internal server error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+
+
+
+# --------------------------------------------------------
+# API: Get Payment Records by Customer ID
+# --------------------------------------------------------
+class PaymentRecordAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Get Payment Records by Customer ID",
+        operation_description="""
+        Retrieve all payment records for a specific customer.
+        
+        **Query Parameters:**
+        - `customer_id` (required): Customer ID
+        - `payment_type` (optional): Filter by type (DOWN_PAYMENT, EMI, LATE_FEE, FULL_SETTLEMENT)
+        - `payment_status` (optional): Filter by status (PENDING, COMPLETED, FAILED, REFUNDED, CANCELLED)
+        - `payment_method` (optional): Filter by method (PUNTO_PAGO, YAPPY, WESTERN_UNION, CASH, etc.)
+        
+        **Examples:**
+        - `GET /api/finance/payments/?customer_id=5` → Get all payments
+        - `GET /api/finance/payments/?customer_id=5&payment_type=EMI` → Get only EMI payments
+        - `GET /api/finance/payments/?customer_id=5&payment_status=COMPLETED` → Get completed payments
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'customer_id',
+                openapi.IN_QUERY,
+                description="Customer ID",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'payment_type',
+                openapi.IN_QUERY,
+                description="Filter by payment type",
+                type=openapi.TYPE_STRING,
+                enum=['DOWN_PAYMENT', 'EMI', 'LATE_FEE', 'FULL_SETTLEMENT'],
+                required=False
+            ),
+            openapi.Parameter(
+                'payment_status',
+                openapi.IN_QUERY,
+                description="Filter by payment status",
+                type=openapi.TYPE_STRING,
+                enum=['PENDING', 'COMPLETED', 'FAILED', 'REFUNDED', 'CANCELLED'],
+                required=False
+            ),
+            openapi.Parameter(
+                'payment_method',
+                openapi.IN_QUERY,
+                description="Filter by payment method",
+                type=openapi.TYPE_STRING,
+                enum=['PUNTO_PAGO', 'YAPPY', 'WESTERN_UNION', 'CASH', 'BANK_TRANSFER', 'OTHER'],
+                required=False
+            )
+        ],
+        responses={
+            200: openapi.Response(
+                description="Payment records list with summary",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'customer_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'customer_name': openapi.Schema(type=openapi.TYPE_STRING),
+                        'finance_plan_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'summary': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'total_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'completed_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'pending_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'total_amount_paid': openapi.Schema(type=openapi.TYPE_STRING),
+                                'payment_methods': openapi.Schema(type=openapi.TYPE_OBJECT),
+                            }
+                        ),
+                        'payments': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_OBJECT))
+                    }
+                )
+            ),
+            400: "customer_id parameter is required",
+            404: "No payment records found for this customer"
+        },
+        tags=["Finance"]
+    )
+    def get(self, request):
+        try:
+            customer_id = request.query_params.get('customer_id')
+            payment_type = request.query_params.get('payment_type')
+            payment_status = request.query_params.get('payment_status')
+            payment_method = request.query_params.get('payment_method')
+            
+            if not customer_id:
+                return Response(
+                    {"error": "customer_id parameter is required"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get customer
+            customer = get_object_or_404(Customer, id=customer_id)
+            
+            # Get finance plan for customer
+            finance_plan = FinancePlan.objects.filter(
+                credit_application__customer=customer
+            ).order_by('-created_at').first()
+            
+            if not finance_plan:
+                return Response(
+                    {"error": f"No finance plan found for customer ID {customer_id}"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get payment records
+            payments = PaymentRecord.objects.filter(
+                finance_plan=finance_plan
+            ).order_by('-payment_date')
+            
+            # Apply filters
+            if payment_type:
+                payments = payments.filter(payment_type=payment_type.upper())
+            if payment_status:
+                payments = payments.filter(payment_status=payment_status.upper())
+            if payment_method:
+                payments = payments.filter(payment_method=payment_method.upper())
+            
+            if not payments.exists():
+                return Response(
+                    {"error": f"No payment records found for customer ID {customer_id}"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Calculate summary
+            total_payments = payments.count()
+            completed_count = payments.filter(payment_status='COMPLETED').count()
+            pending_count = payments.filter(payment_status='PENDING').count()
+            
+            total_amount_paid = sum(
+                payment.payment_amount 
+                for payment in payments.filter(payment_status='COMPLETED')
+            )
+            
+            # Payment methods breakdown
+            payment_methods_summary = {}
+            for payment in payments.filter(payment_status='COMPLETED'):
+                method = payment.get_payment_method_display()
+                if method not in payment_methods_summary:
+                    payment_methods_summary[method] = {
+                        'count': 0,
+                        'total_amount': Decimal('0.00')
+                    }
+                payment_methods_summary[method]['count'] += 1
+                payment_methods_summary[method]['total_amount'] += payment.payment_amount
+            
+            # Convert Decimal to string for JSON serialization
+            for method in payment_methods_summary:
+                payment_methods_summary[method]['total_amount'] = str(
+                    payment_methods_summary[method]['total_amount']
+                )
+            
+            # Serialize data
+            serializer = PaymentRecordSerializerPlan(payments, many=True)
+            
+            response_data = {
+                'customer_id': customer.id,
+                'customer_name': f"{customer.first_name} {customer.last_name}",
+                'finance_plan_id': finance_plan.id,
+                'summary': {
+                    'total_payments': total_payments,
+                    'completed_payments': completed_count,
+                    'pending_payments': pending_count,
+                    'total_amount_paid': str(total_amount_paid),
+                    'payment_methods': payment_methods_summary,
+                },
+                'payments': serializer.data
+            }
+            
+            logger.info(f"[PaymentRecordAPI] Retrieved {total_payments} payment records for Customer ID={customer_id}")
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.exception("[PaymentRecordAPI] Error retrieving payment records.")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

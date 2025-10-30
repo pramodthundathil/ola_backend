@@ -90,6 +90,20 @@ class EMIScheduleSerializer(serializers.ModelSerializer):
         model = EMISchedule
         fields = '__all__'
 
+# --------------------------------------------------------
+# EMI Schedule Serializer
+# --------------------------------------------------------
+class EMIScheduleSerializerPlan(serializers.ModelSerializer):
+    finance_plan_id = serializers.IntegerField(source='finance_plan.id', read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = EMISchedule
+        fields = '__all__'
+    
+    def get_customer_name(self, obj):
+        return f"{obj.finance_plan.credit_application.customer.first_name} {obj.finance_plan.credit_application.customer.last_name}"
+
 
 # ------------------------------
 # Payment Record Serializer
@@ -214,3 +228,25 @@ class RegionFinanceSummarySerializer(serializers.Serializer):
 class RegionWiseReportSerializer(serializers.Serializer):
     sales_summary = RegionSalesSummarySerializer(many=True)
     finance_summary = RegionFinanceSummarySerializer(many=True)
+
+
+# --------------------------------------------------------
+# Payment Record Serializer
+# --------------------------------------------------------
+class PaymentRecordSerializerPlan(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+    finance_plan_id = serializers.IntegerField(source='finance_plan.id', read_only=True)
+    emi_installment_number = serializers.IntegerField(source='emi_schedule.installment_number', read_only=True, allow_null=True)
+    processed_by_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PaymentRecord
+        fields = '__all__'
+    
+    def get_customer_name(self, obj):
+        return f"{obj.finance_plan.credit_application.customer.first_name} {obj.finance_plan.credit_application.customer.last_name}"
+    
+    def get_processed_by_name(self, obj):
+        if obj.processed_by:
+            return f"{obj.processed_by.first_name} {obj.processed_by.last_name}"
+        return None

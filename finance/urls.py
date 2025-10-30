@@ -16,5 +16,11 @@ urlpatterns = [
     path('payments/emi/<int:emi_id>/', views.FinanceInstallmentPaymentView.as_view(), name='emi_payment'), 
     path("reports/common/", views.ReportsAPIView.as_view(), name="common-reports"),
     path("reports/region/", views.RegionWiseReportAPIView.as_view(), name="region-reports"),
-
+       
+    # EMI Schedule API
+    path('finance/emi-schedule/', views.EMIScheduleAPIView.as_view(), name='emi-schedule'),
+    
+    # Payment Records API
+    path('finance/payments/', views.PaymentRecordAPIView.as_view(), name='payment-records'),
 ]
+
