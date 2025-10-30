@@ -1,7 +1,8 @@
 from decimal import Decimal
 from .models import FinancePlan
-from customer. models import DecisionEngineResult
+from customer. models import DecisionEngineResult, CreditConfig
 import logging
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,15 @@ class AutoDecisionEngine:
         Runs all calculations and updates the TempFinancePlan object fields.
         """
         # Step 1: Determine risk tier
-        self.plan.determine_risk_tier()
+         # 1️ Determine Risk Tier
+        try:
+            credit_config = CreditConfig.objects.last() 
+            tier_a_min_score = credit_config.tier_a_min_score
+            tier_b_min_score = credit_config.tier_b_min_score
+            tier_c_min_score = credit_config.tier_c_min_score
+            self.plan.determine_risk_tier(tier_a_min_score,tier_b_min_score , tier_c_min_score)
+        except:
+            self.plan.determine_risk_tier()
 
         rules = self.plan.get_tier_rules() or {}
 
@@ -76,7 +85,14 @@ class DecisionEngine:
         Executes the full decision logic step by step.
         """
         # 1️ Determine Risk Tier
-        self.plan.determine_risk_tier()
+        try:
+            credit_config = CreditConfig.objects.last() 
+            tier_a_min_score = credit_config.tier_a_min_score
+            tier_b_min_score = credit_config.tier_b_min_score
+            tier_c_min_score = credit_config.tier_c_min_score
+            self.plan.determine_risk_tier(tier_a_min_score,tier_b_min_score , tier_c_min_score)
+        except:
+            self.plan.determine_risk_tier()
 
         # 2️ Check if device is high-end
         self.plan.is_high_end_device = self.plan.device_price > Decimal('300.00')

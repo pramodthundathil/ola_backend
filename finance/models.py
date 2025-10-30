@@ -341,13 +341,13 @@ class FinancePlan(models.Model):
     def __str__(self):
         return f"Finance Plan for App {self.credit_application.id} - {self.risk_tier}"
     
-    def determine_risk_tier(self):
+    def determine_risk_tier(self, tier_a_min_score = 600,tier_b_min_score = 550, tier_c_min_score = 500):
         """Determine risk tier based on APC score"""
-        if self.apc_score >= 600:
+        if self.apc_score >= tier_a_min_score:
             self.risk_tier = 'TIER_A'
-        elif self.apc_score >= 550:
+        elif self.apc_score >= tier_b_min_score:
             self.risk_tier = 'TIER_B'
-        elif self.apc_score >= 500:
+        elif self.apc_score >= tier_c_min_score:
             self.risk_tier = 'TIER_C'
         else:
             self.risk_tier = 'TIER_D'
