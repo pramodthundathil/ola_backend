@@ -64,6 +64,8 @@ INSTALLED_APPS = [
 
     'finance',
     'store',
+
+    'customer_device',
     
 ]
 

@@ -1,8 +1,9 @@
 from django.db import models
+from django.utils import timezone
 from finance.models import FinancePlan
 from products.models import ProductModel, Brand
+from customer.models import Customer
 
-# Create your models here.
 class DeviceEnrollmentCustomer(models.Model):
     """
     Manages device enrollment and locking system integration.
@@ -26,22 +27,9 @@ class DeviceEnrollmentCustomer(models.Model):
         ('NONE', 'None'),
     ]
 
-    DEVICE_BRAND_CHOICES = [
-        ('samsung', 'Samsung'),
-        ('apple', 'Apple'),
-        ('huawei', 'Huawei'),
-        ('xiaomi', 'Xiaomi'),
-        ('oppo', 'Oppo'),
-        ('vivo', 'Vivo'),
-        ('realme', 'Realme'),
-        ('tecno', 'Tecno'),
-        ('infinix', 'Infinix'),
-        ('itel', 'Itel'),
-        ('other', 'Other'),
-    ]
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
     
-   # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    credit_application = models.OneToOneField(
+    finance_plan = models.OneToOneField(
         FinancePlan,
         on_delete=models.CASCADE,
         related_name='device_enrollment_customer'
@@ -49,8 +37,15 @@ class DeviceEnrollmentCustomer(models.Model):
     
     # Device Information
     imei = models.CharField(max_length=20, unique=True)
-    device_brand = models.CharField(max_length=100, choices=DEVICE_BRAND_CHOICES)
-    device_model = models.ForeignKey(ProductModel, on_delete=models.DO_NOTHING)
+    device_brand_name = models.CharField(
+        max_length=100,
+        help_text="Brand name from ProductModel (e.g., Samsung, Apple, Xiaomi)"
+    )
+    device_model = models.ForeignKey(
+        ProductModel, 
+        on_delete=models.DO_NOTHING,
+        help_text="Auto-populated from FinancePlan"
+    )
     
     # Enrollment Process
     enrollment_status = models.CharField(
@@ -94,11 +89,13 @@ class DeviceEnrollmentCustomer(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        db_table = 'device_enrollments'
+        db_table = 'device_enrollment_customer'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['imei']),
             models.Index(fields=['enrollment_status']),
+            models.Index(fields=['finance_plan']),
+            models.Index(fields=['customer']),
         ]
     
     def __str__(self):
@@ -106,9 +103,22 @@ class DeviceEnrollmentCustomer(models.Model):
     
     def determine_locking_system(self):
         """Determine which locking system to use based on device brand"""
-        if 'samsung' in self.device_brand.lower():
+        brand_lower = self.device_brand_name.lower()
+        
+        if 'samsung' in brand_lower:
             self.locking_system = 'KNOX'
+        elif 'apple' in brand_lower or 'iphone' in brand_lower or 'ipad' in brand_lower:
+            # Apple devices typically don't use these systems
+            self.locking_system = 'NONE'
         else:
+            # All other Android devices
             self.locking_system = 'NUOVOPAY'
+        
         return self.locking_system
-
+    
+    def save(self, *args, **kwargs):
+        # Auto-determine locking system when creating
+        if not self.pk:  # Only on creation
+            self.determine_locking_system()
+        
+        super().save(*args, **kwargs)
