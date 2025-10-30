@@ -507,11 +507,11 @@ class FinancePlan(models.Model):
         
         # Calculate final score
         self.final_score = int(
-            (0.30 * apc_norm) +
-            (0.30 * capacity_norm) +
-            (0.20 * biometric_f) +
-            (0.10 * references_f) +
-            (0.10 * geo_f)
+            (Decimal('0.30') * apc_norm) +
+            (Decimal('0.30') * capacity_norm) +
+            (Decimal('0.20') * biometric_f) +
+            (Decimal('0.10') * references_f) +
+            (Decimal('0.10') * geo_f)
         )
 
 

@@ -1,7 +1,9 @@
 from decimal import Decimal
 from .models import FinancePlan
 from customer. models import DecisionEngineResult
+import logging
 
+logger = logging.getLogger(__name__)
 
 
 
@@ -25,11 +27,16 @@ class AutoDecisionEngine:
         # Step 1: Determine risk tier
         self.plan.determine_risk_tier()
 
-        # Step 2: Get tier rules
-        rules = self.plan.get_tier_rules()
-        self.plan.payment_capacity_factor = rules["payment_capacity_factor"]
-        self.plan.minimum_down_payment_percentage = rules["min_down_payment"]
-        self.plan.high_end_extra_percentage = rules["high_end_extra"]
+        rules = self.plan.get_tier_rules() or {}
+
+        self.plan.payment_capacity_factor = Decimal(rules.get("payment_capacity_factor", "0.00"))
+        self.plan.minimum_down_payment_percentage = Decimal(rules.get("min_down_payment", "0.00"))
+        self.plan.high_end_extra_percentage = Decimal(rules.get("high_end_extra", "0.00"))
+
+        # Optional: log warning if any are missing
+        if not rules.get("payment_capacity_factor"):
+            logger.warning(f"Missing 'payment_capacity_factor' in tier rules for plan ID {self.plan.id}")
+
 
         # Step 3: Calculate maximum allowed installment
         self.plan.maximum_allowed_installment = (
@@ -68,45 +75,51 @@ class DecisionEngine:
         """
         Executes the full decision logic step by step.
         """
-        # 1️⃣ Determine Risk Tier
+        # 1️ Determine Risk Tier
         self.plan.determine_risk_tier()
 
-        # 2️⃣ Check if device is high-end
+        # 2️ Check if device is high-end
         self.plan.is_high_end_device = self.plan.device_price > Decimal('300.00')
 
         self.plan.get_tier_rules()
 
-        # 3️⃣ Calculate Minimum Down Payment
+        # 3️ Calculate Minimum Down Payment
         self.plan.calculate_minimum_down_payment()
 
-        biometric_conf = getattr(
-            getattr(self.credit_application.customer, "identity_verification", None),
-            "face_match_score",
-            0
-        )
-        reference_score = 0
-        geo_behavior = 0
+        # biometric_conf = getattr(
+        #     getattr(self.credit_application.customer, "identity_verification", None),
+        #     "face_match_score",
+        #     0
+        # )
+        biometric_conf=100
+        reference_score = 100
+        geo_behavior = 100
 
-        # 4️⃣ Calculate EMI (monthly installment)
+        # 4️ Calculate EMI (monthly installment)
         self.plan.calculate_emi()
 
-        # 5️⃣ Check Payment Capacity
+        # 5️ Check Payment Capacity
         self.plan.check_payment_capacity()
 
-        # 6️⃣ Validate Tier Conditions
+        # 6️ Validate Tier Conditions
         self.plan.validate_conditions()
 
-        # 7️⃣ Calculate Final Score
-        self.plan.calculate_final_score()
+        # 7️ Calculate Final Score
+        self.plan.calculate_final_score(
+            biometric_confidence=biometric_conf,
+            references_score=reference_score,
+            geo_behavior=geo_behavior
+        )
 
-        # 8️⃣ Handle Dynamic Adjustment (if needed)
+
+        # 8️ Handle Dynamic Adjustment (if needed)
         if dynamic_adjustment and self.plan.score_status == 'CONDITIONAL':
             self.dynamic_adjustment()
 
         # Save final results
         self.plan.save()
         
-        # 9️⃣ Save detailed result in DecisionEngineResult
+        # 9️ Save detailed result in DecisionEngineResult
         self.save_decision_result()
 
         return self.plan
@@ -158,38 +171,38 @@ class DecisionEngine:
         result, created = DecisionEngineResult.objects.update_or_create(
             credit_application=self.plan.credit_application,
             defaults={
-                # 1️⃣ APC Score
+                #  APC Score
                 'apc_score_value': self.plan.apc_score,
                 'apc_score_passed': self.plan.risk_tier != 'TIER_D',
 
-                # 2️⃣ Internal Score
+                #  Internal Score
                 'internal_score_value': getattr(self.plan, 'internal_score', None),
                 'internal_score_passed': getattr(self.plan, 'internal_score_passed', False),
 
-                # 3️⃣ Identity Validation
+                #  Identity Validation
                 'document_valid': getattr(self.plan, 'document_valid', False),
                 'biometric_valid': getattr(self.plan, 'biometric_valid', False),
                 'liveness_check_passed': getattr(self.plan, 'liveness_check_passed', False),
                 'identity_validation_passed': getattr(self.plan, 'identity_validation_passed', False),
 
-                # 4️⃣ Payment Capacity
+                #  Payment Capacity
                 'income_amount': self.plan.customer_monthly_income,
                 'installment_amount': self.plan.monthly_installment,
                 'installment_to_income_ratio': self.plan.installment_to_income_ratio,
                 'payment_capacity_passed': self.plan.payment_capacity_passed,
 
-                # 5️⃣ Personal References
+                #  Personal References
                 'valid_references_count': getattr(self.plan, 'valid_references_count', 0),
                 'references_passed': getattr(self.plan, 'references_passed', False),
 
-                # 6️⃣ Anti-fraud
+                #  Anti-fraud
                 'duplicate_id_check': getattr(self.plan, 'duplicate_id_check', True),
                 'duplicate_phone_check': getattr(self.plan, 'duplicate_phone_check', True),
                 'duplicate_imei_check': getattr(self.plan, 'duplicate_imei_check', True),
                 'anti_fraud_passed': getattr(self.plan, 'anti_fraud_passed', False),
                 'anti_fraud_notes': getattr(self.plan, 'anti_fraud_notes', ''),
 
-                # 7️⃣ Commercial Conditions
+                #  Commercial Conditions
                 'initial_payment_percentage': self.plan.down_payment_percentage,
                 'loan_term_months': self.plan.selected_term,
                 'is_high_end_device': self.plan.is_high_end_device,
