@@ -16,7 +16,7 @@ from customer.permissions import IsAuthenticatedUser
 # Django Imports
 # ============================================================
 from django.shortcuts import get_object_or_404
-from django.db.models import Count, Sum, Avg
+from django.db.models import Count, Sum, Avg, Q, Prefetch
 from django.utils import timezone
 from django.db import models 
 from django.core.cache import cache
@@ -36,7 +36,9 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 # Local Application Imports
 # ============================================================
-from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog, get_device_price_with_cache
+from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog
+from store.models import Region
+from .utils.utils import get_device_price_with_cache, cache_response
 from home.permissions import CanViewReports
 from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
 from .serializers import (
@@ -562,6 +564,7 @@ class FinancePlanDetailAPIView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 # ============================================================
 # Finance Analytics Overview for Plans
@@ -1165,81 +1168,149 @@ class ReportsAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
-# --------------------------------------
-# Regional-Wise Finance Report View
-# --------------------------------------
+
+# ============================================================
+# API: Region Wise Report
+# ============================================================
 class RegionWiseReportAPIView(APIView):
     """
-    Generate region-wise sales and financing performance report.
-    Sales Advisors can only see their own region.
-    Admin, Global Manager, and Finance Manager can see all.
-    """
-    permission_classes = [CanViewReports]
+    Generates region-based finance performance summary.
 
-    @swagger_auto_schema(
-        operation_summary="Region-wise Sales Report",
-        operation_description="Generates region-based performance reports. "
-                              "Sales Advisors see their own region only.",
-        responses={
-            200: RegionWiseReportSerializer(),
-            403: "Forbidden - insufficient permissions",
-            500: "Internal Server Error"
-        },
-        tags=["Reports"]
-    )
+    Roles:
+    - Admin, GlobalManager, FinanceManager → all regions
+    - SalesAdvisor → only their assigned region
+
+    Features:
+    - 3D relational data fetching (Finance → Customer → Device → Transactions)
+    - Role-based permission enforcement
+    - Unified response format
+    - Optimized ORM queries
+    - Secure & cached output
+    """
+
+    permission_classes = [IsAuthenticatedUser]
+
+    @cache_response(timeout=300)  # Cache response for 5 minutes
     def get(self, request):
         try:
             user = request.user
+            region_id = request.query_params.get("region_id")
+            month = request.query_params.get("month")
 
-            # --- Region-based Filtering ---
-            if user.is_sales_advisor():  
-                # Sales Advisor → only their region
-                region_filter = {"region": user.region}
+            # ============================================================
+            # 1. 3D DATA FETCHING OPTIMIZATION
+            # ============================================================
+            queryset = (
+                FinancePlan.objects.select_related(
+                    "credit_application__customer__created_by__store__region",
+                    "device",
+                )
+                .prefetch_related(
+                    Prefetch("payments"),  # Example: transactions or EMI payments
+                )
+            )
+
+            # ============================================================
+            # 2. ROLE-BASED PERMISSION VALIDATION
+            # ============================================================
+            if user.is_superuser or user.role in ["Admin", "GlobalManager", "FinanceManager"]:
+                pass  # Full access
+            elif user.role == "SalesAdvisor":
+                if not getattr(user, "store", None) or not getattr(user.store, "region", None):
+                    return Response({
+                        "status": "error",
+                        "message": "No region linked to this Sales Advisor."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                queryset = queryset.filter(
+                    credit_application__customer__created_by__store__region=user.store.region
+                )
             else:
-                # Admin, Global Manager, Finance Manager → all regions
-                region_filter = {}
+                return Response({
+                    "status": "error",
+                    "message": "You are not authorized to view this report."
+                }, status=status.HTTP_403_FORBIDDEN)
 
-            # --- Sales Summary ---
+            # ============================================================
+            # 3. OPTIONAL FILTERS
+            # ============================================================
+            if region_id and (user.is_superuser or user.role in ["Admin", "GlobalManager", "FinanceManager"]):
+                queryset = queryset.filter(
+                    credit_application__customer__created_by__store__region_id=region_id
+                )
+
+            if month:
+                try:
+                    month_int = int(month)
+                    if not 1 <= month_int <= 12:
+                        raise ValueError
+                    queryset = queryset.filter(created_at__month=month_int)
+                except ValueError:
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid month. Must be between 1 and 12."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+            # ============================================================
+            # 4. AGGREGATION & PERFORMANCE METRICS
+            # ============================================================
             region_data = (
-                Customer.objects
-                .filter(**region_filter)
-                .values("region")
-                .annotate(
-                    total_customers=Count("id"),
-                    total_applications=Count("credit_applications"),
-                    approved=Count("credit_applications", filter=models.Q(credit_applications__status="APPROVED")),
-                    rejected=Count("credit_applications", filter=models.Q(credit_applications__status="REJECTED")),
+                queryset.values(
+                    "credit_application__customer__created_by__store__region__id",
+                    "credit_application__customer__created_by__store__region__name"
                 )
-                .order_by("region")
+                .annotate(
+                    total_finance_plans=Count("id"),
+                    total_amount_financed=Sum("amount_to_finance"),
+                    total_down_payment=Sum("actual_down_payment"),
+                    approved_count=Count("id", filter=Q(score_status="APPROVED")),
+                    rejected_count=Count("id", filter=Q(score_status="REJECTED")),
+                    pending_count=Count("id", filter=Q(score_status="PENDING")),
+                )
+                .order_by("credit_application__customer__created_by__store__region__name")
             )
 
-            # --- Finance Summary ---
-            finance_data = (
-                FinancePlan.objects
-                .filter(**region_filter)
-                .values("region")
-                .annotate(
-                    total_financed=Sum("amount_to_finance"),
-                    avg_down_payment=Avg("down_payment_percentage")
-                )
-                .order_by("region")
+            # ============================================================
+            # 5. STRUCTURED RESPONSE
+            # ============================================================
+            response_data = [
+                {
+                    "region_id": r["credit_application__customer__created_by__store__region__id"],
+                    "region_name": r["credit_application__customer__created_by__store__region__name"],
+                    "total_finance_plans": r["total_finance_plans"],
+                    "total_amount_financed": str(r["total_amount_financed"] or 0),
+                    "total_down_payment": str(r["total_down_payment"] or 0),
+                    "approved_count": r["approved_count"],
+                    "rejected_count": r["rejected_count"],
+                    "pending_count": r["pending_count"],
+                }
+                for r in region_data
+            ]
+
+            # ============================================================
+            # 6. AUDIT LOGGING
+            # ============================================================
+            logger.info(
+                f"[RegionWiseReport] User={user.username}, Role={user.role}, "
+                f"Region={region_id}, Month={month}"
             )
-            report = {
-                "sales_summary": list(region_data),
-                "finance_summary": list(finance_data),
-            }
-            serializer = RegionWiseReportSerializer(report)
-            logger.info(f"Region-wise report generated by {user.username}")
-            return Response(serializer.data, status=status.HTTP_200_OK)
+
+            # ============================================================
+            # 7. SUCCESS RESPONSE
+            # ============================================================
+            return Response({
+                "status": "success",
+                "message": "Region-wise finance performance report fetched successfully.",
+                "filters": {"region_id": region_id, "month": month},
+                "data": response_data,
+            }, status=status.HTTP_200_OK)
+
         except Exception as e:
-            logger.error(f"Error generating region-wise report: {str(e)}", exc_info=True)
-            return Response(
-                {"error": "Internal server error"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-
+            logger.error(f"RegionWiseReport Error: {str(e)}", exc_info=True)
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # --------------------------------------------------------
