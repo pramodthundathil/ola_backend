@@ -688,7 +688,8 @@ class APCScoreAPIView(APIView):
             
             return Response({
                 "document_number": document_number,
-                "apc_score": apc_score
+                "apc_score": apc_score,
+                "apc_status":'APPROVED' if apc_score>=500 else 'REJECTED',
             }, status=status.HTTP_200_OK)
             
         except Exception as e:

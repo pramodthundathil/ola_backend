@@ -406,12 +406,32 @@ class CreditScore(models.Model):
         
         super().save(*args, **kwargs)
     
+    
     def check_apc_approval(self):
-        """Check if APC score meets approval criteria (≥500)"""
-        threshold = 500
-        if self.apc_score is not None:
-            return self.apc_score >= threshold
-        return False
+        """
+        Check if APC score meets approval criteria (≥500).
+
+        Returns:
+            bool: True if approved, False if rejected.
+        """
+        credit_config = CreditConfig.objects.last()
+        threshold = credit_config.tier_c_min_score
+
+        # If no score exists → automatically fail
+        if self.apc_score is None:
+            return False
+
+        # Determine approval
+        if self.apc_score >= threshold:
+            self.apc_status = "APPROVED"
+        else:
+            self.apc_status = "REJECTED"
+
+        # Save the updated status field
+        self.save(update_fields=["apc_status"])
+
+        return self.apc_score >= threshold
+
 
 
 
