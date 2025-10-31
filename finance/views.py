@@ -182,7 +182,7 @@ class AutoFinancePlanView(APIView):
             )
 
 # --------------------------------------------------------
-# API: Create or Get Finance Plan
+# API: Create or Get Finance Plan List
 # --------------------------------------------------------
 class FinancePlanAPIView(APIView):   
     """
@@ -412,13 +412,11 @@ class FinancePlanAPIView(APIView):
                 # Audit log
                 AuditLog.objects.create(
                     user=user,
-                    action="Viewed Finance Plan",
-                    entity_type="FinancePlan",
-                    entity_id=str(id),
-                    ip_address=request.META.get("REMOTE_ADDR"),
-                    metadata={"role": user_role}
+                    action_type="FINANCE_PLAN_VIEWED",
+                    description=f"Viewed Finance Plan ID={id}",
+                    metadata={"role": user_role},
+                    ip_address=request.META.get("REMOTE_ADDR")
                 )
-
                 return Response({
                     "status": "success",
                     "message": f"Finance Plan ID={id} retrieved successfully.",
@@ -472,13 +470,18 @@ class FinancePlanAPIView(APIView):
             }
 
             # Audit log for list view
+
             AuditLog.objects.create(
-                user=user,
-                action="Viewed Finance Plan List",
-                entity_type="FinancePlan",
-                ip_address=request.META.get("REMOTE_ADDR"),
-                metadata={"filters": request.query_params.dict(), "role": user_role}
+            user=user,
+            action_type="FINANCE_PLAN_LIST_VIEWED",  # Add this to your ACTION_TYPE_CHOICES if not there
+            description="Viewed Finance Plan List.",
+            metadata={
+                "filters": request.query_params.dict(),
+                "role": user_role
+            },
+            ip_address=request.META.get("REMOTE_ADDR")
             )
+
             cache.set(cache_key, response_data, timeout=60)
             return paginator.get_paginated_response(response_data)
 
@@ -488,73 +491,86 @@ class FinancePlanAPIView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    @swagger_auto_schema(
-        operation_summary="Get Finance Plan by Customer ID",
-        operation_description="""
-        Retrieve the finance plan for a specific customer.
-        Pass customer_id as query parameter.
         
-        **Example:**
-        - `GET /api/finance/plan/customer/?customer_id=5`
+
+# --------------------------------------------------------
+# API: Get Specific Plan Using ID
+# --------------------------------------------------------
+class FinancePlanDetailAPIView(APIView):
+    """
+    API: Retrieve a Single Finance Plan by ID (3D Fetch + Role-based Access)
+    """
+    permission_classes = [IsAuthenticatedUser]
+    @swagger_auto_schema(
+        operation_summary="Retrieve a single Finance Plan by ID",
+        operation_description="""
+        Fetches a detailed finance plan record by its unique plan ID.
+        Includes 3-level relational data (Finance → Customer → Device → Transactions)
+        and applies role-based access restrictions.
+        
+        Example:
+        - `GET /api/finance/plan/12/`
         """,
-        manual_parameters=[
-            openapi.Parameter(
-                'customer_id',
-                openapi.IN_QUERY,
-                description="Customer ID",
-                type=openapi.TYPE_INTEGER,
-                required=True
-            )
-        ],
-        responses={
-            200: FinancePlanSerializer(),
-            404: "Finance Plan not found for this customer",
-            400: "customer_id parameter is required"
-        },
+        responses={200: "Finance Plan Details", 404: "Finance Plan not found"},
         tags=["Finance"]
     )
-    def get(self, request, id=None):
+    def get(self, request, plan_id):
         try:
-            # Check if customer_id is provided
-            customer_id = request.query_params.get('customer_id')
-            
-            if customer_id:
-                # Get customer
-                customer = get_object_or_404(Customer, id=customer_id)
-                
-                # Get finance plan through credit application
-                finance_plan = FinancePlan.objects.filter(
-                    credit_application__customer=customer
-                ).order_by('-created_at').first()
-                
-                if not finance_plan:
-                    return Response(
-                        {"error": f"No finance plan found for customer ID {customer_id}"}, 
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-                
-                serializer = FinancePlanSerializer(finance_plan)
-                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan for Customer ID={customer_id}")
-                return Response(serializer.data, status=status.HTTP_200_OK)
-            
-            # Existing logic for getting by ID
-            if id:
-                plan = get_object_or_404(FinancePlan, id=id)
-                serializer = FinancePlanSerializer(plan)
-                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan ID={id}")
-                return Response(serializer.data, status=status.HTTP_200_OK)
+            user = request.user
+            user_role = getattr(user, "role", "Customer")
 
-            # Paginated list of plans
-            finance_plans = FinancePlan.objects.all().order_by("-created_at")
-            paginator = FinancePlanPagination()
-            paginated_qs = paginator.paginate_queryset(finance_plans, request)
-            serializer = FinancePlanSerializer(paginated_qs, many=True)
-            logger.info(f"[FinancePlanAPI] Retrieved {len(paginated_qs)} finance plans (paginated).")
-            return paginator.get_paginated_response(serializer.data)
-            
+            finance_qs = (
+                FinancePlan.objects
+                .select_related(
+                    "credit_application",
+                    "credit_application__customer",
+                    "credit_application__customer__created_by",
+                    "credit_application__customer__created_by__store",
+                    "credit_application__customer__created_by__store__region",
+                    "credit_score",
+                    "device",
+                    "device__brand"
+                )
+                .prefetch_related("emi_schedule", "payments")
+            )
+
+            plan = get_object_or_404(finance_qs, id=plan_id)
+
+            # --------------------- Role-Based Access ---------------------
+            if user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+                pass
+            elif user_role == "SalesManager":
+                finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
+            elif user_role == "SalesAdvisor":
+                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
+            elif user_role == "SalesPerson":
+                finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
+            else:
+                # If the logged-in user is a customer
+                finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
+            serializer = FinancePlanSerializer(plan)
+            masked_data = mask_sensitive_data(serializer.data, user_role)
+
+            # Audit log
+            AuditLog.objects.create(
+            user=user,
+            action_type="FINANCE_PLAN_VIEWED", 
+            description=f"Viewed Finance Plan ID={id} by {user.username if user else 'Anonymous'}",
+            metadata={"role": user_role},
+            ip_address=request.META.get("REMOTE_ADDR")
+            )
+            return Response({
+                "status": "success",
+                "message": f"Finance Plan ID={plan_id} retrieved successfully.",
+                "data": masked_data
+            }, status=status.HTTP_200_OK)
+
         except Exception as e:
-            logger.exception("[FinancePlanAPI] Error retrieving Finance Plans.")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.exception("[FinancePlanDetailAPIView] Error retrieving Finance Plan.")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # ============================================================
 # Finance Analytics Overview for Plans

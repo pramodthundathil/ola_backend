@@ -110,6 +110,7 @@ class AuditLog(models.Model):
         ('DEVICE_UNLOCKED', 'Device Unlocked'),
         ('AUTO_FINANCE_PLAN_CREATED', 'Auto Finance Plan Created'),
         ('FINANCE_PLAN_CREATED', 'Finance Plan Created'),
+        ('FINANCE_PLAN_VIEWED', 'Finance Plan Viewed'),
 
 
     ]
