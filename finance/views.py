@@ -19,6 +19,7 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Count, Sum, Avg
 from django.utils import timezone
 from django.db import models 
+from django.core.cache import cache
 
 # ============================================================
 # Third-Party Imports
@@ -29,12 +30,13 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import ValidationError
 from drf_yasg.utils import swagger_auto_schema
 
 # ============================================================
 # Local Application Imports
 # ============================================================
-from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan
+from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog, get_device_price_with_cache
 from home.permissions import CanViewReports
 from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
 from .serializers import (
@@ -54,6 +56,7 @@ from .serializers import (
 )
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
+from .utils.masking import mask_sensitive_data
 # ============================================================
 # Logger Setup
 # ============================================================
@@ -88,111 +91,105 @@ class AutoFinancePlanView(APIView):
     )
     def post(self, request):
         try:
-            # Validate Input
+            # -----Validate Input------------
             serializer = AutoFinancePlanCreateSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             customer_id = serializer.validated_data["customer_id"]
 
-            # Get Customer
-            customer = get_object_or_404(Customer, id=customer_id)
+            # -------3D Data Fetch ----------
+            customer = (
+                Customer.objects
+                .prefetch_related('credit_applications', 'credit_scores')
+                .only("id", "document_number")
+                .get(id=customer_id)
+            )
 
-            # Get latest credit score (non-expired)
+            # --------Get latest credit score (non-expired)----------
             credit_score = (
                 CreditScore.objects.filter(customer=customer, is_expired=False)
+                .only("id", "apc_score", "created_at")
                 .order_by("-created_at")
                 .first()
             )
             if not credit_score:
                 return Response(
-                    {"detail": "No active credit score found for this customer."},
+                    {"status": "error", "message": "No active credit score found."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             apc_score = credit_score.apc_score
 
-            # Get or create an active credit application
+            # -------Get or create an active credit application-------------
             credit_app = (
                 CreditApplication.objects.filter(
                     customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"]
-                )
-                .order_by("-created_at")
-                .first()
-            )
-            if not credit_app or credit_app.is_expired():
-                credit_app = CreditApplication.objects.create(
-                    customer=customer, device_price=0
-                )
+                ).order_by("-created_at").first()
+            ) or CreditApplication.objects.create(customer=customer, device_price=0)
 
-            # To get monthly income of customer
+            # ----To get monthly income of customer---------
             document_number = customer.document_number
             monthly_income = CustomerIncome.get_income_by_document(document_number)
+            engine_input, _= AutoFinancePlan.objects.update_or_create(
+            credit_application=credit_app,
+            defaults={
+                "customer": customer,
+                "credit_score": credit_score,
+                "apc_score": apc_score,
+                "risk_tier": "",
+                "customer_monthly_income": monthly_income,
+                "payment_capacity_factor": Decimal("0.00"),
+                "maximum_allowed_installment": Decimal("0.00"),
+                "minimum_down_payment_percentage": Decimal("0.00"),
+             }
+            )
+            engine = AutoDecisionEngine(engine_input)
+            engine_out=engine.run()
 
-            engine_input, created = AutoFinancePlan.objects.get_or_create(
+            # ---- Audit Logging ----
+            AuditLog.objects.create(
+                user=request.user,
+                action_type="CREATE_AUTO_FINANCE_PLAN",
                 customer=customer,
-                credit_application=credit_app,
-                credit_score=credit_score,
-                apc_score=apc_score,
-                risk_tier="",
-                customer_monthly_income=monthly_income,
-                maximum_allowed_installment=Decimal("0.00"),
-                minimum_down_payment_percentage=Decimal("0.00"),
             )
 
-            # Run Decision Engine
-            engine = AutoDecisionEngine(engine_input)
-            decision_output = engine.run()  
-
-            #Save all data to AutoFinancePlan      
-            # auto_plan, created = AutoFinancePlan.objects.get_or_create(
-            #     credit_application=credit_app,
-            #     defaults={
-            #         "customer": customer,
-            #         "credit_score": credit_score,
-            #         "apc_score": apc_score,
-            #         "risk_tier": "",
-            #         "customer_monthly_income": monthly_income,
-            #         "maximum_allowed_installment": Decimal("0.00"),
-            #         "minimum_down_payment_percentage": Decimal("0.00"),
-            #     }
-            # )    
-            auto_plan=engine_input
-
-            #Return success response           
+            # ---- Success Response ----
             return Response(
                 {
+                    "status": "success",
                     "message": "Auto Finance Plan generated successfully.",
-                    "customer": customer.id,
-                    "credit_application": credit_app.id,
-                    "apc_score": apc_score,
                     "data": {
-                        "risk_tier": auto_plan.risk_tier,
-                        "monthly_income": str(auto_plan.customer_monthly_income),
-                        "payment_capacity_factor": str(auto_plan.payment_capacity_factor),
-                        "maximum_allowed_installment": str(auto_plan.maximum_allowed_installment),
-                        "minimum_down_payment_percentage": str(auto_plan.minimum_down_payment_percentage),
-                        "allowed_plans": auto_plan.allowed_plans,
-                        "high_end_extra_percentage": str(auto_plan.high_end_extra_percentage),
+                        "customer_id": customer.id,
+                        "credit_application_id": credit_app.id,
+                        "apc_score": apc_score,
+                        "risk_tier": engine_input.risk_tier,
+                        "monthly_income": str(engine_out.customer_monthly_income),
+                        "maximum_allowed_installment": str(engine_out.maximum_allowed_installment),
+                        "minimum_down_payment_percentage": str(engine_out.minimum_down_payment_percentage),
+                        "allowed_plans": engine_out.allowed_plans,
                     },
                 },
                 status=status.HTTP_201_CREATED,
             )
-        except Exception as e:
-            logger.error(f"Error in AutoFinancePlanView: {str(e)}")
+        except Customer.DoesNotExist:
             return Response(
-                {"detail": "Internal server error while creating finance plan terms."},
+                {"status": "error", "message": "Customer not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            logger.exception(f"Error in AutoFinancePlanView: {str(e)}")
+            return Response(
+                {"status": "error", "message": "Internal server error."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )        
-
+            )
 
 # --------------------------------------------------------
 # API: Create or Get Finance Plan
 # --------------------------------------------------------
-class FinancePlanAPIView(APIView):
-    permission_classes=[IsAuthenticatedUser]
+class FinancePlanAPIView(APIView):   
     """
     API to create a Finance Plan using Decision Engine from AutoFinancePlan data,
     and retrieve all or specific Finance Plans.
     """
-
+    permission_classes=[AllowAny]
     @swagger_auto_schema(
         operation_summary="Create Finance Plan",
         operation_description="""
@@ -246,65 +243,120 @@ class FinancePlanAPIView(APIView):
     )
 
     def post(self, request):
-        try:
+        try:            
+            # --------------------------------------------------------
             # Validate input
+            # --------------------------------------------------------
             serializer = FinancePlanCreateSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             data = serializer.validated_data
 
-            # Fetch AutoFinancePlan by ID
-            auto_finance_plan = get_object_or_404(AutoFinancePlan, id=data.get('temp_plan_id'))
+            temp_plan_id = data.get("temp_plan_id")
+            device = data.get("device")
 
-            # Get device_price - either from input or auto-calculate
-            device = data["device"]
-            device_price = data.get("device_price")
-            
-            if not device_price:
-                # Auto-calculate device price with 7% ITBMS tax
-                base_price = device.suggested_price
-                device_price = base_price + (base_price * Decimal('0.07'))
-
-            # Prepare DecisionEngine input
-            engine_input = FinancePlan(
-                credit_application=auto_finance_plan.credit_application,
-                credit_score=auto_finance_plan.credit_score,
-                apc_score=auto_finance_plan.apc_score,
-                device=device,
-                device_price=device_price,
-                actual_down_payment=data["actual_down_payment"],
-                customer_monthly_income=auto_finance_plan.customer_monthly_income,
-                selected_term=data["choosed_allowed_plans"]["selected_term"],
-                installment_frequency_days=data["choosed_allowed_plans"]["installment_frequency_days"],
-                risk_tier="",
-                minimum_down_payment_percentage=Decimal("0.00"),
-                down_payment_percentage=Decimal("0.00"),
-                amount_to_finance=Decimal("0.00"),
-                monthly_installment=Decimal("0.00"),
-                total_amount_payable=Decimal("0.00"),
-                payment_capacity_factor=Decimal("0.00"),
-                maximum_allowed_installment=Decimal("0.00"),
-                installment_to_income_ratio=Decimal("0.00"),
+            # --------------------------------------------------------
+            # Fetch AutoFinancePlan or base FinancePlan data
+            # --------------------------------------------------------
+            finance_plan = (
+            AutoFinancePlan.objects.select_related(
+                "customer",
+                "customer__created_by",
+                "customer__created_by__store",
+                "customer__created_by__store__region",
+                "credit_application",
+                "credit_score",
+            )            
+            .filter(id=temp_plan_id)
+            .first()
             )
+            if not finance_plan:
+                return Response({
+                    "status": "error",
+                    "message": "AutoFinancePlan not found."
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # --------------------------------------------------------
+            # Get device price (from cache or DB)
+            # --------------------------------------------------------
+            device_price = data.get("device_price") or get_device_price_with_cache(device)
+            # --------------------------------------------------------
+            # Prepare / Update FinancePlan from AutoFinancePlan
+            # --------------------------------------------------------
+            finance_plan_data = {                
+                "credit_application": finance_plan.credit_application,
+                "credit_score": finance_plan.credit_score,
+                "apc_score": finance_plan.apc_score,
+                "risk_tier": finance_plan.risk_tier or "",
+                "customer_monthly_income": finance_plan.customer_monthly_income,
+                "payment_capacity_factor": finance_plan.payment_capacity_factor or Decimal("0.00"),
+                "maximum_allowed_installment": finance_plan.maximum_allowed_installment or Decimal("0.00"),
+                "minimum_down_payment_percentage": finance_plan.minimum_down_payment_percentage or Decimal("0.00"),
+
+                # Device & Payment info
+                "device": device,
+                "device_price": device_price,
+                "actual_down_payment": data.get("actual_down_payment"),
+                "selected_term": data["choosed_allowed_plans"]["selected_term"],
+                "installment_frequency_days": data["choosed_allowed_plans"]["installment_frequency_days"],
+
+                # Placeholder computed fields (Decision Engine will update)
+                "down_payment_percentage": Decimal("0.00"),
+                "amount_to_finance": Decimal("0.00"),
+                "monthly_installment": Decimal("0.00"),
+                "total_amount_payable": Decimal("0.00"),
+                "installment_to_income_ratio": Decimal("0.00"),
+            }
+            engine_input, _ = FinancePlan.objects.update_or_create(
+                credit_application=finance_plan.credit_application,
+                defaults=finance_plan_data
+            )             
 
             logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
+            # --------------------------------------------------------
             # Run Decision Engine
+            # --------------------------------------------------------
+            logger.info(f"[FinancePlanAPI] Running Decision Engine")
             engine = DecisionEngine(engine_input)
-            engine_output = engine.run()  
+            final_plan = engine.run()
+            final_plan.save()
+            
+            #Audit Log          
+            AuditLog.objects.create(
+                user=request.user,
+                action="CREATE_FINANCE_PLAN",
+                entity_id=final_plan.id,
+                entity_type="FinancePlan",
+                metadata={
+                    "auto_finance_plan_id": temp_plan_id,
+                    "device_id": device.id if device else None,
+                    "device_price": str(device_price),
+                }
+            )
 
-            final_plan = engine_output  
-            final_plan.save()   
+            # --------------------------------------------------------
+            # Serialize response
+            # --------------------------------------------------------
+            serialized_data = FinancePlanSerializer(final_plan).data
+            return Response({
+                "status": "success",
+                "message": "Finance Plan created successfully.",
+                "data": serialized_data
+            }, status=status.HTTP_201_CREATED)
 
-            # Save new FinancePlan and return 
-            finance_plan_serializer = FinancePlanSerializer(final_plan)
-            return Response(finance_plan_serializer.data, status=status.HTTP_201_CREATED)
-        except AutoFinancePlan.DoesNotExist:
-            logger.error("[FinancePlanAPI] AutoFinancePlan not found.")
-            return Response({"error": "AutoFinancePlan not found."}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as ve:
+            return Response({
+                "status": "error",
+                "message": "Invalid input data.",
+                "details": ve.detail
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         except Exception as e:
-            logger.exception("[FinancePlanAPI] Error creating Finance Plan.")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+            logger.exception("[FinancePlanAPI] Unexpected error creating Finance Plan.")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # --------------------------------------------------------
     # GET: List All or Retrieve by ID
@@ -312,35 +364,130 @@ class FinancePlanAPIView(APIView):
     @swagger_auto_schema(
         operation_summary="Retrieve Finance Plan(s)",
         operation_description="""
-        Retrieves either all Finance Plans or a specific one by ID.
-
-        **Examples:**
-        - `GET /api/finance/plan/` → list all
-        - `GET /api/finance/plan/?id=5` → retrieve FinancePlan with ID=5
+        Retrieves Finance Plans with support for:
+        - `emi_id`, `customer_id`, `product_id`, `apc_score` filters  
+        - Role-based access control (admin, finance_manager, global_manager, 
+          sales_manager, sales_advisor, salesperson)
+        
+        Examples:
+        - `GET /api/finance/plan/?emi_id=123`
+        - `GET /api/finance/plan/?customer_id=5&product_id=10`
         """,
-        responses={200: FinancePlanSerializer(many=True)},
+        manual_parameters=[
+            openapi.Parameter('emi_id', openapi.IN_QUERY, description="Filter by EMI ID", type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('customer_id', openapi.IN_QUERY, description="Filter by Customer ID", type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('product_id', openapi.IN_QUERY, description="Filter by Product ID", type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('apc_score', openapi.IN_QUERY, description="Filter by APC Score", type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('id', openapi.IN_QUERY, description="Filter by FinancePlan ID", type=openapi.TYPE_INTEGER, required=False),
+        ],
+        responses={200: "Finance Plan List"},
         tags=["Finance"]
     )
     def get(self, request, id=None):
         try:
-            if id:
-                plan = get_object_or_404(FinancePlan, id=id)
-                serializer = FinancePlanSerializer(plan)
-                logger.info(f"[FinancePlanAPI] Retrieved FinancePlan ID={id}")
-                return Response(serializer.data, status=status.HTTP_200_OK)
+            user = request.user
+            user_role = getattr(user, "role", "Customer")
 
-           # Paginated list of plans
-            finance_plans = FinancePlan.objects.all().order_by("-created_at")
+            # --------------------- Base Query ---------------------
+            finance_qs = (
+                FinancePlan.objects
+                .select_related(
+                    "credit_application",
+                    "credit_application__customer",
+                    "credit_application__customer__created_by",
+                    "credit_application__customer__created_by__store",
+                    "credit_application__customer__created_by__store__region",
+                    "credit_score",
+                    "device"
+                )
+                .order_by("-created_at")
+            )
+
+            # --------------------- Single Plan ---------------------
+            if id:
+                plan = get_object_or_404(finance_qs, id=id)
+                serializer = FinancePlanSerializer(plan)
+                masked_data = mask_sensitive_data(serializer.data, user_role)
+
+                # Audit log
+                AuditLog.objects.create(
+                    user=user,
+                    action="Viewed Finance Plan",
+                    entity_type="FinancePlan",
+                    entity_id=str(id),
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                    metadata={"role": user_role}
+                )
+
+                return Response({
+                    "status": "success",
+                    "message": f"Finance Plan ID={id} retrieved successfully.",
+                    "data": masked_data
+                }, status=status.HTTP_200_OK)
+
+            # --------------------- Filters ---------------------
+            emi_id = request.query_params.get("emi_id")
+            customer_id = request.query_params.get("customer_id")
+            product_id = request.query_params.get("product_id")
+            apc_score = request.query_params.get("apc_score")
+
+            if emi_id:
+                finance_qs = finance_qs.filter(credit_application__emi__id=emi_id)
+            if customer_id:
+                finance_qs = finance_qs.filter(credit_application__customer__id=customer_id)
+            if product_id:
+                finance_qs = finance_qs.filter(device__id=product_id)
+            if apc_score:
+                finance_qs = finance_qs.filter(apc_score=apc_score)
+
+            # --------------------- Role-Based Access ---------------------
+            if user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+                pass
+            elif user_role == "SalesManager":
+                finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
+            elif user_role == "SalesAdvisor":
+                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
+            elif user_role == "SalesPerson":
+                finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
+            else:
+                finance_qs = finance_qs.filter(credit_application__customer__user=user)
+
+            # --------------------- Caching ---------------------
+            cache_key = f"financeplans_{user_role}_{emi_id}_{customer_id}_{product_id}_{apc_score}"
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return Response(cached_data, status=status.HTTP_200_OK)
+
+            # --------------------- Pagination ---------------------
             paginator = FinancePlanPagination()
-            paginated_qs = paginator.paginate_queryset(finance_plans, request)
+            paginated_qs = paginator.paginate_queryset(finance_qs, request)
             serializer = FinancePlanSerializer(paginated_qs, many=True)
-            logger.info(f"[FinancePlanAPI] Retrieved {len(paginated_qs)} finance plans (paginated).")
-            return paginator.get_paginated_response(serializer.data)
+            masked_data = mask_sensitive_data(serializer.data, user_role)
+
+            response_data = {
+                "status": "success",
+                "message": "Finance plans retrieved successfully.",
+                "count": finance_qs.count(),
+                "data": masked_data,
+            }
+
+            # Audit log for list view
+            AuditLog.objects.create(
+                user=user,
+                action="Viewed Finance Plan List",
+                entity_type="FinancePlan",
+                ip_address=request.META.get("REMOTE_ADDR"),
+                metadata={"filters": request.query_params.dict(), "role": user_role}
+            )
+            cache.set(cache_key, response_data, timeout=60)
+            return paginator.get_paginated_response(response_data)
+
         except Exception as e:
             logger.exception("[FinancePlanAPI] Error retrieving Finance Plans.")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     @swagger_auto_schema(
         operation_summary="Get Finance Plan by Customer ID",
         operation_description="""

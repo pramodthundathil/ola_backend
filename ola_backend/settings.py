@@ -62,7 +62,7 @@ INSTALLED_APPS = [
     'customer',
     'products',
 
-    'finance',
+    'finance.apps.FinanceConfig',
     'store',
 
     'customer_device',

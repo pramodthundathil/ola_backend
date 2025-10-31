@@ -891,4 +891,4 @@ class CustomerIncome(models.Model):
         try:
             return cls.objects.get(document_id=document_id).monthly_income
         except cls.DoesNotExist:
-            return None
+            return Decimal("0.00")
