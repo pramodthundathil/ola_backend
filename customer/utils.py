@@ -112,39 +112,51 @@ def get_experian_access_token():
 
 
 
-# ========== EXPERIAN CREDIT SCORE CHECK================
+# ========== EXPERIAN CREDIT SCORE CHECK (dummy api)================
 
 
 
 def fetch_credit_score_from_experian(customer):
     """Call Experian API to get credit score."""
-    access_token = get_experian_access_token()
-    if not access_token:
-        logger.error(f"No valid Experian access token available for customer {customer.id}")
-        return None
+    # access_token = get_experian_access_token()
+    # if not access_token:
+    #     logger.error(f"No valid Experian access token available for customer {customer.id}")
+    #     return None
 
     payload = {
         "customer_id": customer.id,
-        "document_number": customer.document_number,
-        "document_type": customer.document_type,
-        "first_name": customer.first_name,
-        "last_name": customer.last_name,
-        "email": customer.email,
-        "phone_number": customer.phone_number,
+        "document_number": customer.document_number or "",
+        "document_type": customer.document_type or "",
+        "first_name": customer.first_name or "",
+        "last_name": customer.last_name or "",
+        "email": customer.email or "",
+        "phone_number": customer.phone_number or "",
     }
 
+
+    # payload = {
+    #     "customer_id": customer.id,
+    #     "document_number": customer.document_number,
+    #     "document_type": customer.document_type,
+    #     "first_name": customer.first_name,
+    #     "last_name": customer.last_name,
+    #     "email": customer.email,
+    #     "phone_number": customer.phone_number,
+    # }
+
     headers = {
-        "Authorization": f"Bearer {access_token}",
+        # "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
     try:
         response = requests.post(
-            f"{settings.EXPERIAN_BASE_URL}/credit-score/v1/check",
+            # f"{settings.EXPERIAN_BASE_URL}/credit-score/v1/check",
+            f"https://olacredits.pythonanywhere.com/device/enrolment/experian/score/test/",
             json=payload,
             headers=headers,
-            timeout=10
+            timeout=(5, 30)
         )
         response.raise_for_status()
         data = response.json()

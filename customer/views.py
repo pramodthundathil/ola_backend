@@ -491,23 +491,25 @@ class CreditScoreCheckAPIView(APIView):
         tags=['credit']
     )
 
-
-
-
     def get(self, request, customer_id):
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
             return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+        
 
         # 1️= Check if recent score exists (within 30 days)
         latest_score = customer.get_latest_credit_score()
         if latest_score:
+            logger.info(f"[CreditScoreCheck] Returning cached score for customer {customer.id}")
             serializer = CreditScoreSerializer(latest_score)
             return Response({"source": "cache", "credit_score": serializer.data})
+        
 
         # 2️= Fetch new score from Experian
+        logger.info(f"Fetched new score from Experian for customer {customer.id}") 
         experian_data = fetch_credit_score_from_experian(customer)
+        
         if not experian_data:
             return Response({"detail": "Failed to fetch credit score from Experian"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -519,15 +521,20 @@ class CreditScoreCheckAPIView(APIView):
             apc_consultation_id=experian_data["apc_consultation_id"]
         ).first()
 
+
         if credit_score:
             # Update existing record
             credit_score.apc_score = experian_data["apc_score"]
             credit_score.apc_status = experian_data["apc_status"]
+            # credit_score.apc_status='APPROVED'
             credit_score.score_valid_until = experian_data["score_valid_until"]
 
             credit_score.save()
+            logger.info(f"[CreditScoreUpdated] Customer {customer.id} score updated: {credit_score.apc_score}")
+
 
         else:
+            
             credit_score = CreditScore(
             customer=customer,
             apc_score=experian_data["apc_score"],
@@ -535,7 +542,23 @@ class CreditScoreCheckAPIView(APIView):
             apc_status=experian_data["apc_status"],
             score_valid_until=experian_data["score_valid_until"],
             )
+            
             credit_score.save()
+            
+
+        if request.user.is_authenticated:
+            credit_score.consulted_by = request.user
+            credit_score.save()    
+
+        if not credit_score.check_apc_approval():
+            return Response(
+                {
+                    "detail": "Credit score too low. Application rejected.",
+                    "credit_score": CreditScoreSerializer(credit_score).data
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
 
         serializer = CreditScoreSerializer(credit_score)
         return Response({"source": "experian", "credit_score": serializer.data})
@@ -894,3 +917,7 @@ class PersonalReferenceDetailAPIView(APIView):
             return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
         reference.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+
+
