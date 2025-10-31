@@ -156,7 +156,7 @@ def fetch_credit_score_from_experian(customer):
             f"https://olacredits.pythonanywhere.com/device/enrolment/experian/score/test/",
             json=payload,
             headers=headers,
-            timeout=10
+            timeout=(5, 30)
         )
         response.raise_for_status()
         data = response.json()
