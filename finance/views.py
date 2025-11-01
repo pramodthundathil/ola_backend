@@ -57,6 +57,7 @@ from .serializers import (
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
 from .utils.masking import mask_sensitive_data
+from customer .utils import get_customer_monthly_income
 # ============================================================
 # Logger Setup
 # ============================================================
@@ -127,7 +128,7 @@ class AutoFinancePlanView(APIView):
 
             # ----To get monthly income of customer---------
             document_number = customer.document_number
-            monthly_income = CustomerIncome.get_income_by_document(document_number)
+            monthly_income = get_customer_monthly_income(document_number)
             engine_input, _= AutoFinancePlan.objects.update_or_create(
             credit_application=credit_app,
             defaults={
