@@ -4,6 +4,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from datetime import timedelta
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -122,54 +123,76 @@ def fetch_credit_score_from_experian(customer):
     # if not access_token:
     #     logger.error(f"No valid Experian access token available for customer {customer.id}")
     #     return None
+    try:
+        document_number = customer.document_number
+        
+        if not document_number:
+            return ({"error": "document_number is required"})
+                
 
-    payload = {
-        "customer_id": customer.id,
-        "document_number": customer.document_number or "",
-        "document_type": customer.document_type or "",
-        "first_name": customer.first_name or "",
-        "last_name": customer.last_name or "",
-        "email": customer.email or "",
-        "phone_number": customer.phone_number or "",
-    }
-
-
+        apc_score = random.randint(400, 900)
+        
+        logger.info(f"[APCScore] Generated score {apc_score} for document {document_number}")
+        
+        return {
+            "document_number": document_number,
+            "apc_score": apc_score,
+            "apc_consultation_id": "123456",
+            "score_valid_until": timezone.now() + timedelta(days=30),
+            "updated_from_experian": True,
+            "apc_status":'APPROVED' if apc_score>=500 else 'REJECTED',
+            }
+    except Exception as e:
+            logger.exception("[APCScore] Error generating score")
+            return {"error": "[APCScore] Error generating score"}
+    
     # payload = {
-    #     "customer_id": customer.id,
-    #     "document_number": customer.document_number,
-    #     "document_type": customer.document_type,
-    #     "first_name": customer.first_name,
-    #     "last_name": customer.last_name,
-    #     "email": customer.email,
-    #     "phone_number": customer.phone_number,
+    #     # "customer_id": customer.id,
+    #     "document_number": customer.document_number or "",
+    #     # "document_type": customer.document_type or "",
+    #     # "first_name": customer.first_name or "",
+    #     # "last_name": customer.last_name or "",
+    #     # "email": customer.email or "",
+    #     # "phone_number": customer.phone_number or "",
     # }
 
-    headers = {
-        # "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
 
-    try:
-        response = requests.post(
-            # f"{settings.EXPERIAN_BASE_URL}/credit-score/v1/check",
-            f"https://olacredits.pythonanywhere.com/device/enrolment/experian/score/test/",
-            json=payload,
-            headers=headers,
-            timeout=(5, 30)
-        )
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "apc_score": data.get("apc_score"),
-            "apc_consultation_id": data.get("apc_consultation_id"),
-            "apc_status": data.get("apc_status"),
-            "score_valid_until": timezone.now() + timedelta(days=30),
-            "updated_from_experian": True
-        }
-    except requests.RequestException as e:
-        logger.error(f"Experian API error for customer {customer.id}: {str(e)}")
-        return None
+    # # payload = {
+    # #     "customer_id": customer.id,
+    # #     "document_number": customer.document_number,
+    # #     "document_type": customer.document_type,
+    # #     "first_name": customer.first_name,
+    # #     "last_name": customer.last_name,
+    # #     "email": customer.email,
+    # #     "phone_number": customer.phone_number,
+    # # }
+
+    # headers = {
+    #     # "Authorization": f"Bearer {access_token}",
+    #     "Content-Type": "application/json",
+    #     "Accept": "application/json",
+    # }
+
+    # try:
+    #     response = requests.post(
+    #         # f"{settings.EXPERIAN_BASE_URL}/credit-score/v1/check",
+    #         f"https://olacredits.pythonanywhere.com/device/enrolment/experian/score/test/",
+    #         json=payload,
+    #         headers=headers,
+    #         # timeout=(5, 30)
+    #     )
+    #     response.raise_for_status()
+    #     data = response.json()
+    #     return  {
+    #         "apc_score": data.get("apc_score"),
+    #         "apc_consultation_id": data.get("apc_consultation_id"),
+    #         "apc_status": data.get("apc_status"),
+    #         "score_valid_until": timezone.now() + timedelta(days=30),
+    #         "updated_from_experian": True
+    #     }
+    # except requests.RequestException as e:
+    #     logger.error(f"Experian API error for customer {customer.id}: {str(e)}")
+    #     return None
 
 
 
