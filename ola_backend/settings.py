@@ -264,3 +264,6 @@ EMAIL_USE_TLS = True
 EMAIL_PORT = 587
 EMAIL_HOST_USER = 'profitgym.management@gmail.com'
 EMAIL_HOST_PASSWORD = 'psoovwzscskarabv'
+
+
+EXCEL_CACHE_DB = BASE_DIR / "income_cache.sqlite3"
