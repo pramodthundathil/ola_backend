@@ -309,7 +309,7 @@ class FinancePlanAPIView(APIView):
                 "total_amount_payable": Decimal("0.00"),
                 "installment_to_income_ratio": Decimal("0.00"),
             }
-            engine_input, _ = FinancePlan.objects.update_or_create(
+            engine_input, _ = FinancePlan.objects.get_or_create(
                 credit_application=finance_plan.credit_application,
                 defaults=finance_plan_data
             )             
@@ -1167,7 +1167,7 @@ class ReportsAPIView(APIView):
             return Response(
                 {"error": "Failed to generate report", "details": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            )        
         
 
 # ============================================================
