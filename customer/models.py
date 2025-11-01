@@ -23,6 +23,8 @@ from datetime import timedelta
 from decimal import Decimal
 from django.contrib.auth import get_user_model
 import uuid
+import os
+
 
 
 User = get_user_model()
@@ -915,9 +917,9 @@ class CustomerIncome(models.Model):
         
 
 
-import os
-from django.db import models
-
+# ========================================
+#  CUSTOMER MONTHLY INCOME MODEL
+# ========================================
 
 
 from django.db import models
