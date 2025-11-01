@@ -2,6 +2,8 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from datetime import timedelta
 from customer.models import CreditApplication, Customer
+from django.core.cache import cache
+
 
 User = get_user_model()
 
@@ -106,6 +108,11 @@ class AuditLog(models.Model):
         ('PAYMENT_RECEIVED', 'Payment Received'),
         ('DEVICE_LOCKED', 'Device Locked'),
         ('DEVICE_UNLOCKED', 'Device Unlocked'),
+        ('AUTO_FINANCE_PLAN_CREATED', 'Auto Finance Plan Created'),
+        ('FINANCE_PLAN_CREATED', 'Finance Plan Created'),
+        ('FINANCE_PLAN_VIEWED', 'Finance Plan Viewed'),
+
+
     ]
     
    # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -864,7 +871,7 @@ class AutoFinancePlan(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         related_name='auto_finance_plans'
-    )    
+    )      
     # Risk Assessment
     apc_score = models.IntegerField(help_text="APC score from credit bureau")
     risk_tier = models.CharField(max_length=10, choices=RISK_TIER_CHOICES)
@@ -943,3 +950,16 @@ class AutoFinancePlan(models.Model):
             },
         }
         return tier_rules.get(self.risk_tier, tier_rules['TIER_D'])
+
+
+# ========================================
+# Helper Function for Device Price
+# ========================================
+def get_device_price_with_cache(device):
+    cache_key = f"device_price_{device.id}"
+    price = cache.get(cache_key)
+    if not price:
+        base_price = device.suggested_price
+        price = base_price + (base_price * Decimal("0.07"))  # Add ITBMS tax
+        cache.set(cache_key, price, timeout=3600)
+    return price
