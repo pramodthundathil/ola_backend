@@ -4,10 +4,8 @@ from .import views
 urlpatterns = [  
     
     path('auto-plan/', views.AutoFinancePlanView.as_view(), name='finance-auto-plan'),
-    # Create (POST) or List All (GET with pagination)
-    path('finance-plans/', views.FinancePlanAPIView.as_view(), name='finance-plan-list-create'),
-    # Retrieve Single by ID
-    path('finance-plans/<int:id>/', views.FinancePlanAPIView.as_view(), name='finance-plan-detail'),  
+    path('finance-plan/', views.FinancePlanAPIView.as_view(), name='finance-plan-list'),
+    path('finance-plan/<int:plan_id>/', views.FinancePlanDetailAPIView.as_view(), name='finance-plan-detail'), 
     path('analytics/overview/', views.FinanceOverviewAPIView.as_view(), name='finance-overview'),  
     path('analytics/risk-tiers/', views.FinanceRiskTierView.as_view(), name='finance-risk-tier'),
     path("analytics/collections/", views.FinanceCollectionsView.as_view(), name="finance_analytics_collections"),
