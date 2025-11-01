@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import ( Customer,CreditScore,
-                     CreditConfig,PersonalReference
+                     CreditConfig,PersonalReference,
+                     CustomerIncomeFile,
                      )
 
 
@@ -148,3 +149,13 @@ class PersonalReferenceSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("This phone number is already used for another reference.")
         return value
+
+
+
+# ========== SERAILIZER FOR ADD/UPDATE INCOME FILE=========
+
+class CustomerIncomeFileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomerIncomeFile
+        fields = ['id', 'file', 'uploaded_at']
+        read_only_fields = ['id', 'uploaded_at']
