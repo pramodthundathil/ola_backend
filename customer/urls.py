@@ -15,6 +15,8 @@ urlpatterns = [
     path('personal-references/<int:customer_id>/', views.PersonalReferenceListCreateAPIView.as_view(), name='personal-reference-list-create'),
     path('personal-references/detail/<int:pk>/', views.PersonalReferenceDetailAPIView.as_view(), name='personal-reference-detail'),
 
+    path("income-sheet/", views.CustomerIncomeFileView.as_view(), name="income-sheet"),
+
 
 ]
 

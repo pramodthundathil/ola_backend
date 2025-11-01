@@ -914,3 +914,31 @@ class CustomerIncome(models.Model):
             return None
         
 
+
+import os
+from django.db import models
+
+
+
+from django.db import models
+
+class CustomerIncomeFile(models.Model):
+    file = models.FileField(upload_to="income_sheets/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Income Sheet - {self.uploaded_at.strftime('%Y-%m-%d %H:%M:%S')}"
+
+    def save(self, *args, **kwargs):
+        # ✅ Force file name to be 'income.xlsx'
+        self.file.name = os.path.join('customer/income_sheets', 'income.xlsx')
+
+        # ✅ Delete existing file (if already there)
+        storage = self.file.storage
+        if storage.exists(self.file.name):
+            storage.delete(self.file.name)
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return "Customer Income Sheet"

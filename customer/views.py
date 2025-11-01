@@ -13,6 +13,7 @@ from rest_framework import status
 # Local  Imports
 from .models import ( Customer,CreditScore,
                      CreditConfig,PersonalReference,
+                     CustomerIncomeFile,
                      )
 from .serializers import (
      CustomerSerializer,
@@ -20,6 +21,7 @@ from .serializers import (
      CustomerStatusSerializer,
      CreditConfigSerializer,
      PersonalReferenceSerializer,
+     CustomerIncomeFileSerializer,
      )
 from .utils import fetch_credit_score_from_experian
 
@@ -45,7 +47,10 @@ from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
 
 
-
+import os
+import sqlite3
+import pandas as pd
+from django.conf import settings
 
 
 # ============================================
@@ -921,3 +926,73 @@ class PersonalReferenceDetailAPIView(APIView):
 
 
 
+
+# ========================================================
+# VIEWS FOR ADD OR UPDATE INCOME FILE
+# =========================================================
+
+
+class CustomerIncomeFileView(APIView):
+    permission_classes = []
+
+    # ✅ helper function to refresh SQLite cache
+    def load_excel_to_sqlite(self, file_path):
+        if os.path.exists(settings.EXCEL_CACHE_DB):
+            os.remove(settings.EXCEL_CACHE_DB)
+
+        df = pd.read_excel(file_path)
+        df = df.rename(columns={
+            'CEDULA': 'document_id',
+            'PATRONO': 'employer',
+            'SALARIO': 'monthly_income'
+        })
+
+        conn = sqlite3.connect(settings.EXCEL_CACHE_DB)
+        df.to_sql('income_data', conn, index=False, if_exists='replace')
+        conn.close()
+
+    @swagger_auto_schema(
+        operation_summary="Upload customer income Excel file",
+        tags=["customer-income"],
+    )
+    def post(self, request):
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing_file = CustomerIncomeFile.objects.first()
+        if existing_file:
+            serializer = CustomerIncomeFileSerializer(existing_file)
+            return Response(
+                {"detail": "An income sheet already exists.", "existing_file": serializer.data},
+                status=status.HTTP_200_OK
+            )
+
+        serializer = CustomerIncomeFileSerializer(data={"file": file})
+        if serializer.is_valid():
+            instance = serializer.save()
+            # ✅ refresh SQLite cache after save
+            self.load_excel_to_sqlite(instance.file.path)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @swagger_auto_schema(
+        operation_summary="Update existing income Excel file",
+        tags=["customer-income"],
+    )
+    def put(self, request):
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing_file = CustomerIncomeFile.objects.first()
+        if not existing_file:
+            return Response({"detail": "No existing income sheet found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CustomerIncomeFileSerializer(existing_file, data={"file": file}, partial=True)
+        if serializer.is_valid():
+            instance = serializer.save()
+            # ✅ refresh SQLite cache after update
+            self.load_excel_to_sqlite(instance.file.path)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

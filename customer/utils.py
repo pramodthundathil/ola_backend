@@ -8,7 +8,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-
+import sqlite3
+from decimal import Decimal
 
 
 
@@ -173,16 +174,37 @@ def fetch_credit_score_from_experian(customer):
 
 
 
+# ============== CUSTOMER INCOME ===============
 
 
+def get_customer_monthly_income(document_id):
+    if not document_id:
+        return None
 
+    db_path = getattr(settings, "EXCEL_CACHE_DB", None)
+    if not db_path:
+        logger.error("EXCEL_CACHE_DB not configured in settings.")
+        return None
 
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT monthly_income FROM income_data WHERE TRIM(document_id)=? LIMIT 1",
+            (str(document_id).strip(),)
+        )
+        row = cur.fetchone()
+        conn.close()
 
+        if not row:
+            return None
 
+        return Decimal(str(row["monthly_income"])) if row["monthly_income"] else None
 
-
-
-
+    except Exception as e:
+        logger.exception("Error reading income from cache: %s", e)
+        return None
 
 
 
