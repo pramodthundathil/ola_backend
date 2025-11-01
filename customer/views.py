@@ -933,7 +933,7 @@ class PersonalReferenceDetailAPIView(APIView):
 
 
 class CustomerIncomeFileView(APIView):
-    permission_classes = []
+    permission_classes = [IsAdminOrGlobalManager]
 
     # ✅ helper function to refresh SQLite cache
     def load_excel_to_sqlite(self, file_path):
