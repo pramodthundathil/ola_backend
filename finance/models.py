@@ -950,16 +950,3 @@ class AutoFinancePlan(models.Model):
             },
         }
         return tier_rules.get(self.risk_tier, tier_rules['TIER_D'])
-
-
-# ========================================
-# Helper Function for Device Price
-# ========================================
-def get_device_price_with_cache(device):
-    cache_key = f"device_price_{device.id}"
-    price = cache.get(cache_key)
-    if not price:
-        base_price = device.suggested_price
-        price = base_price + (base_price * Decimal("0.07"))  # Add ITBMS tax
-        cache.set(cache_key, price, timeout=3600)
-    return price
