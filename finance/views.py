@@ -361,9 +361,9 @@ class FinancePlanAPIView(APIView):
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # --------------------------------------------------------
-            # GET: List All or Retrieve by ID
-            # --------------------------------------------------------
+    # --------------------------------------------------------
+    # GET: List All or Retrieve by ID
+    # --------------------------------------------------------
     @swagger_auto_schema(
         operation_summary="Retrieve Finance Plan(s)",
         operation_description="""
@@ -406,6 +406,7 @@ class FinancePlanAPIView(APIView):
                     "credit_score",
                     "device"
                 )
+                .prefetch_related("emi_schedule")
                 .order_by("-created_at")
             )
 
@@ -416,7 +417,7 @@ class FinancePlanAPIView(APIView):
             apc_score = request.query_params.get("apc_score")
 
             if emi_id:
-                finance_qs = finance_qs.filter(credit_application__emi__id=emi_id)
+                finance_qs = finance_qs.filter(emi_schedule__id=emi_id)
             if customer_id:
                 finance_qs = finance_qs.filter(credit_application__customer__id=customer_id)
             if product_id:
