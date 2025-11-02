@@ -160,6 +160,7 @@ class AutoFinancePlanView(APIView):
                     "status": "success",
                     "message": "Auto Finance Plan generated successfully.",
                     "data": {
+                        "plan_id": engine_input.id,
                         "customer_id": customer.id,
                         "credit_application_id": credit_app.id,
                         "apc_score": apc_score,
@@ -168,6 +169,7 @@ class AutoFinancePlanView(APIView):
                         "maximum_allowed_installment": str(engine_out.maximum_allowed_installment),
                         "minimum_down_payment_percentage": str(engine_out.minimum_down_payment_percentage),
                         "allowed_plans": engine_out.allowed_plans,
+                        "high_end_extra_percentage": engine_out.high_end_extra_percentage
                     },
                 },
                 status=status.HTTP_201_CREATED,
