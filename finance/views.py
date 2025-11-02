@@ -4,7 +4,7 @@
 # ============================================================
 import logging
 from decimal import Decimal
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 # swagger settup
 from drf_yasg.utils import swagger_auto_schema
@@ -328,14 +328,13 @@ class FinancePlanAPIView(APIView):
             
             #Audit Log          
             AuditLog.objects.create(
-                user=request.user,
-                action="CREATE_FINANCE_PLAN",
-                entity_id=final_plan.id,
-                entity_type="FinancePlan",
-                metadata={
-                    "auto_finance_plan_id": temp_plan_id,
-                    "device_id": device.id if device else None,
-                    "device_price": str(device_price),
+            user=request.user,
+            action_type="FINANCE_PLAN_CREATED",
+            description=f"Finance plan created (AutoPlan ID: {temp_plan_id})",
+            metadata={
+                "auto_finance_plan_id": temp_plan_id,
+                "device_id": device.id if device else None,
+                "device_price": str(device_price),
                 }
             )
 
@@ -367,29 +366,40 @@ class FinancePlanAPIView(APIView):
     # GET: List All or Retrieve by ID
     # --------------------------------------------------------
     @swagger_auto_schema(
-        operation_summary="Retrieve Finance Plan(s)",
-        operation_description="""
-        - **Customers:** Only their own plans  
-        - **FinanceManager / Admin / GlobalManager:** All plans  
-        - **SalesAdvisor:** Plans within their region  
-        - **StoreManager:** Plans under their store  
-        - **SalesPerson:** Plans created by them  
+    operation_summary="Retrieve Finance Plan(s)",
+    operation_description="""
+    Retrieve Finance Plan records with multiple filtering options.
 
-        **Optional Filters:**  
-        - `id`: Finance Plan ID  
-        - `customer_id`: Filter by Customer ID  
-        - `product_id`: Filter by Product ID  
-        - `emi_id`: Filter by EMI ID  
-        - `apc_score`: Filter by APC Score
-        """,
-        manual_parameters=[
-            openapi.Parameter("customer_id", openapi.IN_QUERY, description="Filter by Customer ID", type=openapi.TYPE_INTEGER),
-            openapi.Parameter("product_id", openapi.IN_QUERY, description="Filter by Product ID", type=openapi.TYPE_INTEGER),
-            openapi.Parameter("emi_id", openapi.IN_QUERY, description="Filter by EMI ID", type=openapi.TYPE_INTEGER),
-            openapi.Parameter("apc_score", openapi.IN_QUERY, description="Filter by APC Score", type=openapi.TYPE_INTEGER),
-        ],
-        responses={200: "Finance Plan List"},
-        tags=["Finance"]
+    **Role-based Access:**
+    - **Customers:** Only their own plans  
+    - **FinanceManager / Admin / GlobalManager:** All plans  
+    - **SalesAdvisor:** Plans within their region  
+    - **StoreManager:** Plans under their store  
+    - **SalesPerson:** Plans created by them  
+
+    **Optional Filters:**  
+    - `id`: Finance Plan ID  
+    - `customer_id`: Filter by Customer ID  
+    - `product_id`: Filter by Product ID  
+    - `emi_id`: Filter by EMI ID  
+    - `apc_score`: Filter by APC Score  
+    - `start_date`: Filter by creation date (start range, format YYYY-MM-DD)  
+    - `end_date`: Filter by creation date (end range, format YYYY-MM-DD)  
+    - `updated_start_date`: Filter by last updated date (start range, format YYYY-MM-DD)  
+    - `updated_end_date`: Filter by last updated date (end range, format YYYY-MM-DD)
+    """,
+    manual_parameters=[
+        openapi.Parameter("customer_id", openapi.IN_QUERY, description="Filter by Customer ID", type=openapi.TYPE_INTEGER),
+        openapi.Parameter("product_id", openapi.IN_QUERY, description="Filter by Product ID", type=openapi.TYPE_INTEGER),
+        openapi.Parameter("emi_id", openapi.IN_QUERY, description="Filter by EMI ID", type=openapi.TYPE_INTEGER),
+        openapi.Parameter("apc_score", openapi.IN_QUERY, description="Filter by APC Score", type=openapi.TYPE_INTEGER),
+        openapi.Parameter("start_date", openapi.IN_QUERY, description="Filter by creation date (start range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+        openapi.Parameter("end_date", openapi.IN_QUERY, description="Filter by creation date (end range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+        openapi.Parameter("updated_start_date", openapi.IN_QUERY, description="Filter by last updated date (start range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+        openapi.Parameter("updated_end_date", openapi.IN_QUERY, description="Filter by last updated date (end range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+    ],
+    responses={200: "Finance Plan List"},
+    tags=["Finance"]
     )
     def get(self, request):
         try:
@@ -417,6 +427,10 @@ class FinancePlanAPIView(APIView):
             customer_id = request.query_params.get("customer_id")
             product_id = request.query_params.get("product_id")
             apc_score = request.query_params.get("apc_score")
+            start_date = request.query_params.get("start_date")
+            end_date = request.query_params.get("end_date")
+            updated_start_date = request.query_params.get("updated_start_date")
+            updated_end_date = request.query_params.get("updated_end_date")
 
             if emi_id:
                 finance_qs = finance_qs.filter(emi_schedule__id=emi_id)
@@ -426,6 +440,49 @@ class FinancePlanAPIView(APIView):
                 finance_qs = finance_qs.filter(device__id=product_id)
             if apc_score:
                 finance_qs = finance_qs.filter(apc_score=apc_score)
+
+            # --------------------- Date Filters ---------------------
+            # Filter by created_at range
+            if start_date:
+                try:
+                    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+                    finance_qs = finance_qs.filter(created_at__gte=start_date_obj)
+                except ValueError:
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid start_date format. Use YYYY-MM-DD"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+            if end_date:
+                try:
+                    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                    finance_qs = finance_qs.filter(created_at__lt=end_date_obj)
+                except ValueError:
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid end_date format. Use YYYY-MM-DD"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Filter by updated_at range
+            if updated_start_date:
+                try:
+                    updated_start_obj = datetime.strptime(updated_start_date, "%Y-%m-%d")
+                    finance_qs = finance_qs.filter(updated_at__gte=updated_start_obj)
+                except ValueError:
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid updated_start_date format. Use YYYY-MM-DD"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+            if updated_end_date:
+                try:
+                    updated_end_obj = datetime.strptime(updated_end_date, "%Y-%m-%d") + timedelta(days=1)
+                    finance_qs = finance_qs.filter(updated_at__lt=updated_end_obj)
+                except ValueError:
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid updated_end_date format. Use YYYY-MM-DD"
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
             # --------------------- Role-Based Access ---------------------
             if user_role in ["Admin", "FinanceManager", "GlobalManager"]:
@@ -453,8 +510,18 @@ class FinancePlanAPIView(APIView):
                     credit_application__customer=customer
                 )
 
-            # --------------------- Caching ---------------------
-            cache_key = f"financeplans_{user_role}_{emi_id}_{customer_id}_{product_id}_{apc_score}"
+            # --------------------Caching ---------------------
+            cache_key = (
+                f"financeplans_{user_role}_"
+                f"{emi_id or 'any'}_"
+                f"{customer_id or 'any'}_"
+                f"{product_id or 'any'}_"
+                f"{apc_score or 'any'}_"
+                f"{start_date or 'any'}_"
+                f"{end_date or 'any'}_"
+                f"{updated_start_date or 'any'}_"
+                f"{updated_end_date or 'any'}"
+            )
             cached_data = cache.get(cache_key)
             if cached_data:
                 return Response(cached_data, status=status.HTTP_200_OK)
