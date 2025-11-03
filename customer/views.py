@@ -143,46 +143,73 @@ class CustomerManagementView(APIView):
             }
         )
 
-
-
-
-
         def get(self, request):
             """
             Handles:
             - GET /api/customers/ → list (paginated)
             - GET /api/customers/?search=John → search by name/email/document
-            - GET /api/customers/<id>/ → get individual customer
+            - GET /api/customers/?id=<id> → get individual customer
             """
-            # Check if individual customer requested
             customer_id = request.query_params.get('id')
-            if customer_id:
-                try:
-                    customer = Customer.objects.get(id=customer_id)
-                    serializer = CustomerSerializer(customer)
-                    return Response(serializer.data, status=status.HTTP_200_OK)
-                except Customer.DoesNotExist:
-                    return Response({'detail': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
-
-            # Otherwise, handle list or search
             search_query = request.query_params.get('search', '').strip()
+
+            # Base queryset
             queryset = Customer.objects.all().order_by('-created_at')
 
+            # ---- SINGLE CUSTOMER ----
+            if customer_id:
+                customer = (
+                    queryset
+                    .prefetch_related(
+                        "credit_applications__finance_plan__device__credithistory"
+                    )
+                    .filter(id=customer_id)
+                    .first()
+                )
+
+                if not customer:
+                    return Response({
+                        "status": "error",
+                        "message": "Customer not found",
+                        "data": None
+                    }, status=status.HTTP_404_NOT_FOUND)
+
+                serializer = CustomerSerializer(customer)
+                return Response({
+                    "status": "success",
+                    "message": "Data fetched successfully.",
+                    "data": serializer.data
+                }, status=status.HTTP_200_OK)
+
+
+            # ---- LIST / SEARCH ----
             if search_query:
                 queryset = queryset.filter(
                     Q(first_name__icontains=search_query) |
                     Q(last_name__icontains=search_query) |
                     Q(email__icontains=search_query) |
-                    Q(document_number__icontains=search_query)|
+                    Q(document_number__icontains=search_query) |
                     Q(phone_number__icontains=search_query)
                 )
 
-            # Apply pagination
+            queryset = queryset.prefetch_related(
+                "credit_applications__finance_plan__device__credithistory"
+            )
+
             paginator = self.pagination_class()
             paginated_qs = paginator.paginate_queryset(queryset, request)
             serializer = CustomerSerializer(paginated_qs, many=True)
 
-            return paginator.get_paginated_response(serializer.data)
+            paginated_response = paginator.get_paginated_response(serializer.data)
+            paginated_data = paginated_response.data
+
+            return Response({
+                "status": "success",
+                "message": "Customer list fetched successfully.",
+                "data": paginated_data
+            }, status=status.HTTP_200_OK)
+        
+        # ---------POST METHOD-----------------
 
         @swagger_auto_schema(
             operation_summary="Create a new customer",
@@ -231,12 +258,16 @@ class CustomerManagementView(APIView):
             serializer = CustomerSerializer(data=request.data, context={'request': request})
             if serializer.is_valid():
                 customer = serializer.save()
-                return Response(CustomerSerializer(customer).data, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-
-
+                return Response({
+                    "status": "success",
+                    "message": "Customer created successfully.",
+                    "data": CustomerSerializer(customer).data
+                }, status=status.HTTP_201_CREATED)
+            return Response({
+                "status": "error",
+                "message": "Validation failed.",
+                "data": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
         # ---------- PATCH ----------
@@ -298,27 +329,37 @@ class CustomerManagementView(APIView):
             """
             customer_id = request.query_params.get('id') 
             if not customer_id:
-                return Response(
-                    {"detail": "Customer ID is required"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({
+                    "status": "error",
+                    "message": "Customer ID is required.",
+                    "data": None
+                }, status=status.HTTP_400_BAD_REQUEST)
+
 
             try:
                 customer = Customer.objects.get(id=customer_id)
             except Customer.DoesNotExist:
-                return Response(
-                    {"detail": "Customer not found"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
+                return Response({
+                    "status": "error",
+                    "message": "Customer not found.",
+                    "data": None
+                }, status=status.HTTP_404_NOT_FOUND)
+
 
             serializer = CustomerSerializer(customer, data=request.data, partial=True, context={'request': request})
             if serializer.is_valid():
                 updated_customer = serializer.save()
-                return Response(CustomerSerializer(updated_customer).data, status=status.HTTP_200_OK)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({
+                    "status": "success",
+                    "message": "Customer updated successfully.",
+                    "data": CustomerSerializer(updated_customer).data
+                }, status=status.HTTP_200_OK)
 
-
-
+            return Response({
+                "status": "error",
+                "message": "Validation failed.",
+                "data": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
         # ---------- DELETE ----------
@@ -347,25 +388,33 @@ class CustomerManagementView(APIView):
             """
             customer_id = request.query_params.get('id') 
             if not customer_id:
-                return Response(
-                    {"detail": "Customer ID is required"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({
+                    "status": "error",
+                    "message": "Customer ID is required.",
+                    "data": None
+                }, status=status.HTTP_400_BAD_REQUEST)
+
 
             try:
                 customer = Customer.objects.get(id=customer_id)
                 customer.delete()
-                return Response(status=status.HTTP_204_NO_CONTENT)
+                return Response({
+                    "status": "success",
+                    "message": "Customer deleted successfully.",
+                    "data": None
+                }, status=status.HTTP_200_OK)
+
             except Customer.DoesNotExist:
-                return Response(
-                    {"detail": "Customer not found"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
+                return Response({
+                    "status": "error",
+                    "message": "Customer not found.",
+                    "data": None
+                }, status=status.HTTP_404_NOT_FOUND)
 
 
-
-
-
+# ========================================================
+# VIEW FOR UPDATE CUSTOMER STATUS (BLOCK/UNBLOCK/INACTIVE)
+# ========================================================
 
 class CustomerStatusUpdateView(APIView):
     """
@@ -373,6 +422,8 @@ class CustomerStatusUpdateView(APIView):
     """
 
     permission_classes = [IsAuthenticatedUser]  
+
+    # --------- PATCH METHOD -----------------
 
     @swagger_auto_schema(
         operation_summary="Update customer status (ACTIVE, INACTIVE, BLOCKED)",
@@ -420,19 +471,39 @@ class CustomerStatusUpdateView(APIView):
     def patch(self, request):
         customer_id = request.query_params.get('id')
         if not customer_id:
-            return Response({"detail": "Customer ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "error",
+                "message": "Customer ID is required.",
+                "data": None
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
-            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Customer not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+
 
         serializer = CustomerStatusSerializer(customer, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response({"id": customer.id, "status": serializer.data['status']}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "success",
+                "message": "Customer status updated successfully.",
+                "data": {
+                    "id": customer.id,
+                    "status": serializer.data['status']
+                }
+            }, status=status.HTTP_200_OK)
 
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "data": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 
@@ -441,10 +512,11 @@ class CustomerStatusUpdateView(APIView):
 # =================================
 
 
-
 class CreditScoreCheckAPIView(APIView):
     permission_classes=[IsAuthenticatedUser]
     """Check a customer's credit score (cached or Experian)."""
+
+    # --------------- GET METHOD ---------------------
 
     @swagger_auto_schema(
         operation_summary="Check Customer Credit Score",
@@ -500,7 +572,12 @@ class CreditScoreCheckAPIView(APIView):
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
-            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Customer not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+
         
 
         # 1️= Check if recent score exists (within 30 days)
@@ -508,7 +585,15 @@ class CreditScoreCheckAPIView(APIView):
         if latest_score:
             logger.info(f"[CreditScoreCheck] Returning cached score for customer {customer.id}")
             serializer = CreditScoreSerializer(latest_score)
-            return Response({"source": "cache", "credit_score": serializer.data})
+            return Response({
+                "status": "success",
+                "message": "Cached credit score retrieved successfully.",
+                "data": {
+                    "source": "cache",
+                    "credit_score": serializer.data
+                }
+            }, status=status.HTTP_200_OK)
+
         
 
         # 2️= Fetch new score from Experian
@@ -516,7 +601,12 @@ class CreditScoreCheckAPIView(APIView):
         experian_data = fetch_credit_score_from_experian(customer)
         
         if not experian_data:
-            return Response({"detail": "Failed to fetch credit score from Experian"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({
+                "status": "error",
+                "message": "Failed to fetch credit score from Experian.",
+                "data": None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
         # 3️= Save new score in DB
 
@@ -556,18 +646,23 @@ class CreditScoreCheckAPIView(APIView):
             credit_score.save()    
 
         if not credit_score.check_apc_approval():
-            return Response(
-                {
-                    "detail": "Credit score too low. Application rejected.",
+            return Response({
+                "status": "error",
+                "message": "Credit score too low. Application rejected.",
+                "data": {
                     "credit_score": CreditScoreSerializer(credit_score).data
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = CreditScoreSerializer(credit_score)
-        return Response({"source": "experian", "credit_score": serializer.data})
-
+        return Response({
+            "status": "success",
+            "message": "Credit score fetched successfully from Experian.",
+            "data": {
+                "source": "experian",
+                "credit_score": serializer.data
+            }
+        }, status=status.HTTP_200_OK)
 
 
 # ==============================================
@@ -577,6 +672,11 @@ class CreditScoreCheckAPIView(APIView):
 
 class CreditConfigGetAPIView(APIView):
     permission_classes = [IsAuthenticatedUser]
+    """
+     for view minimum value of Tier A,Tier B,Tier C 
+    """
+
+    # -----------GET METHOD --------------------
 
     @swagger_auto_schema(
         operation_summary="Get current APC tier thresholds",
@@ -605,10 +705,18 @@ class CreditConfigGetAPIView(APIView):
     def get(self, request):
         config = CreditConfig.objects.first()
         if not config:
-            return Response({"detail": "No configuration found"}, status=404)
-        serializer = CreditConfigSerializer(config)
-        return Response(serializer.data, status=200)
+            return Response({
+                "status": "error",
+                "message": "No configuration found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
 
+        serializer = CreditConfigSerializer(config)
+        return Response({
+            "status": "success",
+            "message": "Credit configuration fetched successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
 
 
 # ==============================================
@@ -616,9 +724,13 @@ class CreditConfigGetAPIView(APIView):
 # =============================================
 
 
-
 class CreditConfigChangeAPIView(APIView):
     permission_classes = [IsAdminOrGlobalManager]
+    """
+     for add and update credit configs (min value of Tier A,Tier B,Tier C)
+    """
+
+    # ---------- POST METHOD ---------------
 
     @swagger_auto_schema(
         operation_summary="Create APC tier configuration",
@@ -646,16 +758,22 @@ class CreditConfigChangeAPIView(APIView):
 
     def post(self, request):
             if CreditConfig.objects.exists():
-                return Response(
-                    {"detail": "CreditConfig already exists. Only one row allowed."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({
+                    "status": "error",
+                    "message": "CreditConfig already exists. Only one row allowed.",
+                    "data": None
+                }, status=status.HTTP_400_BAD_REQUEST)
+
 
             serializer = CreditConfigSerializer(data=request.data)
             if serializer.is_valid():
                 try:
                     serializer.save()
-                    return Response(serializer.data, status=status.HTTP_201_CREATED)
+                    return Response({
+                        "status": "success",
+                        "message": "Credit configuration created successfully.",
+                        "data": serializer.data
+                    }, status=status.HTTP_201_CREATED)
                 except ValidationError as e:
                     # Catch model clean() validation error here
                     message = (
@@ -663,10 +781,19 @@ class CreditConfigChangeAPIView(APIView):
                         if hasattr(e, "message_dict") and "__all__" in e.message_dict
                         else str(e)
                     )
-                    return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({
+                        "status": "error",
+                        "message": message,
+                        "data": None
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "error",
+                "message": "Validation failed.",
+                "data": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
 
+    # ---------- PATCH METHOD --------------
     @swagger_auto_schema(
         operation_summary="Update APC tier thresholds",
         operation_description="Update existing APC tier thresholds (A, B, C).",
@@ -690,21 +817,39 @@ class CreditConfigChangeAPIView(APIView):
     def patch(self, request):
         config = CreditConfig.objects.first()
         if not config:
-            return Response({"detail": "No configuration found"}, status=404)
+            return Response({
+                "status": "error",
+                "message": "No configuration found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+
 
         serializer = CreditConfigSerializer(config, data=request.data, partial=True)
         if serializer.is_valid():
             try:
                 serializer.save()
-                return Response(serializer.data, status=200)
+                return Response({
+                    "status": "success",
+                    "message": "Credit configuration updated successfully.",
+                    "data": serializer.data
+                }, status=status.HTTP_200_OK)
             except ValidationError as e:
                 message = (
                     e.message_dict.get("__all__")[0]
                     if hasattr(e, "message_dict") and "__all__" in e.message_dict
                     else str(e)
                 )
-                return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=400)
+                return Response({
+                    "status": "error",
+                    "message": message,
+                    "data": None
+                }, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "data": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 # =====================================================
@@ -716,6 +861,8 @@ class PersonalReferenceListCreateAPIView(APIView):
     Handles listing and creating personal references for a specific customer.
     """
     permission_classes = [IsAuthenticatedUser]
+
+    # --------- GET METHOD -----------------
 
     @swagger_auto_schema(
         operation_summary="List all personal references of a customer",
@@ -758,11 +905,21 @@ class PersonalReferenceListCreateAPIView(APIView):
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
-            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Customer not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
 
         references = PersonalReference.objects.filter(customer=customer)
         serializer = PersonalReferenceSerializer(references, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response({
+            "status": "success",
+            "message": "Data fetched successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+#    ------------- POST METHOD ---------------
 
     @swagger_auto_schema(
         operation_summary="Create a new personal reference",
@@ -808,13 +965,26 @@ class PersonalReferenceListCreateAPIView(APIView):
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
-            return Response({"detail": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Customer not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
 
         serializer = PersonalReferenceSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(customer=customer)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "success",
+                "message": "Personal reference created successfully.",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "data": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 # =====================================================
@@ -832,6 +1002,8 @@ class PersonalReferenceDetailAPIView(APIView):
             return PersonalReference.objects.get(id=pk)
         except PersonalReference.DoesNotExist:
             return None
+        
+    # --------------- GET METHOD -------------------    
 
     @swagger_auto_schema(
         operation_summary="Retrieve a personal reference by ID",
@@ -860,9 +1032,19 @@ class PersonalReferenceDetailAPIView(APIView):
     def get(self, request, pk):
         reference = self.get_object(pk)
         if not reference:
-            return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Reference not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
         serializer = PersonalReferenceSerializer(reference)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response({
+            "status": "success",
+            "message": "Reference fetched successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    # ------------- PATCH METHOD --------------------
 
     @swagger_auto_schema(
         operation_summary="Update an existing personal reference",
@@ -896,13 +1078,27 @@ class PersonalReferenceDetailAPIView(APIView):
     def patch(self, request, pk):
         reference = self.get_object(pk)
         if not reference:
-            return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Reference not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+        
         serializer = PersonalReferenceSerializer(reference, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "success",
+                "message": "Reference updated successfully.",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "data": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
 
+    # ---------- DELETE METHOD ----------
     @swagger_auto_schema(
         operation_summary="Delete a personal reference",
         operation_description="Delete a personal reference by its ID.",
@@ -919,12 +1115,17 @@ class PersonalReferenceDetailAPIView(APIView):
     def delete(self, request, pk):
         reference = self.get_object(pk)
         if not reference:
-            return Response({"detail": "Reference not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "Reference not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
         reference.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-
+        return Response({
+            "status": "success",
+            "message": "Reference deleted successfully.",
+            "data": None
+        }, status=status.HTTP_200_OK)
 
 
 # ========================================================
@@ -938,7 +1139,7 @@ class CustomerIncomeFileView(APIView):
     for add and update income file for admin and global manager
     """
 
-    # ✅ helper function to refresh SQLite cache
+    # helper function to refresh SQLite cache
     def load_excel_to_sqlite(self, file_path):
         if os.path.exists(settings.EXCEL_CACHE_DB):
             os.remove(settings.EXCEL_CACHE_DB)
@@ -954,6 +1155,8 @@ class CustomerIncomeFileView(APIView):
         df.to_sql('income_data', conn, index=False, if_exists='replace')
         conn.close()
 
+    # ---------- POST METHOD ------------
+
     @swagger_auto_schema(
         operation_summary="Upload customer income Excel file",
         tags=["customer-income"],
@@ -961,24 +1164,38 @@ class CustomerIncomeFileView(APIView):
     def post(self, request):
         file = request.FILES.get("file")
         if not file:
-            return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "error",
+                "message": "No file uploaded.",
+                "data": None
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         existing_file = CustomerIncomeFile.objects.first()
         if existing_file:
             serializer = CustomerIncomeFileSerializer(existing_file)
-            return Response(
-                {"detail": "An income sheet already exists.", "existing_file": serializer.data},
-                status=status.HTTP_200_OK
-            )
+            return Response({
+                "status": "success",
+                "message": "An income sheet already exists.",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
 
         serializer = CustomerIncomeFileSerializer(data={"file": file})
         if serializer.is_valid():
             instance = serializer.save()
-            # ✅ refresh SQLite cache after save
+            #  refresh SQLite cache after save
             self.load_excel_to_sqlite(instance.file.path)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+            return Response({
+                "status": "success",
+                "message": "Income sheet uploaded successfully.",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+   # ----------- PUT METHOD --------
     @swagger_auto_schema(
         operation_summary="Update existing income Excel file",
         tags=["customer-income"],
@@ -986,16 +1203,33 @@ class CustomerIncomeFileView(APIView):
     def put(self, request):
         file = request.FILES.get("file")
         if not file:
-            return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "error",
+                "message": "No file uploaded.",
+                "data": None
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         existing_file = CustomerIncomeFile.objects.first()
         if not existing_file:
-            return Response({"detail": "No existing income sheet found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "status": "error",
+                "message": "No existing income sheet found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
 
         serializer = CustomerIncomeFileSerializer(existing_file, data={"file": file}, partial=True)
         if serializer.is_valid():
             instance = serializer.save()
-            # ✅ refresh SQLite cache after update
+            #  refresh SQLite cache after update
             self.load_excel_to_sqlite(instance.file.path)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "status": "success",
+                "message": "Income sheet updated successfully.",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        return Response({
+            "status": "error",
+            "message": "Invalid data.",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+

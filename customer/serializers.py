@@ -29,7 +29,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'status', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = ['status', 'created_by', 'created_at', 'updated_at']
 
     def create(self, validated_data):
         user = self.context['request'].user
