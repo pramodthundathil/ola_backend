@@ -1,33 +1,43 @@
+import logging
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django.core.cache import cache
 from django.utils import timezone
 from datetime import timedelta
 from finance.models import FinancePlan, EMISchedule
-from products.models import ProductModel
 
-@receiver(post_save, sender=ProductModel)
-def clear_device_price_cache(sender, instance, **kwargs):
-    cache_key = f"device_price_{instance.id}"
-    cache.delete(cache_key)
+logger = logging.getLogger(__name__)
 
-# ============================================================
-# SIGNAL: Auto-generate EMI schedule after FinancePlan creation
-# ============================================================
 @receiver(post_save, sender=FinancePlan)
 def create_emi_schedule(sender, instance, created, **kwargs):
     """
     Automatically generate EMI schedule when a FinancePlan is created.
-    """  
-    if created:        
-        # Only generate if EMI schedule doesn't already exist
-        if not instance.emi_schedule.exists():            
-            # Calculate first due date (example: 30 days from today)
-            first_due_date = timezone.now().date() + timedelta(days=30)
-            # Choose appropriate schedule generator
-            if instance.installment_frequency_days == 15:
-                EMISchedule.generate_schedule(instance, first_due_date)
-            else:
-                EMISchedule.generate_schedule_emi(instance, first_due_date)
+    Supports 10, 15, 30-day and monthly installment frequencies.
+    """
+    if not created:
+        return
 
-            
+    if instance.emi_schedule.exists():
+        logger.warning(
+            f"[EMI SKIP] FinancePlan ID={instance.id} already has EMI schedules — skipping creation."
+        )
+        return
+
+    first_due_date = timezone.now().date() + timedelta(days=instance.installment_frequency_days or 30)
+    frequency = instance.installment_frequency_days
+
+    try:
+        if frequency in [10, 15, 30]:
+            EMISchedule.generate_schedule(instance, first_due_date)
+            logger.info(
+                f"[EMI CREATED] {frequency}-day EMI schedule generated for FinancePlan ID={instance.id}"
+            )
+        else:
+            EMISchedule.generate_schedule_emi(instance, first_due_date)
+            logger.info(
+                f"[EMI CREATED] Monthly EMI schedule generated for FinancePlan ID={instance.id}"
+            )
+
+    except Exception as e:
+        logger.exception(
+            f"[EMI ERROR] Failed to generate EMI schedule for FinancePlan ID={instance.id}: {e}"
+        )

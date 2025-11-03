@@ -701,27 +701,31 @@ class EMISchedule(models.Model):
         cls.objects.bulk_create(schedules)
         return schedules
     
+    
     @classmethod
     def generate_schedule(cls, finance_plan, first_due_date):
         """
-        Generate EMI schedule — supports 15-day (biweekly) payments.
+        Generate EMI schedule for any frequency (10, 15, 30 days).
         """
         schedules = []
+        total_installments = finance_plan.selected_term
+        emi_amount = finance_plan.monthly_installment
+        frequency_days = finance_plan.installment_frequency_days or 30  # Default 30 days
 
-        for i in range(1, finance_plan.selected_term + 1):
-            due_date = first_due_date + timedelta(days=(i - 1) * 15)
-            schedule = cls(
-                finance_plan=finance_plan,
-                installment_number=i,
-                due_date=due_date,
-                installment_amount=finance_plan.monthly_installment,
-                balance_remaining=finance_plan.monthly_installment
+        for i in range(1, total_installments + 1):
+            due_date = first_due_date + timedelta(days=(i - 1) * frequency_days)
+            schedules.append(
+                cls(
+                    finance_plan=finance_plan,
+                    installment_number=i,
+                    due_date=due_date,
+                    installment_amount=emi_amount,
+                    balance_remaining=emi_amount
+                )
             )
-            schedules.append(schedule)
 
         cls.objects.bulk_create(schedules)
-        return schedules
-        
+        return schedules 
 
 
 # ========================================
