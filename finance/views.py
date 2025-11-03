@@ -16,6 +16,7 @@ from customer.permissions import IsAuthenticatedUser
 # Django Imports
 # ============================================================
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from django.db.models import Count, Sum, Avg, Q, Prefetch
 from django.db.models.functions import TruncWeek, TruncMonth
 from django.utils import timezone
@@ -49,8 +50,9 @@ from .serializers import (
     FinancePlanCreateSerializer,
     AutoFinancePlanCreateSerializer,
     FinanceOverviewSerializer,
-    AutoFinancePlanSerializer,
-    PaymentRecordSerializer,
+    AutoFinancePlanSerializer,   
+    PaymentCreateSerializer,
+    PaymentRecord3DSerializer,
     PaymentRecordSerializerPlan,
     FinanceRiskTierSerializer,
     FinanceCollectionSerializer,
@@ -364,7 +366,7 @@ class FinancePlanAPIView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # --------------------------------------------------------
-    # GET: List All or Retrieve by ID
+    # GET: List All Plans or Retrieve by ID
     # --------------------------------------------------------
     @swagger_auto_schema(
     operation_summary="Retrieve Finance Plan(s)",
@@ -829,91 +831,6 @@ class FinanceOverdueView(APIView):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 
-# ============================================================
-# Payment Record List & Create View
-# ============================================================
-class PaymentRecordListCreateView(APIView):
-    """
-    Handles both:
-    - List payment records 
-    - Create a new payment record
-    """
-    permission_classes = [IsAdminOrGlobalManager]
-    serializer_class = PaymentRecordSerializer
-
-    # --------------------------------------
-    # List all payment records
-    # --------------------------------------
-    @swagger_auto_schema(
-        operation_summary="List Payment Records",
-        operation_description="Retrieve a paginated list of all payment records, ordered by latest payment date.",
-        responses={
-            200: PaymentRecordSerializer(many=True),
-            500: "Internal Server Error",
-        },
-        tags=["Finance"]
-    )
-    def get(self, request):
-        """
-        Retrieve a paginated list of all payment records.
-        """
-        try:
-            payments = PaymentRecord.objects.all().order_by('-payment_date')
-            paginator = FinancePlanPagination()
-            result_page = paginator.paginate_queryset(payments, request)
-            serializer = self.serializer_class(result_page, many=True, context={'request': request})
-            return paginator.get_paginated_response(serializer.data)
-        except Exception as e:
-            logger.error(f"Error fetching payment records: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": "Failed to fetch payment records."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    # --------------------------------------
-    # Create new payment record
-    # --------------------------------------
-    @swagger_auto_schema(
-        operation_summary="Create Payment Record",
-        operation_description="Creates a new payment record linked to a Finance Plan or EMI Schedule.",
-        request_body=PaymentRecordSerializer,
-        responses={
-            201: PaymentRecordSerializer,
-            400: "Bad Request",
-            404: "Finance Plan or EMI Schedule Not Found",
-            500: "Internal Server Error",
-        },
-        tags=["Finance"]
-    )
-    def post(self, request):
-        """
-        Create a new payment record for a given Finance Plan or EMI Schedule.
-        """
-        try:
-            serializer = PaymentRecordSerializer(data=request.data)
-            if serializer.is_valid():
-                payment = serializer.save(processed_by=request.user)
-                return Response(
-                    PaymentRecordSerializer(payment).data,
-                    status=status.HTTP_201_CREATED
-                )
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except FinancePlan.DoesNotExist:
-            logger.error("FinancePlan not found", exc_info=True)
-            return Response({"detail": "Finance plan not found."}, status=status.HTTP_404_NOT_FOUND)
-        except EMISchedule.DoesNotExist:
-            logger.error("EMI schedule not found", exc_info=True)
-            return Response({"detail": "EMI schedule not found."}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            logger.error(f"Error creating payment record: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": "Failed to create payment record."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-
-
-
 # --------------------------------------------------------
 # API: Get EMI Schedule by Customer ID
 # --------------------------------------------------------
@@ -1077,7 +994,7 @@ class FinanceInstallmentPaymentView(APIView):
             "- Once overdue EMI is paid → next EMI = 15 days after payment\n"
             "- Schedule resumes every 15 days"
         ),
-        request_body=PaymentRecordSerializer,
+        request_body=PaymentRecord3DSerializer,
         responses={
             200: "Payment recorded successfully and EMI schedule updated.",
             400: "Bad Request — Invalid data or duplicate payment.",
@@ -1583,6 +1500,144 @@ class RegionWiseReportView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================================
+# Create a New Payment Record
+# ============================================================
+class PaymentRecordCreateAPIView(APIView):
+    """
+    Creates a new Payment Record linked to a Finance Plan.
+    """  
+    permission_classes = [AllowAny] 
+
+    @swagger_auto_schema(
+        operation_summary="Create a Payment Record",
+        operation_description="""
+        Create a new **Payment Record** associated with a Finance Plan.
+
+        ### Purpose
+        Used to record payments like **Down Payment**, **EMI**, or **Full Settlement**.
+
+        ### Fields
+        | Field | Type | Required | Description |
+        |--------|------|-----------|--------------|
+        | finance_plan | integer | ID of the Finance Plan |
+        | payment_type | string | One of `EMI`, `DOWN_PAYMENT`, `FULL_SETTLEMENT`, `LATE_FEE` |
+        | payment_amount | decimal | Amount paid by the customer |
+        | transaction_reference | string | Optional | Gateway reference (e.g., `"YAPPY-TRX-784923"`) |
+
+        ### Auto Fields
+        - `payment_method`: Default `"CASH"`
+        - `payment_status`: `"COMPLETED"`
+        - `payment_date`: Current timestamp
+        - `processed_by`: Logged-in user
+
+        ### Example Request
+        ```json
+        {
+          "finance_plan": 101,
+          "payment_type": "EMI",
+          "payment_amount": "250.00",
+          "transaction_reference": "YAPPY-TRX-784923"
+        }
+        ```
+        """,
+        request_body=PaymentCreateSerializer,
+        responses={
+            201: openapi.Response("Payment Created", PaymentRecord3DSerializer),
+            400: "Validation Error",
+            404: "Finance Plan not found",
+            500: "Server Error",
+        },
+        tags=["Finance"]
+    )
+    def post(self, request):
+        serializer = PaymentCreateSerializer(data=request.data, context={"request": request})
+
+        # --- Input Validation
+        if not serializer.is_valid():
+            return Response({
+                "status": "error",
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        validated = serializer.validated_data
+        finance_plan = validated.get("finance_plan")
+        payment_type = validated.get("payment_type")
+        payment_amount = validated.get("payment_amount")
+
+        try:
+            with transaction.atomic():
+                # --- Create Payment Record
+                payment = serializer.save(
+                    payment_method="CASH",
+                    payment_date=timezone.now(),
+                    payment_status="COMPLETED",
+                    processed_by=request.user if request.user.is_authenticated else None,
+                )
+
+                # --- Apply EMI logic if applicable
+                if hasattr(payment, "apply_to_emi") and payment.payment_status == "COMPLETED":
+                    payment.apply_to_emi()
+
+                # ----------------------- Audit Log -----------------------
+                AuditLog.objects.create(
+                    user=request.user,
+                    action_type="CREATE_PAYMENT",
+                    description=(
+                        f"Payment created for FinancePlan ID={payment.finance_plan.id}, "
+                        f"Type={payment.payment_type}, Amount={payment.payment_amount}, "
+                        f"Ref={payment.transaction_reference or 'N/A'}"
+                    ),
+                    metadata={
+                        "finance_plan_id": payment.finance_plan.id,
+                        "payment_type": payment.payment_type,
+                        "payment_amount": str(payment.payment_amount),
+                        "transaction_reference": payment.transaction_reference,
+                        "payment_method": payment.payment_method,
+                        "payment_status": payment.payment_status,
+                        "timestamp": str(timezone.now()),
+                    },
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+
+        except Exception as e:
+            self.logger.exception("Failed to create payment record")
+            return Response({
+                "status": "error",
+                "message": f"Failed to create payment record: {str(e)}",
+                "filters": {
+                    "finance_plan": finance_plan.id if finance_plan else None,
+                    "payment_type": payment_type
+                },
+                "data": None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # --- Fetch with Relations
+        payment = (
+            PaymentRecord.objects
+            .select_related("finance_plan", "finance_plan__device", "finance_plan__credit_application")
+            .prefetch_related("finance_plan__payments", "emi_schedule")
+            .get(id=payment.id)
+        )
+
+        # --- Serialize + Mask
+        serialized = PaymentRecord3DSerializer(payment, context={"request": request}).data
+        masked = mask_sensitive_data(serialized, getattr(request.user, "role", "guest"))
+
+        # --- Success Response
+        return Response({
+            "status": "success",
+            "message": "Payment record created successfully.",
+            "filters": {
+                "finance_plan": finance_plan.id,
+                "payment_type": payment_type,
+                "payment_amount": str(payment_amount)
+            },
+            "data": masked
+        }, status=status.HTTP_201_CREATED)
 
 
 # --------------------------------------------------------
