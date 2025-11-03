@@ -1604,17 +1604,16 @@ class PaymentRecordCreateAPIView(APIView):
                 )
 
         except Exception as e:
-            self.logger.exception("Failed to create payment record")
+            logger.error(f"Failed to create payment record: {str(e)}", exc_info=True)
             return Response({
                 "status": "error",
                 "message": f"Failed to create payment record: {str(e)}",
                 "filters": {
-                    "finance_plan": finance_plan.id if finance_plan else None,
-                    "payment_type": payment_type
+                    "finance_plan": finance_plan.id if 'finance_plan' in locals() and finance_plan else None,
+                    "payment_type": payment_type if 'payment_type' in locals() else None
                 },
                 "data": None
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
         # --- Fetch with Relations
         payment = (
             PaymentRecord.objects
