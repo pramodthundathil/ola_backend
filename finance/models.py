@@ -3,6 +3,7 @@ from django.contrib.auth import get_user_model
 from datetime import timedelta
 from customer.models import CreditApplication, Customer
 from django.core.cache import cache
+from store.models import Store
 
 
 User = get_user_model()
@@ -111,6 +112,9 @@ class AuditLog(models.Model):
         ('AUTO_FINANCE_PLAN_CREATED', 'Auto Finance Plan Created'),
         ('FINANCE_PLAN_CREATED', 'Finance Plan Created'),
         ('FINANCE_PLAN_VIEWED', 'Finance Plan Viewed'),
+        ('FINANCE_REPORT_VIEWED','Finance Report Viewed'),
+        ('CREATE_PAYMENT','Create Payment'),
+        ('PAYMENT_VIEWED','Payment Viewed'),
 
 
     ]
@@ -335,7 +339,12 @@ class FinancePlan(models.Model):
         null=True,
         blank=True
     )
-    
+    # new ly added fields for easy calculation of finance by store and creator    
+    store = models.ForeignKey(Store, on_delete=models.DO_NOTHING, null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.DO_NOTHING)
+    status = models.CharField(max_length=20, choices=[("ACTIVE", "Active"), ("CLOSED", "Closed")]) 
+    is_active = models.BooleanField(default=True) 
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -549,6 +558,16 @@ class FinancePlan(models.Model):
 
     def save(self, *args, **kwargs):
         # Auto-calculate fields before saving
+        user = kwargs.pop('user', None)
+
+        # --- Auto-assign created_by and store based on the user role ---
+        if not self.pk and user:  # only when creating new record
+            self.created_by = user
+
+            if user.role in [user.SALESPERSON, user.STORE_MANAGER]:
+                self.store = user.store
+            else:
+                self.store = None
 
         if self.device and not self.device_price:
             self.calculate_device_price()

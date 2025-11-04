@@ -16,7 +16,9 @@ from customer.permissions import IsAuthenticatedUser
 # Django Imports
 # ============================================================
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from django.db.models import Count, Sum, Avg, Q, Prefetch
+from django.db.models.functions import TruncWeek, TruncMonth
 from django.utils import timezone
 from django.db import models 
 from django.core.cache import cache
@@ -48,8 +50,9 @@ from .serializers import (
     FinancePlanCreateSerializer,
     AutoFinancePlanCreateSerializer,
     FinanceOverviewSerializer,
-    AutoFinancePlanSerializer,
-    PaymentRecordSerializer,
+    AutoFinancePlanSerializer,   
+    PaymentCreateSerializer,
+    PaymentRecord3DSerializer,
     PaymentRecordSerializerPlan,
     FinanceRiskTierSerializer,
     FinanceCollectionSerializer,
@@ -363,7 +366,7 @@ class FinancePlanAPIView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # --------------------------------------------------------
-    # GET: List All or Retrieve by ID
+    # GET: List All Plans or Retrieve by ID
     # --------------------------------------------------------
     @swagger_auto_schema(
     operation_summary="Retrieve Finance Plan(s)",
@@ -828,91 +831,6 @@ class FinanceOverdueView(APIView):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 
-# ============================================================
-# Payment Record List & Create View
-# ============================================================
-class PaymentRecordListCreateView(APIView):
-    """
-    Handles both:
-    - List payment records 
-    - Create a new payment record
-    """
-    permission_classes = [IsAdminOrGlobalManager]
-    serializer_class = PaymentRecordSerializer
-
-    # --------------------------------------
-    # List all payment records
-    # --------------------------------------
-    @swagger_auto_schema(
-        operation_summary="List Payment Records",
-        operation_description="Retrieve a paginated list of all payment records, ordered by latest payment date.",
-        responses={
-            200: PaymentRecordSerializer(many=True),
-            500: "Internal Server Error",
-        },
-        tags=["Finance"]
-    )
-    def get(self, request):
-        """
-        Retrieve a paginated list of all payment records.
-        """
-        try:
-            payments = PaymentRecord.objects.all().order_by('-payment_date')
-            paginator = FinancePlanPagination()
-            result_page = paginator.paginate_queryset(payments, request)
-            serializer = self.serializer_class(result_page, many=True, context={'request': request})
-            return paginator.get_paginated_response(serializer.data)
-        except Exception as e:
-            logger.error(f"Error fetching payment records: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": "Failed to fetch payment records."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    # --------------------------------------
-    # Create new payment record
-    # --------------------------------------
-    @swagger_auto_schema(
-        operation_summary="Create Payment Record",
-        operation_description="Creates a new payment record linked to a Finance Plan or EMI Schedule.",
-        request_body=PaymentRecordSerializer,
-        responses={
-            201: PaymentRecordSerializer,
-            400: "Bad Request",
-            404: "Finance Plan or EMI Schedule Not Found",
-            500: "Internal Server Error",
-        },
-        tags=["Finance"]
-    )
-    def post(self, request):
-        """
-        Create a new payment record for a given Finance Plan or EMI Schedule.
-        """
-        try:
-            serializer = PaymentRecordSerializer(data=request.data)
-            if serializer.is_valid():
-                payment = serializer.save(processed_by=request.user)
-                return Response(
-                    PaymentRecordSerializer(payment).data,
-                    status=status.HTTP_201_CREATED
-                )
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except FinancePlan.DoesNotExist:
-            logger.error("FinancePlan not found", exc_info=True)
-            return Response({"detail": "Finance plan not found."}, status=status.HTTP_404_NOT_FOUND)
-        except EMISchedule.DoesNotExist:
-            logger.error("EMI schedule not found", exc_info=True)
-            return Response({"detail": "EMI schedule not found."}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            logger.error(f"Error creating payment record: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": "Failed to create payment record."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-
-
-
 # --------------------------------------------------------
 # API: Get EMI Schedule by Customer ID
 # --------------------------------------------------------
@@ -1076,7 +994,7 @@ class FinanceInstallmentPaymentView(APIView):
             "- Once overdue EMI is paid → next EMI = 15 days after payment\n"
             "- Schedule resumes every 15 days"
         ),
-        request_body=PaymentRecordSerializer,
+        request_body=PaymentRecord3DSerializer,
         responses={
             200: "Payment recorded successfully and EMI schedule updated.",
             400: "Bad Request — Invalid data or duplicate payment.",
@@ -1170,80 +1088,280 @@ class FinanceInstallmentPaymentView(APIView):
         logger.info(f"Regenerated EMIs #{start_number}–{total_installments} for plan {plan.id}")
 
 
-# --------------------------------------
-# Finance Report View
-# --------------------------------------
-class ReportsAPIView(APIView):
+# ============================================================
+# API: Region Wise and Global Finance Report
+# ============================================================               
+class FinanceReportAPIView(APIView):
     """
-    Generates a summarized financial and customer report for Admin, 
-    Global Manager, and Finance Manager.
+    Generates Region-wise or Global Finance Report (Summary or Detailed).
+    Supports weekly or monthly aggregation views.
     """
-    permission_classes = [CanViewReports]    
+    permission_classes = [IsAuthenticatedUser]
 
     @swagger_auto_schema(
-        operation_summary="Get Common Reports (Admin / Global / Finance Manager)",
-        operation_description="""
-        Returns summarized reports including:
-        - Total customers and applications  
-        - Approval / Rejection / Pending counts  
-        - Total financed amount and average down payment  
-        - Risk tier distribution  
-        """,
-        responses={
-            200:  CommonReportSerializer(),
-            400: "Bad Request",
-            500: "Internal Server Error",
-        },
-        tags=["Reports"]
+    operation_summary="Region-wise or Global Finance Report (Summary or Detailed)",
+    operation_description="""
+    Generates a **region-wise or global finance performance report** — either in **summary** or **detailed** format,
+    aggregated by week or month.
+
+    ###  Roles & Access Control
+    - **Admin / GlobalManager / FinanceManager** → Access **all regions** (global view) or a specific region (`region_id` filter)
+    - **SalesAdvisor** → Access **only their assigned region**, even if `region_id` is not provided
+
+    ###  Filters & Query Parameters
+    | Parameter | Type | Description |
+    |------------|------|-------------|
+    | `region_id` | integer | _(Optional)_ Filter report for a single region. If omitted, returns **all regions** (global report). |
+    | `month` | integer | _(Optional)_ Filter by month (1–12). |
+    | `date_from` | date (YYYY-MM-DD) | _(Optional)_ Custom start date for report range. |
+    | `date_to` | date (YYYY-MM-DD) | _(Optional)_ Custom end date for report range. |
+    | `report_type` | string | _(Optional)_ Choose between `summary` or `detailed` view. Default: `summary`. |
+    | `view` | string | _(Optional)_ Aggregation mode — `weekly` or `monthly`. Default: `monthly`. |
+
+    ### Report Modes
+    - **Summary:** Aggregated metrics by region and store.
+    - **Detailed:** Paginated list of finance plans with full customer and device info.
+
+    ###  Behavior Summary
+    | Role | `region_id` Provided | `region_id` Not Provided |
+    |------|----------------------|---------------------------|
+    | Admin / GlobalManager / FinanceManager | Single region report | Global (all-region) report |
+    | SalesAdvisor | Their assigned region only | Their assigned region only |
+    | Others | Not authorized | Not authorized |
+    """,
+    manual_parameters=[
+        openapi.Parameter(
+            "region_id",
+            openapi.IN_QUERY,
+            type=openapi.TYPE_INTEGER,
+            description="(Optional) Region ID to filter a specific region. Leave empty for global report (Admin roles only).",
+        ),
+        openapi.Parameter(
+            "month",
+            openapi.IN_QUERY,
+            type=openapi.TYPE_INTEGER,
+            description="(Optional) Filter by month (1–12).",
+        ),
+        openapi.Parameter(
+            "date_from",
+            openapi.IN_QUERY,
+            type=openapi.TYPE_STRING,
+            format=openapi.FORMAT_DATE,
+            description="(Optional) Start date (YYYY-MM-DD). Used with `date_to`.",
+        ),
+        openapi.Parameter(
+            "date_to",
+            openapi.IN_QUERY,
+            type=openapi.TYPE_STRING,
+            format=openapi.FORMAT_DATE,
+            description="(Optional) End date (YYYY-MM-DD). Used with `date_from`.",
+        ),
+        openapi.Parameter(
+            "report_type",
+            openapi.IN_QUERY,
+            type=openapi.TYPE_STRING,
+            enum=["summary", "detailed"],
+            description="(Optional) Type of report. Choose `summary` (default) or `detailed`.",
+        ),
+        openapi.Parameter(
+            "view",
+            openapi.IN_QUERY,
+            type=openapi.TYPE_STRING,
+            enum=["weekly", "monthly"],
+            description="(Optional) Aggregation view mode: `weekly` or `monthly` (default: monthly).",
+        ),
+    ],
+    tags=["Reports"],
     )
     def get(self, request):
         try:
-            # --- Data Aggregation ---
-            total_customers = Customer.objects.count()
-            total_applications = CreditApplication.objects.count()
+            user = request.user
+            user_role = getattr(user, "role", "Unknown")
 
-            approved_apps = CreditApplication.objects.filter(status='APPROVED').count()
-            rejected_apps = CreditApplication.objects.filter(status='REJECTED').count()
-            pending_apps = CreditApplication.objects.filter(status='PENDING').count()
+            # ---------------- Query Params ----------------
+            region_id = request.query_params.get("region_id")
+            month = request.query_params.get("month")
+            date_from = request.query_params.get("date_from")
+            date_to = request.query_params.get("date_to")
+            report_type = request.query_params.get("report_type", "summary").lower()
+            view_mode = request.query_params.get("view", "monthly").lower()
 
-            total_financed = FinancePlan.objects.aggregate(total=Sum('amount_to_finance'))['total'] or 0
-            avg_down_payment = FinancePlan.objects.aggregate(avg=Avg('down_payment_percentage'))['avg'] or 0
-
-            tier_counts = (
-                FinancePlan.objects
-                .values('risk_tier')
-                .annotate(count=Count('id'))
-                .order_by('risk_tier')
+            # ---------------- Base Query ----------------
+            queryset = (
+                FinancePlan.objects.select_related(
+                    "credit_application__customer__created_by__store__region",
+                    "device",
+                )
+                .prefetch_related(Prefetch("payments"))
             )
-            report_data = {
-                "customers": total_customers,
-                "applications": {
-                    "total": total_applications,
-                    "approved": approved_apps,
-                    "rejected": rejected_apps,
-                    "pending": pending_apps,
+
+            # ---------------- Role-Based Access ----------------
+            if user.is_superuser or user_role in ["Admin", "GlobalManager", "FinanceManager"]:
+                pass  # Full access
+            elif user_role == "SalesAdvisor":
+                if not getattr(user, "store", None) or not getattr(user.store, "region", None):
+                    return Response(
+                        {"status": "error", "message": "No region linked to this Sales Advisor."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                queryset = queryset.filter(
+                    credit_application__customer__created_by__store__region=user.store.region
+                )
+            else:
+                return Response(
+                    {"status": "error", "message": "You are not authorized to view this report."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # ---------------- Filters ----------------
+            if region_id and (user.is_superuser or user_role in ["Admin", "GlobalManager", "FinanceManager"]):
+                queryset = queryset.filter(
+                    credit_application__customer__created_by__store__region_id=region_id
+                )
+            if month:
+                try:
+                    month_int = int(month)
+                    if not 1 <= month_int <= 12:
+                        raise ValueError
+                    queryset = queryset.filter(created_at__month=month_int)
+                except ValueError:
+                    return Response(
+                        {"status": "error", "message": "Invalid month. Must be between 1 and 12."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            if date_from and date_to:
+                queryset = queryset.filter(created_at__date__range=[date_from, date_to])
+
+            # ---------------- Weekly / Monthly View ----------------
+            if view_mode == "weekly":
+                queryset = queryset.annotate(period=TruncWeek("created_at"))
+            else:
+                queryset = queryset.annotate(period=TruncMonth("created_at"))
+
+            # ============================================================
+            # REPORT TYPE HANDLING
+            # ============================================================
+            if report_type == "summary":
+                # ---------------- Aggregated Summary ----------------
+                region_data = (
+                    queryset.values(
+                        "credit_application__customer__created_by__store__region__id",
+                        "credit_application__customer__created_by__store__region__name",
+                        "credit_application__customer__created_by__store__id",
+                        "credit_application__customer__created_by__store__name",
+                        "period",
+                    )
+                    .annotate(
+                        total_finance_plans=Count("id"),
+                        total_amount_financed=Sum("amount_to_finance"),
+                        total_down_payment=Sum("actual_down_payment"),
+                        approved_count=Count("id", filter=Q(score_status="APPROVED")),
+                        rejected_count=Count("id", filter=Q(score_status="REJECTED")),
+                        pending_count=Count("id", filter=Q(score_status="PENDING")),
+                    )
+                    .order_by("credit_application__customer__created_by__store__region__name", "period")
+                )
+                response_data = [
+                    {
+                        "region_id": r["credit_application__customer__created_by__store__region__id"],
+                        "region_name": r["credit_application__customer__created_by__store__region__name"],
+                        "store_id": r["credit_application__customer__created_by__store__id"],
+                        "store_name": r["credit_application__customer__created_by__store__name"],
+                        "period": r["period"].strftime("%Y-%m-%d") if r["period"] else None,
+                        "total_finance_plans": r["total_finance_plans"],
+                        "total_amount_financed": str(r["total_amount_financed"] or 0),
+                        "total_down_payment": str(r["total_down_payment"] or 0),
+                        "approved_count": r["approved_count"],
+                        "rejected_count": r["rejected_count"],
+                        "pending_count": r["pending_count"],
+                    }
+                    for r in region_data
+                ]
+                result = {
+                    "status": "success",
+                    "message": "Summary report fetched successfully.",
+                    "filters": {
+                        "region_id": region_id,
+                        "month": month,
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "report_type": report_type,
+                        "view": view_mode,
+                    },
+                    "data": response_data,
+                }
+            elif report_type == "detailed":
+                # ---------------- Paginated Detailed List ----------------
+                paginator = FinancePlanPagination()
+                paginated_queryset = paginator.paginate_queryset(queryset, request)
+                detailed_data = []
+                for obj in paginated_queryset:
+                    customer = getattr(obj.credit_application, "customer", None)
+                    created_by = getattr(customer, "created_by", None)
+                    store = getattr(created_by, "store", None)
+                    region = getattr(store, "region", None)
+
+                    detailed_data.append({
+                    "finance_id": obj.id,
+                    "customer_name": f"{customer.first_name} {customer.last_name}" if customer else None,
+                    "device_name": str(obj.device) if obj.device else None,
+                    "amount_to_finance": str(obj.amount_to_finance or 0),
+                    "actual_down_payment": str(obj.actual_down_payment or 0),
+                    "score_status": obj.score_status,
+                    "created_at": obj.created_at.strftime("%Y-%m-%d"),
+                    "store_id": getattr(store, "id", None),
+                    "store_name": getattr(store, "name", None),
+                    "region_id": getattr(region, "id", None),
+                    "region_name": getattr(region, "name", None),
+                })
+                result = {
+                    "status": "success",
+                    "message": "Detailed finance report fetched successfully.",
+                    "filters": {
+                        "region_id": region_id,
+                        "month": month,
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "report_type": report_type,
+                        "view": view_mode,
+                    },
+                    "data": detailed_data,
+                }
+                return paginator.get_paginated_response(result)
+            else:
+                return Response(
+                    {"status": "error", "message": "Invalid report_type. Use 'summary' or 'detailed'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # ----------------------- Audit Log -----------------------
+            AuditLog.objects.create(
+                user=user,
+                action_type="FINANCE_REPORT_VIEWED",
+                description=f"Viewed {report_type.capitalize()} report ({view_mode or 'monthly'} view).",
+                metadata={
+                    "filters": request.query_params.dict(),
+                    "role": user_role,
+                    "region_id": region_id,
+                    "month": month,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "view": view_mode,
                 },
-                "financing": {
-                    "total_financed": round(total_financed, 2),
-                    "average_down_payment": round(avg_down_payment, 2),
-                },
-                "risk_tiers": list(tier_counts),
-            }
-            serializer = CommonReportSerializer(report_data)
-            logger.info(f"Report generated successfully by user {request.user.username}")
-            return Response(serializer.data, status=status.HTTP_200_OK)
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )         
+
+            logger.info(f"[FinanceReport] User={user.username}, Role={user_role}, Params={request.query_params}")
+            return Response(result, status=status.HTTP_200_OK)
+
         except Exception as e:
-            logger.error(f"Error generating report: {str(e)}", exc_info=True)
-            return Response(
-                {"error": "Failed to generate report", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )        
+            logger.error(f"FinanceReport Error: {str(e)}", exc_info=True)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 
 # ============================================================
 # API: Region Wise Report
 # ============================================================
-class RegionWiseReportAPIView(APIView):
+class RegionWiseReportView(APIView):
     """
     Generates region-based finance performance summary.
 
@@ -1382,6 +1500,143 @@ class RegionWiseReportAPIView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================================
+# Create a New Payment Record
+# ============================================================
+class PaymentRecordCreateAPIView(APIView):
+    """
+    Creates a new Payment Record linked to a Finance Plan.
+    """  
+    permission_classes = [AllowAny] 
+
+    @swagger_auto_schema(
+        operation_summary="Create a Payment Record",
+        operation_description="""
+        Create a new **Payment Record** associated with a Finance Plan.
+
+        ### Purpose
+        Used to record payments like **Down Payment**, **EMI**, or **Full Settlement**.
+
+        ### Fields
+        | Field | Type | Required | Description |
+        |--------|------|-----------|--------------|
+        | finance_plan | integer | ID of the Finance Plan |
+        | payment_type | string | One of `EMI`, `DOWN_PAYMENT`, `FULL_SETTLEMENT`, `LATE_FEE` |
+        | payment_amount | decimal | Amount paid by the customer |
+        | transaction_reference | string | Optional | Gateway reference (e.g., `"YAPPY-TRX-784923"`) |
+
+        ### Auto Fields
+        - `payment_method`: Default `"CASH"`
+        - `payment_status`: `"COMPLETED"`
+        - `payment_date`: Current timestamp
+        - `processed_by`: Logged-in user
+
+        ### Example Request
+        ```json
+        {
+          "finance_plan": 101,
+          "payment_type": "EMI",
+          "payment_amount": "250.00",
+          "transaction_reference": "YAPPY-TRX-784923"
+        }
+        ```
+        """,
+        request_body=PaymentCreateSerializer,
+        responses={
+            201: openapi.Response("Payment Created", PaymentRecord3DSerializer),
+            400: "Validation Error",
+            404: "Finance Plan not found",
+            500: "Server Error",
+        },
+        tags=["Finance"]
+    )
+    def post(self, request):
+        serializer = PaymentCreateSerializer(data=request.data, context={"request": request})
+
+        # --- Input Validation
+        if not serializer.is_valid():
+            return Response({
+                "status": "error",
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        validated = serializer.validated_data
+        finance_plan = validated.get("finance_plan")
+        payment_type = validated.get("payment_type")
+        payment_amount = validated.get("payment_amount")
+
+        try:
+            with transaction.atomic():
+                # --- Create Payment Record
+                payment = serializer.save(
+                    payment_method="CASH",
+                    payment_date=timezone.now(),
+                    payment_status="COMPLETED",
+                    processed_by=request.user if request.user.is_authenticated else None,
+                )
+
+                # --- Apply EMI logic if applicable
+                if hasattr(payment, "apply_to_emi") and payment.payment_status == "COMPLETED":
+                    payment.apply_to_emi()
+
+                # ----------------------- Audit Log -----------------------
+                AuditLog.objects.create(
+                    user=request.user,
+                    action_type="CREATE_PAYMENT",
+                    description=(
+                        f"Payment created for FinancePlan ID={payment.finance_plan.id}, "
+                        f"Type={payment.payment_type}, Amount={payment.payment_amount}, "
+                        f"Ref={payment.transaction_reference or 'N/A'}"
+                    ),
+                    metadata={
+                        "finance_plan_id": payment.finance_plan.id,
+                        "payment_type": payment.payment_type,
+                        "payment_amount": str(payment.payment_amount),
+                        "transaction_reference": payment.transaction_reference,
+                        "payment_method": payment.payment_method,
+                        "payment_status": payment.payment_status,
+                        "timestamp": str(timezone.now()),
+                    },
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to create payment record: {str(e)}", exc_info=True)
+            return Response({
+                "status": "error",
+                "message": f"Failed to create payment record: {str(e)}",
+                "filters": {
+                    "finance_plan": finance_plan.id if 'finance_plan' in locals() and finance_plan else None,
+                    "payment_type": payment_type if 'payment_type' in locals() else None
+                },
+                "data": None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # --- Fetch with Relations
+        payment = (
+            PaymentRecord.objects
+            .select_related("finance_plan", "finance_plan__device", "finance_plan__credit_application")
+            .prefetch_related("finance_plan__payments", "emi_schedule")
+            .get(id=payment.id)
+        )
+
+        # --- Serialize + Mask
+        serialized = PaymentRecord3DSerializer(payment, context={"request": request}).data
+        masked = mask_sensitive_data(serialized, getattr(request.user, "role", "guest"))
+
+        # --- Success Response
+        return Response({
+            "status": "success",
+            "message": "Payment record created successfully.",
+            "filters": {
+                "finance_plan": finance_plan.id,
+                "payment_type": payment_type,
+                "payment_amount": str(payment_amount)
+            },
+            "data": masked
+        }, status=status.HTTP_201_CREATED)
 
 
 # --------------------------------------------------------

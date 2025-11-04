@@ -334,7 +334,7 @@ class DeviceEnrollmentAPIView(APIView):
             # Store staff can only see enrollments from their store
             if hasattr(user, 'store'):
                 return DeviceEnrollmentCustomer.objects.filter(
-                    finance_plan__credit_application__store=user.store
+                    finance_plan__store=user.store
                 )
             else:
                 return DeviceEnrollmentCustomer.objects.none()
