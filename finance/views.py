@@ -272,8 +272,8 @@ class FinancePlanAPIView(APIView):
                 "customer__created_by__store",
                 "customer__created_by__store__region",
                 "credit_application",
-                "credit_score",
-            )            
+                "credit_score",                
+            )
             .filter(id=temp_plan_id)
             .first()
             )
@@ -345,12 +345,27 @@ class FinancePlanAPIView(APIView):
             # Serialize response
             # --------------------------------------------------------
             serialized_data = FinancePlanSerializer(final_plan).data
-            return Response({
-                "status": "success",
-                "message": "Finance Plan created successfully.",
-                "data": serialized_data
-            }, status=status.HTTP_201_CREATED)
 
+            # --- Add device details ---
+            device = getattr(final_plan, "device", None)
+
+            device_info = {
+                "category": getattr(device.brand.category, "name", None)
+                if getattr(device, "brand", None) and getattr(device.brand, "category", None)
+                else None,
+                "brand": getattr(device.brand, "name", None)
+                if getattr(device, "brand", None)
+                else None,
+                "model": getattr(device, "model_name", None),
+            }
+            return Response({
+            "status": "success",
+            "message": "Finance Plan created successfully.",
+            "data": {
+                **serialized_data,
+                "device_details": device_info
+            }
+            }, status=status.HTTP_201_CREATED)
         except ValidationError as ve:
             return Response({
                 "status": "error",
@@ -1355,151 +1370,7 @@ class FinanceReportAPIView(APIView):
 
         except Exception as e:
             logger.error(f"FinanceReport Error: {str(e)}", exc_info=True)
-            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-
-# ============================================================
-# API: Region Wise Report
-# ============================================================
-class RegionWiseReportView(APIView):
-    """
-    Generates region-based finance performance summary.
-
-    Roles:
-    - Admin, GlobalManager, FinanceManager → all regions
-    - SalesAdvisor → only their assigned region
-
-    Features:
-    - 3D relational data fetching (Finance → Customer → Device → Transactions)
-    - Role-based permission enforcement
-    - Unified response format
-    - Optimized ORM queries
-    - Secure & cached output
-    """
-
-    permission_classes = [IsAuthenticatedUser]
-
-    @cache_response(timeout=300)  # Cache response for 5 minutes
-    def get(self, request):
-        try:
-            user = request.user
-            region_id = request.query_params.get("region_id")
-            month = request.query_params.get("month")
-
-            # ============================================================
-            # 1. 3D DATA FETCHING OPTIMIZATION
-            # ============================================================
-            queryset = (
-                FinancePlan.objects.select_related(
-                    "credit_application__customer__created_by__store__region",
-                    "device",
-                )
-                .prefetch_related(
-                    Prefetch("payments"),  # Example: transactions or EMI payments
-                )
-            )
-
-            # ============================================================
-            # 2. ROLE-BASED PERMISSION VALIDATION
-            # ============================================================
-            if user.is_superuser or user.role in ["Admin", "GlobalManager", "FinanceManager"]:
-                pass  # Full access
-            elif user.role == "SalesAdvisor":
-                if not getattr(user, "store", None) or not getattr(user.store, "region", None):
-                    return Response({
-                        "status": "error",
-                        "message": "No region linked to this Sales Advisor."
-                    }, status=status.HTTP_400_BAD_REQUEST)
-
-                queryset = queryset.filter(
-                    credit_application__customer__created_by__store__region=user.store.region
-                )
-            else:
-                return Response({
-                    "status": "error",
-                    "message": "You are not authorized to view this report."
-                }, status=status.HTTP_403_FORBIDDEN)
-
-            # ============================================================
-            # 3. OPTIONAL FILTERS
-            # ============================================================
-            if region_id and (user.is_superuser or user.role in ["Admin", "GlobalManager", "FinanceManager"]):
-                queryset = queryset.filter(
-                    credit_application__customer__created_by__store__region_id=region_id
-                )
-
-            if month:
-                try:
-                    month_int = int(month)
-                    if not 1 <= month_int <= 12:
-                        raise ValueError
-                    queryset = queryset.filter(created_at__month=month_int)
-                except ValueError:
-                    return Response({
-                        "status": "error",
-                        "message": "Invalid month. Must be between 1 and 12."
-                    }, status=status.HTTP_400_BAD_REQUEST)
-
-            # ============================================================
-            # 4. AGGREGATION & PERFORMANCE METRICS
-            # ============================================================
-            region_data = (
-                queryset.values(
-                    "credit_application__customer__created_by__store__region__id",
-                    "credit_application__customer__created_by__store__region__name"
-                )
-                .annotate(
-                    total_finance_plans=Count("id"),
-                    total_amount_financed=Sum("amount_to_finance"),
-                    total_down_payment=Sum("actual_down_payment"),
-                    approved_count=Count("id", filter=Q(score_status="APPROVED")),
-                    rejected_count=Count("id", filter=Q(score_status="REJECTED")),
-                    pending_count=Count("id", filter=Q(score_status="PENDING")),
-                )
-                .order_by("credit_application__customer__created_by__store__region__name")
-            )
-
-            # ============================================================
-            # 5. STRUCTURED RESPONSE
-            # ============================================================
-            response_data = [
-                {
-                    "region_id": r["credit_application__customer__created_by__store__region__id"],
-                    "region_name": r["credit_application__customer__created_by__store__region__name"],
-                    "total_finance_plans": r["total_finance_plans"],
-                    "total_amount_financed": str(r["total_amount_financed"] or 0),
-                    "total_down_payment": str(r["total_down_payment"] or 0),
-                    "approved_count": r["approved_count"],
-                    "rejected_count": r["rejected_count"],
-                    "pending_count": r["pending_count"],
-                }
-                for r in region_data
-            ]
-
-            # ============================================================
-            # 6. AUDIT LOGGING
-            # ============================================================
-            logger.info(
-                f"[RegionWiseReport] User={user.username}, Role={user.role}, "
-                f"Region={region_id}, Month={month}"
-            )
-
-            # ============================================================
-            # 7. SUCCESS RESPONSE
-            # ============================================================
-            return Response({
-                "status": "success",
-                "message": "Region-wise finance performance report fetched successfully.",
-                "filters": {"region_id": region_id, "month": month},
-                "data": response_data,
-            }, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"RegionWiseReport Error: {str(e)}", exc_info=True)
-            return Response({
-                "status": "error",
-                "message": str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)      
 
 
 # ============================================================
