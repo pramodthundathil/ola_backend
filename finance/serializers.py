@@ -1,6 +1,7 @@
 from datetime import date
 from rest_framework import serializers
 from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan
+from products.serializers import ProductModelSerializer
 from products.models import ProductModel
 
 
@@ -45,7 +46,13 @@ class FinancePlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinancePlan
         fields = '__all__'
-
+    
+    def create(self, validated_data):
+        user = self.context['request'].user
+        instance = FinancePlan(**validated_data)
+        instance.save(user=user)  #  pass logged-in user to model save
+        return instance
+    
 
 # --------------------------------------------------------
 # Auto Finance Plan Serializer (for output)
@@ -90,6 +97,7 @@ class EMIScheduleSerializer(serializers.ModelSerializer):
         model = EMISchedule
         fields = '__all__'
 
+
 # --------------------------------------------------------
 # EMI Schedule Serializer
 # --------------------------------------------------------
@@ -105,40 +113,130 @@ class EMIScheduleSerializerPlan(serializers.ModelSerializer):
         return f"{obj.finance_plan.credit_application.customer.first_name} {obj.finance_plan.credit_application.customer.last_name}"
 
 
-# ------------------------------
-# Payment Record Serializer
-# ------------------------------
-class PaymentRecordSerializer(serializers.ModelSerializer):
-    finance_plan_id = serializers.UUIDField(write_only=True)
-    emi_schedule_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+# ----------------------------------
+# Extented Payment Record Serializer
+# ----------------------------------
+class FinancePlanNestedSerializer(FinancePlanSerializer):
+    """
+    Extended serializer for FinancePlan with nested device and customer details.
+    """
+    device = ProductModelSerializer(read_only=True)
+    customer = serializers.SerializerMethodField()
+
+    class Meta(FinancePlanSerializer.Meta):
+        fields = '__all__'
+
+    def get_customer(self, obj):
+        credit_app = getattr(obj, "credit_application", None)
+        if not credit_app or not hasattr(credit_app, "customer"):
+            return None
+        customer = credit_app.customer
+        return {
+            "id": customer.id,
+            "name": f"{customer.first_name} {customer.last_name}",
+            "email": getattr(customer, "email", None),
+            "phone": getattr(customer, "phone_number", None),
+        }
+    
+
+#-----------------------------------------------------  
+# Payment → FinancePlan → Device → Customer Serializer
+#-------------------------------------------------------
+class PaymentRecord3DSerializer(serializers.ModelSerializer):
+    """
+    Serializer for PaymentRecord with full 3D relational context:
+    Payment → FinancePlan → Device → Customer
+    """
+    finance_plan = FinancePlanNestedSerializer(read_only=True)
 
     class Meta:
         model = PaymentRecord
         fields = [
-            'id', 'finance_plan_id', 'emi_schedule_id',
-            'payment_type', 'payment_method', 'payment_amount',
-            'payment_date', 'payment_status', 'transaction_reference',
-            'receipt_number', 'notes', 'metadata', 'created_at', 'updated_at'
+            "id",
+            "finance_plan",
+            "payment_type",
+            "payment_method",
+            "payment_amount",
+            "payment_status",
+            "payment_date",
+            "transaction_reference",
+            "created_at",
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+# ------------------------------
+# Payment Record Serializer
+# ------------------------------
+class PaymentCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating PaymentRecord entries.    """
+
+    finance_plan = serializers.PrimaryKeyRelatedField(
+        queryset=FinancePlan.objects.all(),
+        required=True,
+        help_text="ID of the related Finance Plan."
+    )
+    payment_type = serializers.ChoiceField(
+        choices=[
+            ("EMI", "EMI"),
+            ("DOWN_PAYMENT", "Down Payment"),
+            ("FULL_SETTLEMENT", "Full Settlement"),
+            ("LATE_FEE", "Late Fee"),
+        ],
+        required=True,
+        help_text="Type of payment (EMI, DOWN_PAYMENT, FULL_SETTLEMENT, LATE_FEE)."
+    )
+    payment_amount = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        required=True,
+        help_text="Amount paid by the customer."
+    )
+    transaction_reference = serializers.CharField(
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        help_text="Optional transaction reference from gateway (e.g., YAPPY-TRX-784923)."
+    )
+
+    class Meta:
+        model = PaymentRecord
+        fields = [
+            "finance_plan",
+            "payment_type",
+            "payment_amount",
+            "transaction_reference",
+        ]
+
+    def validate_finance_plan(self, value):
+        """Ensure finance plan is active or valid."""
+        if not value.is_active:
+            raise serializers.ValidationError("Selected finance plan is inactive or closed.")
+        return value
+
+    def validate_payment_amount(self, value):
+        """Ensure positive amount."""
+        if value <= 0:
+            raise serializers.ValidationError("Payment amount must be greater than zero.")
+        return value
+
+    def validate(self, attrs):
+        """Cross-field validation logic."""
+        finance_plan = attrs.get("finance_plan")
+        payment_type = attrs.get("payment_type")
+
+        # Example: restrict FULL_SETTLEMENT if plan already paid off
+        if payment_type == "FULL_SETTLEMENT" and getattr(finance_plan, "is_settled", False):
+            raise serializers.ValidationError("Finance plan already fully settled.")
+
+        return attrs
 
     def create(self, validated_data):
-        finance_plan_id = validated_data.pop('finance_plan_id')
-        emi_schedule_id = validated_data.pop('emi_schedule_id', None)
-
-        finance_plan = FinancePlan.objects.get(id=finance_plan_id)
-        emi_schedule = EMISchedule.objects.get(id=emi_schedule_id) if emi_schedule_id else None
-
-        payment = PaymentRecord.objects.create(
-            finance_plan=finance_plan,
-            emi_schedule=emi_schedule,
-            **validated_data
-        )
-
-        if payment.payment_status == 'COMPLETED' and emi_schedule:
-            payment.apply_to_emi()
-
-        return payment
+        """
+        Create and return a new PaymentRecord instance.
+        """
+        # Automatically set derived fields (others handled in view)
+        return PaymentRecord.objects.create(**validated_data)
 
 
 # ------------------------------
@@ -250,3 +348,50 @@ class PaymentRecordSerializerPlan(serializers.ModelSerializer):
         if obj.processed_by:
             return f"{obj.processed_by.first_name} {obj.processed_by.last_name}"
         return None
+    
+# ============================================================
+# Main Serializer — PaymentRecord3DSerializer
+# ============================================================
+
+class PaymentRecord3DSerializer(serializers.ModelSerializer):
+    finance_plan = FinancePlanNestedSerializer(read_only=True)
+    emi_schedule = EMIScheduleSerializer(read_only=True)
+
+    # Include related payments under same plan (for transaction history)
+    related_payments = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaymentRecord
+        fields = [
+            "id",
+            "finance_plan",
+            "emi_schedule",
+            "payment_type",
+            "payment_method",
+            "payment_amount",
+            "payment_status",
+            "payment_date",
+            "transaction_reference",
+            "processed_by",
+            "related_payments",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_related_payments(self, obj):
+        """
+        Return other payments of the same FinancePlan (excluding this one).
+        """
+        qs = PaymentRecord.objects.filter(finance_plan=obj.finance_plan).exclude(id=obj.id)
+        return [
+            {
+                "id": p.id,
+                "type": p.payment_type,
+                "amount": str(p.payment_amount),
+                "status": p.payment_status,
+                "date": p.payment_date,
+                "transaction_reference": p.transaction_reference,
+            }
+            for p in qs.order_by("-payment_date")[:5]  # last 5 transactions
+        ]
+    
