@@ -212,40 +212,78 @@ class CustomerManagementView(APIView):
         # ---------POST METHOD-----------------
 
         @swagger_auto_schema(
-            operation_summary="Create a new customer",
-            operation_description="Creates a new customer in the system. The authenticated user is automatically set as the creator.",
-            tags=["customer"], 
+            operation_summary="Create or fetch a customer by document details",
+            operation_description="""
+            Creates a new customer if not existing, using only `document_type` and `document_number`.
+            If a customer with the same document already exists, returns that existing record instead.
+            
+            **Frontend Workflow**
+            - If `newly_created_customer = true` → open page to fill remaining details.
+            - If `newly_created_customer = false` → customer already exists, skip additional steps.
+            """,
+            tags=["customer"],
             request_body=openapi.Schema(
                 type=openapi.TYPE_OBJECT,
-                required=['document_number', 'document_type', 'first_name', 'last_name', 'email', 'phone_number'],
+                required=['document_type', 'document_number'],
                 properties={
-                    'document_number': openapi.Schema(type=openapi.TYPE_STRING, description="ID card with hyphens (e.g., 8-123-456) or passport number"),
-                    'document_type': openapi.Schema(type=openapi.TYPE_STRING, description="Type of document: PANAMA_ID, PASSPORT, FOREIGNER_ID"),
-                    'latitude': openapi.Schema(type=openapi.TYPE_NUMBER, format=openapi.FORMAT_FLOAT),
-                    'longitude': openapi.Schema(type=openapi.TYPE_NUMBER, format=openapi.FORMAT_FLOAT),
-                    'first_name': openapi.Schema(type=openapi.TYPE_STRING),
-                    'last_name': openapi.Schema(type=openapi.TYPE_STRING),
-                    'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
-                    'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                    'document_type': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description="Document type: PANAMA_ID, PASSPORT, FOREIGNER_ID"
+                    ),
+                    'document_number': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description="Customer document number (e.g., 8-123-456)"
+                    ),
                 }
             ),
             responses={
+                200: openapi.Response(
+                    description="Customer already exists",
+                    schema=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'status': openapi.Schema(type=openapi.TYPE_STRING, example='success'),
+                            'message': openapi.Schema(type=openapi.TYPE_STRING, example='Customer already exists.'),
+                            'newly_created_customer': openapi.Schema(type=openapi.TYPE_BOOLEAN, example=False),
+                            'data': openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                                    'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'created_by': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    'created_at': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                    'updated_at': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                }
+                            )
+                        }
+                    )
+                ),
                 201: openapi.Response(
                     description="Customer created successfully",
                     schema=openapi.Schema(
                         type=openapi.TYPE_OBJECT,
                         properties={
-                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                            'document_number': openapi.Schema(type=openapi.TYPE_STRING),
-                            'document_type': openapi.Schema(type=openapi.TYPE_STRING),
-                            'first_name': openapi.Schema(type=openapi.TYPE_STRING),
-                            'last_name': openapi.Schema(type=openapi.TYPE_STRING),
-                            'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
-                            'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
-                            'status': openapi.Schema(type=openapi.TYPE_STRING),
-                            'created_by': openapi.Schema(type=openapi.TYPE_INTEGER),
-                            'created_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
-                            'updated_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                            'status': openapi.Schema(type=openapi.TYPE_STRING, example='success'),
+                            'message': openapi.Schema(type=openapi.TYPE_STRING, example='Customer created successfully.'),
+                            'newly_created_customer': openapi.Schema(type=openapi.TYPE_BOOLEAN, example=True),
+                            'data': openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'created_by': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    'created_at': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                    'updated_at': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                }
+                            )
                         }
                     )
                 ),
@@ -255,20 +293,51 @@ class CustomerManagementView(APIView):
 
 
         def post(self, request):
-            serializer = CustomerSerializer(data=request.data, context={'request': request})
+            document_type = request.data.get("document_type")
+            document_number = request.data.get("document_number")
+
+            if not document_type or not document_number:
+                return Response({
+                    "status": "error",
+                    "message": "Both document_type and document_number are required.",
+                    "data": None
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # check if customer already exists
+            existing_customer = Customer.objects.filter(
+                document_type=document_type,
+                document_number=document_number
+            ).first()
+
+            if existing_customer:
+                serializer = CustomerSerializer(existing_customer)
+                return Response({
+                    "status": "success",
+                    "message": "Customer already exists.",
+                    "newly_created_customer": False,
+                    "data": serializer.data
+                }, status=status.HTTP_200_OK)
+
+            # create minimal customer
+            serializer = CustomerSerializer(data={
+                "document_type": document_type,
+                "document_number": document_number
+            }, context={'request': request})
+
             if serializer.is_valid():
                 customer = serializer.save()
                 return Response({
                     "status": "success",
                     "message": "Customer created successfully.",
+                    "newly_created_customer": True,
                     "data": CustomerSerializer(customer).data
                 }, status=status.HTTP_201_CREATED)
+
             return Response({
                 "status": "error",
                 "message": "Validation failed.",
                 "data": serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
-
 
         # ---------- PATCH ----------
         @swagger_auto_schema(
@@ -577,8 +646,6 @@ class CreditScoreCheckAPIView(APIView):
                 "message": "Customer not found.",
                 "data": None
             }, status=status.HTTP_404_NOT_FOUND)
-
-        
 
         # 1️= Check if recent score exists (within 30 days)
         latest_score = customer.get_latest_credit_score()
