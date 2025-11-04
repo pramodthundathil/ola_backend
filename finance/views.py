@@ -5,11 +5,11 @@
 import logging
 from decimal import Decimal
 from datetime import timedelta, datetime
+from collections import defaultdict
 
 # swagger settup
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-
 from customer.permissions import IsAuthenticatedUser
 
 # ============================================================
@@ -55,7 +55,7 @@ from .serializers import (
     PaymentRecord3DSerializer,
     PaymentRecordSerializerPlan,
     FinanceRiskTierSerializer,
-    FinanceCollectionSerializer,
+    FinanceCollectionAnalyticsSerializer,
     FinanceOverdueSerializer,
     EMIScheduleSerializerPlan,
 )
@@ -778,39 +778,280 @@ class FinanceRiskTierView(APIView):
 # Finance Collection Analytics 
 # ============================================================
 class FinanceCollectionsView(APIView):
-    permission_classes = [IsAdminOrGlobalManager]
+    """   
+    Provides analytics and detailed payment records for Finance Collections.
+    Includes:
+    - Total installments, collected, pending, overdue
+    - Customers with overdue
+    - Region-wise collection summary
+    - Flexible filters (date, status, method, type, store, region, etc.)
+    """
 
+    permission_classes = [IsAuthenticatedUser]
     @swagger_auto_schema(
-        operation_summary="Get Collection Analytics",
-        responses={200: FinanceCollectionSerializer},
+        operation_summary="Finance Collection Analytics",
+        operation_description="""
+        Provides analytics and detailed payment collection data for finance plans.
+
+        **Role-based Access:**
+        - **Superuser / Admin / FinanceManager / GlobalManager:** Full access to all records  
+        - **RegionalManager:** Payments belonging to stores within their region  
+        - **StoreManager:** Payments under their store  
+        - **SalesPerson:** Payments created by them  
+        - **Customer:** Payments for their own finance plans only  
+
+        **Analytics Included:**
+        - Total installments, collected, pending, overdue
+        - Customers with overdue
+        - Region-wise collection summary
+        - Collection rate (percentage of collected vs total due)
+
+        **Optional Filters:**  
+        - `payment_status`: Filter by Payment Status (Pending, Completed, Failed, Refunded, Cancelled)  
+        - `payment_method`: Filter by Payment Method (Punto Pago, Yappy, Western Union, Cash, Bank Transfer, Other)  
+        - `payment_type`: Filter by Payment Type (Down Payment, EMI, Late Fee, Full Settlement)  
+        - `region_id`: Filter by Region ID  
+        - `store_id`: Filter by Store ID  
+        - `customer_id`: Filter by Customer ID  
+        - `finance_plan_id`: Filter by Finance Plan ID  
+        - `start_date`: Filter by Payment Start Date (YYYY-MM-DD)  
+        - `end_date`: Filter by Payment End Date (YYYY-MM-DD)
+        """,
+        manual_parameters=[
+            openapi.Parameter("payment_status", openapi.IN_QUERY, description="Filter by Payment Status", type=openapi.TYPE_STRING),
+            openapi.Parameter("payment_method", openapi.IN_QUERY, description="Filter by Payment Method", type=openapi.TYPE_STRING),
+            openapi.Parameter("payment_type", openapi.IN_QUERY, description="Filter by Payment Type", type=openapi.TYPE_STRING),
+            openapi.Parameter("region_id", openapi.IN_QUERY, description="Filter by Region ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("store_id", openapi.IN_QUERY, description="Filter by Store ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("customer_id", openapi.IN_QUERY, description="Filter by Customer ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("finance_plan_id", openapi.IN_QUERY, description="Filter by Finance Plan ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("start_date", openapi.IN_QUERY, description="Filter by Payment Start Date (YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+            openapi.Parameter("end_date", openapi.IN_QUERY, description="Filter by Payment End Date (YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+        ],
+        responses={200: FinanceCollectionAnalyticsSerializer},
         tags=["Finance"]
     )
     def get(self, request):
         try:
-            payments = PaymentRecord.objects.all()
-            total_installments = payments.count()
-            total_collected = float(payments.filter(payment_status='COMPLETED')
-                                    .aggregate(Sum('payment_amount'))['payment_amount__sum'] or 0)
-            total_due = float(payments.aggregate(Sum('payment_amount'))['payment_amount__sum'] or 0)
+            user = request.user
+            user_role = getattr(user, "role", "Customer")
+
+            # ==================================================
+            # Base Query
+            # ==================================================
+            qs = (
+                PaymentRecord.objects.select_related(
+                    "finance_plan",
+                    "finance_plan__store",                
+                    "finance_plan__store__region",        
+                    "finance_plan__credit_application",
+                    "finance_plan__credit_application__customer",
+                    "finance_plan__credit_score",
+                    "finance_plan__device",
+                    "emi_schedule",
+                )
+                .prefetch_related("emi_schedule__payments")
+                .order_by("-created_at")
+            )
+
+            # ==================================================
+            # Role-Based Access
+            # ==================================================
+            if user.is_superuser or user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+                pass  # full access
+            elif user_role == "RegionalManager":
+                region = getattr(user, "region", None)
+                qs = qs.filter(finance_plan__store__region=region) if region else qs.none()
+            elif user_role == "StoreManager":
+                store = getattr(user, "store", None)
+                qs = qs.filter(finance_plan__store=store) if store else qs.none()
+            elif user_role == "SalesPerson":
+                qs = qs.filter(finance_plan__created_by=user)
+            elif user_role == "Customer":
+                qs = qs.filter(finance_plan__credit_application__customer=user)
+            else:
+                qs = qs.none()
+
+            # ==================================================
+            # Query Filters (status, type, date, etc.)
+            # ==================================================
+            params = request.query_params
+            filters = {
+                "payment_status__iexact": params.get("payment_status"),
+                "payment_method__iexact": params.get("payment_method"),
+                "payment_type__iexact": params.get("payment_type"),
+                "finance_plan__store__region__id": params.get("region_id"),
+                "finance_plan__store__id": params.get("store_id"),
+                "finance_plan__credit_application__customer__id": params.get("customer_id"),
+                "finance_plan__id": params.get("finance_plan_id"),
+            }
+
+            for key, value in filters.items():
+                if value:
+                    qs = qs.filter(**{key: value})
+
+            start_date = params.get("start_date")
+            end_date = params.get("end_date")
+
+            if start_date:
+                try:
+                    qs = qs.filter(payment_date__date__gte=datetime.strptime(start_date, "%Y-%m-%d"))
+                except ValueError:
+                    pass
+            if end_date:
+                try:
+                    qs = qs.filter(payment_date__date__lte=datetime.strptime(end_date, "%Y-%m-%d"))
+                except ValueError:
+                    pass
+
+            # ==================================================
+            # Analytics Calculation
+            # ==================================================
+            total_installments = qs.count()
+            total_collected = float(qs.filter(payment_status="COMPLETED").aggregate(total=Sum("payment_amount"))["total"] or 0)
+            total_due = float(qs.aggregate(total=Sum("payment_amount"))["total"] or 0)
             total_pending = total_due - total_collected
             collection_rate = (total_collected / total_due * 100) if total_due > 0 else 0.0
 
-            data = {
+            # --- Overdue Analytics ---
+            overdue_qs = qs.filter(
+                Q(payment_status__in=["PENDING", "FAILED"]) &
+                Q(emi_schedule__due_date__lt=timezone.now().date())
+            )
+            total_overdue = float(overdue_qs.aggregate(total=Sum("payment_amount"))["total"] or 0)
+            total_overdue_installments = overdue_qs.count()
+            customers_with_overdue = overdue_qs.values_list(
+                "finance_plan__credit_application__customer", flat=True
+            ).distinct().count()
+
+            # ==================================================
+            # Region Summary
+            # ==================================================
+            region_summary = defaultdict(lambda: {
+                "region_name": "",
+                "total_installments": 0,
+                "total_collected": 0.0,
+                "total_pending": 0.0,
+                "total_overdue": 0.0,
+            })
+
+            for payment in qs:
+                store = payment.finance_plan.store
+                region = getattr(store.region, "name", None) if store else None
+                if not region:
+                    continue
+
+                region_data = region_summary[region]
+                region_data["region_name"] = region
+                region_data["total_installments"] += 1
+
+                amt = float(payment.payment_amount or 0)
+                if payment.payment_status == "COMPLETED":
+                    region_data["total_collected"] += amt
+                elif payment.payment_status in ["PENDING", "FAILED"]:
+                    region_data["total_pending"] += amt
+
+                if payment.emi_schedule and payment.emi_schedule.due_date < timezone.now().date() and payment.payment_status in ["PENDING", "FAILED"]:
+                    region_data["total_overdue"] += amt
+
+            # ==================================================
+            # Serialize Analytics Data
+            # ==================================================
+            analytics_data = {
                 "total_installments": total_installments,
-                "total_collected": total_collected,
-                "total_pending": total_pending,
+                "total_collected": round(total_collected, 2),
+                "total_pending": round(total_pending, 2),
+                "total_overdue": round(total_overdue, 2),
+                "total_overdue_installments": total_overdue_installments,
                 "collection_rate": round(collection_rate, 2),
+                "customers_with_overdue": customers_with_overdue,
+                "regions_summary": list(region_summary.values()),
             }
 
-            serializer = FinanceCollectionSerializer(data)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            serializer = FinanceCollectionAnalyticsSerializer(analytics_data)
+            meta = serializer.data
+
+            # ==================================================
+            # Pagination & Results
+            # ==================================================
+            paginator = FinancePlanPagination()
+            page = paginator.paginate_queryset(qs, request)
+
+            results = []
+            for p in page:
+                fp = p.finance_plan
+                store = getattr(fp, "store", None)
+                region = getattr(store, "region", None)
+                dev = getattr(fp, "device", None)
+                ca = getattr(fp, "credit_application", None)
+                cust = getattr(ca, "customer", None)
+                emi = getattr(p, "emi_schedule", None)
+
+                item = {
+                    "payment_id": p.id,
+                    "payment_amount": float(p.payment_amount or 0),
+                    "payment_type": p.payment_type,
+                    "payment_method": p.payment_method,
+                    "payment_status": p.payment_status,
+                    "payment_date": p.payment_date.isoformat() if p.payment_date else None,
+                    "finance_plan": {
+                        "finance_plan_id": fp.id,
+                        "amount": float(fp.amount_to_finance or 0),
+                        "store": getattr(store, "name", None),
+                        "region": getattr(region, "name", None),
+                        "device": {"id": dev.id, "model_name": dev.model_name} if dev else None,
+                       "customer": {
+                        "id": cust.id,
+                        "name": f"{cust.first_name} {cust.last_name}",
+                        "phone": getattr(cust, "phone", None)} if cust else None,
+                    },
+                    "emi_schedule": {
+                        "emi_id": emi.id if emi else None,
+                        "due_date": emi.due_date.isoformat() if emi and emi.due_date else None,
+                        "amount_due": float(emi.amount_due or 0) if emi else None,
+                        "status": getattr(emi, "status", None) if emi else None,
+                    },
+                }
+                results.append(mask_sensitive_data(item, user_role))
+
+            # ==================================================
+            # Audit Log
+            # ==================================================
+            try:
+                AuditLog.objects.create(
+                    user=user if user.is_authenticated else None,
+                    action_type="FINANCE_COLLECTIONS_VIEWED",
+                    description=f"{user_role} viewed finance collections analytics.",
+                    metadata={
+                        "role": user_role,
+                        "filters": request.query_params.dict(),
+                        "total_records": total_installments,
+                    },
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+            except Exception as log_error:
+                logger.warning(f"Audit logging failed: {log_error}")
+
+            # ==================================================
+            # Response
+            # ==================================================
+            payload = {
+                "meta": meta,
+                "results": results,
+                "page": paginator.page.number if paginator.page else 1,
+                "page_size": paginator.get_page_size(request),
+            }
+
+            return paginator.get_paginated_response(payload)
 
         except Exception as e:
-            logger.error(f"Error generating collection analytics: {str(e)}", exc_info=True)
-            return Response({"detail": "Failed to generate collection analytics."},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
+            logger.error(f"Error generating finance collection analytics: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": "Failed to generate finance collection analytics."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        
+        
 # ============================================================
 # Finance Overdue Installment Analytics 
 # ============================================================       
