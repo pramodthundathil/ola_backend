@@ -111,6 +111,7 @@ class AuditLog(models.Model):
         ('AUTO_FINANCE_PLAN_CREATED', 'Auto Finance Plan Created'),
         ('FINANCE_PLAN_CREATED', 'Finance Plan Created'),
         ('FINANCE_PLAN_VIEWED', 'Finance Plan Viewed'),
+        ('FINANCE_REPORT_VIEWED','Finance Report Viewed'),
 
 
     ]
