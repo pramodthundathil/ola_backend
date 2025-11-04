@@ -10,7 +10,7 @@ from .models import ( Customer,CreditScore,
 
 # =========== customer serializers for CRUD (except block customer) ==========#
 
-
+  
 class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
@@ -30,10 +30,19 @@ class CustomerSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['status', 'created_by', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'first_name': {'required': False, 'allow_blank': True},
+            'last_name': {'required': False, 'allow_blank': True},
+            'email': {'required': False, 'allow_blank': True},
+            'phone_number': {'required': False, 'allow_blank': True},
+            'latitude': {'required': False},
+            'longitude': {'required': False},
+        }
 
     def create(self, validated_data):
         user = self.context['request'].user
-        return Customer.objects.create(created_by=user, **validated_data)    
+        return Customer.objects.create(created_by=user, **validated_data)
+
 
 
 # =========== customer serializers for status change ==========#
