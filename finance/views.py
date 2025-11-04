@@ -1584,7 +1584,7 @@ class PaymentRecordCreateAPIView(APIView):
 
                 # ----------------------- Audit Log -----------------------
                 AuditLog.objects.create(
-                    user=request.user,
+                    user=request.user if request.user.is_authenticated else None,
                     action_type="CREATE_PAYMENT",
                     description=(
                         f"Payment created for FinancePlan ID={payment.finance_plan.id}, "
@@ -1640,182 +1640,151 @@ class PaymentRecordCreateAPIView(APIView):
 
 
 # --------------------------------------------------------
-# API: Get Payment Records by Customer ID
+# API: Get Payment Records 
 # --------------------------------------------------------
 class PaymentRecordAPIView(APIView):
+    """
+    List all Payment Records or a Specific Record by ID
+    """  
     permission_classes = [IsAuthenticatedUser]
-    
+
     @swagger_auto_schema(
-        operation_summary="Get Payment Records by Customer ID",
+        operation_summary="Get Payment Records (Role-based & Filtered)",
         operation_description="""
-        Retrieve all payment records for a specific customer.
-        
-        **Query Parameters:**
-        - `customer_id` (required): Customer ID
-        - `payment_type` (optional): Filter by type (DOWN_PAYMENT, EMI, LATE_FEE, FULL_SETTLEMENT)
-        - `payment_status` (optional): Filter by status (PENDING, COMPLETED, FAILED, REFUNDED, CANCELLED)
-        - `payment_method` (optional): Filter by method (PUNTO_PAGO, YAPPY, WESTERN_UNION, CASH, etc.)
-        
-        **Examples:**
-        - `GET /api/finance/payments/?customer_id=5` → Get all payments
-        - `GET /api/finance/payments/?customer_id=5&payment_type=EMI` → Get only EMI payments
-        - `GET /api/finance/payments/?customer_id=5&payment_status=COMPLETED` → Get completed payments
+        Retrieve payment records with role-based access and filters.
+
+        **Filters:**
+        - `customer_id` (optional)
+        - `payment_type` (optional)
+        - `payment_status` (optional)
+        - `payment_method` (optional)
+        - `payment_date` (optional)
+        - `start_date` and `end_date` (optional)
         """,
         manual_parameters=[
-            openapi.Parameter(
-                'customer_id',
-                openapi.IN_QUERY,
-                description="Customer ID",
-                type=openapi.TYPE_INTEGER,
-                required=True
-            ),
-            openapi.Parameter(
-                'payment_type',
-                openapi.IN_QUERY,
-                description="Filter by payment type",
-                type=openapi.TYPE_STRING,
-                enum=['DOWN_PAYMENT', 'EMI', 'LATE_FEE', 'FULL_SETTLEMENT'],
-                required=False
-            ),
-            openapi.Parameter(
-                'payment_status',
-                openapi.IN_QUERY,
-                description="Filter by payment status",
-                type=openapi.TYPE_STRING,
-                enum=['PENDING', 'COMPLETED', 'FAILED', 'REFUNDED', 'CANCELLED'],
-                required=False
-            ),
-            openapi.Parameter(
-                'payment_method',
-                openapi.IN_QUERY,
-                description="Filter by payment method",
-                type=openapi.TYPE_STRING,
-                enum=['PUNTO_PAGO', 'YAPPY', 'WESTERN_UNION', 'CASH', 'BANK_TRANSFER', 'OTHER'],
-                required=False
-            )
+            openapi.Parameter('customer_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('payment_type', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('payment_status', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('payment_method', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('payment_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
         ],
-        responses={
-            200: openapi.Response(
-                description="Payment records list with summary",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'customer_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'customer_name': openapi.Schema(type=openapi.TYPE_STRING),
-                        'finance_plan_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'summary': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'total_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'completed_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'pending_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'total_amount_paid': openapi.Schema(type=openapi.TYPE_STRING),
-                                'payment_methods': openapi.Schema(type=openapi.TYPE_OBJECT),
-                            }
-                        ),
-                        'payments': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_OBJECT))
-                    }
-                )
-            ),
-            400: "customer_id parameter is required",
-            404: "No payment records found for this customer"
-        },
         tags=["Finance"]
     )
     def get(self, request):
         try:
+            user = request.user
+            role = getattr(user, 'role', None)
+
+            # === Filters ===
             customer_id = request.query_params.get('customer_id')
             payment_type = request.query_params.get('payment_type')
             payment_status = request.query_params.get('payment_status')
             payment_method = request.query_params.get('payment_method')
-            
-            if not customer_id:
-                return Response(
-                    {"error": "customer_id parameter is required"}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get customer
-            customer = get_object_or_404(Customer, id=customer_id)
-            
-            # Get finance plan for customer
-            finance_plan = FinancePlan.objects.filter(
-                credit_application__customer=customer
-            ).order_by('-created_at').first()
-            
-            if not finance_plan:
-                return Response(
-                    {"error": f"No finance plan found for customer ID {customer_id}"}, 
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Get payment records
-            payments = PaymentRecord.objects.filter(
-                finance_plan=finance_plan
-            ).order_by('-payment_date')
-            
-            # Apply filters
+            payment_date = request.query_params.get('payment_date')
+            start_date = request.query_params.get('start_date')
+            end_date = request.query_params.get('end_date')
+
+            # === Base queryset ===
+            payments = PaymentRecord.objects.select_related(
+                "finance_plan__credit_application__customer",
+                "finance_plan__device"
+            ).all()
+
+            # === Role-based access ===
+            if role == "Customer":
+                payments = payments.filter(finance_plan__credit_application__customer__user=user)            
+            elif role == "SalesPerson":
+                payments = payments.filter(processed_by=user)
+            elif role == "SalesAdvisor":
+                if hasattr(user, "region"):
+                    payments = payments.filter(finance_plan__credit_application__customer__region=user.region)
+                else:
+                    return Response({"status": "error", "message": "User region not assigned."}, status=403)
+            elif role == "StoreManager":
+                if hasattr(user, "store"):
+                    payments = payments.filter(finance_plan__credit_application__customer__store=user.store)
+                else:
+                    return Response({"status": "error", "message": "User store not assigned."}, status=403)
+            elif role not in ["FinanceManager", "Admin", "GlobalManager"]:
+                return Response({"status": "error", "message": "Unauthorized role."}, status=403)
+
+            # === Filters ===
+            if customer_id:
+                payments = payments.filter(finance_plan__credit_application__customer_id=customer_id)
             if payment_type:
                 payments = payments.filter(payment_type=payment_type.upper())
             if payment_status:
                 payments = payments.filter(payment_status=payment_status.upper())
             if payment_method:
                 payments = payments.filter(payment_method=payment_method.upper())
-            
+
+            # === Date filters ===
+            if payment_date:
+                payments = payments.filter(payment_date=payment_date)
+            elif start_date and end_date:
+                payments = payments.filter(payment_date__range=[start_date, end_date])
+            elif start_date:
+                payments = payments.filter(payment_date__gte=start_date)
+            elif end_date:
+                payments = payments.filter(payment_date__lte=end_date)
+
+            # === Default ordering by payment_date descending ===
+            payments = payments.order_by('-payment_date')
+
+            # === Summary ===
             if not payments.exists():
-                return Response(
-                    {"error": f"No payment records found for customer ID {customer_id}"}, 
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Calculate summary
+                return Response({"status": "success", "message": "No payment records found.", "data": []}, status=200)
+
             total_payments = payments.count()
-            completed_count = payments.filter(payment_status='COMPLETED').count()
-            pending_count = payments.filter(payment_status='PENDING').count()
-            
-            total_amount_paid = sum(
-                payment.payment_amount 
-                for payment in payments.filter(payment_status='COMPLETED')
-            )
-            
-            # Payment methods breakdown
-            payment_methods_summary = {}
-            for payment in payments.filter(payment_status='COMPLETED'):
-                method = payment.get_payment_method_display()
-                if method not in payment_methods_summary:
-                    payment_methods_summary[method] = {
-                        'count': 0,
-                        'total_amount': Decimal('0.00')
-                    }
-                payment_methods_summary[method]['count'] += 1
-                payment_methods_summary[method]['total_amount'] += payment.payment_amount
-            
-            # Convert Decimal to string for JSON serialization
-            for method in payment_methods_summary:
-                payment_methods_summary[method]['total_amount'] = str(
-                    payment_methods_summary[method]['total_amount']
-                )
-            
-            # Serialize data
+            completed = payments.filter(payment_status='COMPLETED').count()
+            pending = payments.filter(payment_status='PENDING').count()
+            total_amount = payments.filter(payment_status='COMPLETED').aggregate(Sum('payment_amount'))['payment_amount__sum'] or Decimal('0.00')
+
             serializer = PaymentRecordSerializerPlan(payments, many=True)
-            
-            response_data = {
-                'customer_id': customer.id,
-                'customer_name': f"{customer.first_name} {customer.last_name}",
-                'finance_plan_id': finance_plan.id,
-                'summary': {
-                    'total_payments': total_payments,
-                    'completed_payments': completed_count,
-                    'pending_payments': pending_count,
-                    'total_amount_paid': str(total_amount_paid),
-                    'payment_methods': payment_methods_summary,
+
+            response = {
+                "status": "success",
+                "message": f"Retrieved {total_payments} payment records.",
+                "summary": {
+                    "total_payments": total_payments,
+                    "completed_payments": completed,
+                    "pending_payments": pending,
+                    "total_amount_paid": str(total_amount),
                 },
-                'payments': serializer.data
+                "data": serializer.data
             }
-            
-            logger.info(f"[PaymentRecordAPI] Retrieved {total_payments} payment records for Customer ID={customer_id}")
-            return Response(response_data, status=status.HTTP_200_OK)
-            
+            logger.info(f"[PaymentRecordAPI] Retrieved {total_payments} payment records for role={role}")
+
+            # === Audit Log ===
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action_type="PAYMENT_VIEWED",
+                description=(
+                    f"Viewed {total_payments} payment records "
+                    f"(Role={role or 'N/A'}, CustomerID={customer_id or 'All'})"
+                ),
+                metadata={
+                    "filters": {
+                        "customer_id": customer_id,
+                        "payment_type": payment_type,
+                        "payment_status": payment_status,
+                        "payment_method": payment_method,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    },
+                    "total_records": total_payments,
+                    "completed": completed,
+                    "pending": pending,
+                    "total_amount_paid": str(total_amount),
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+            return Response(response, status=200)
+
         except Exception as e:
             logger.exception("[PaymentRecordAPI] Error retrieving payment records.")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"status": "error", "message": str(e)}, status=500)
+        
