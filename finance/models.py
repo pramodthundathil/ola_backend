@@ -974,3 +974,61 @@ class AutoFinancePlan(models.Model):
             },
         }
         return tier_rules.get(self.risk_tier, tier_rules['TIER_D'])
+
+
+# ========================================
+# MODEL FOR INTREST (MULTIPLE) DYNAMICALLY
+# ========================================
+
+class FinanceMultiple(models.Model):
+    """
+    Stores business-defined multiples for EMI calculation
+    (used in FinancePlan calculations).
+    Example: 4 months / 15 days -> 1.7, 6 months / 15 days -> 1.8, etc.
+    """
+
+    TERM_CHOICES = [
+        (4, '4 Months'),
+        (6, '6 Months'),
+        (8, '8 Months'),
+    ]
+
+    INTERVAL_CHOICES = [
+        (15, 'Every 15 Days'),
+        (30, 'Every 30 Days'),
+    ]
+
+    term_months = models.PositiveIntegerField(choices=TERM_CHOICES)
+    interval_days = models.PositiveIntegerField(choices=INTERVAL_CHOICES)
+    multiple = models.DecimalField(max_digits=5, decimal_places=2)
+
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "finance_multiples"
+        unique_together = ('term_months', 'interval_days')
+        ordering = ['term_months', 'interval_days']
+
+    def __str__(self):
+        return f"{self.term_months} months / {self.interval_days} days → {self.multiple}"
+    
+    # --------- FOR GET MULTIPLE---------------
+    
+    def get_multiple(self, term_months, interval_days):
+        """
+        Returns the multiple for the given term and interval.
+        Example:
+            obj.get_multiple(4, 15) → Decimal('1.70')
+        """
+        try:
+            record = FinanceMultiple.objects.get(
+                term_months=term_months,
+                interval_days=interval_days,
+                is_active=True
+            )
+            return record.multiple
+        except FinanceMultiple.DoesNotExist:
+            return None
+
