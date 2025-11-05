@@ -1460,8 +1460,13 @@ class GenerateOTPView(APIView):
 
         # Send OTP via LabsMobile
         message = f"Your Ola Credits verification code is {otp}"
-        send_sms(phone, message)
+        sms_response=send_sms(phone, message)
         # print('otp==',otp)
+        if "error" in sms_response:
+            return Response({
+                "status": "error",
+                "message": sms_response["error"]
+            }, status=500)
 
         return Response({
             "status": "success",
