@@ -8,11 +8,12 @@ def send_sms(recipient_number, message):
     """
     Send an SMS using LabsMobile API
     """
-    user_token = settings.LAB_MOBILES_TOKEN  
+    user_token = settings.LAB_MOBILES_TOKEN 
+    
+    if not user_token:
+        return {"error": "Missing LABSMOBILE_TOKEN"} 
     credentials = base64.b64encode(user_token.encode()).decode()
 
-    if not user_token:
-        return {"error": "Missing LABSMOBILE_API_TOKEN"}
 
     url = "https://api.labsmobile.com/json/send"
 
