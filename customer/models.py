@@ -78,6 +78,7 @@ class Customer(models.Model):
         null=True,
         related_name='customers_created'
     )
+    otp_verified = models.BooleanField(default=False)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
