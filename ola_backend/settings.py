@@ -30,7 +30,6 @@ LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
 SMS_API_URL = os.getenv("SMS_API_URL") 
 SENDER = os.getenv("SENDER") 
 
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 

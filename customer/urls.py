@@ -17,6 +17,9 @@ urlpatterns = [
 
     # MANAGE INCOME SHEET 
     path("income-sheet/", views.CustomerIncomeFileView.as_view(), name="income-sheet"),
+    
+    # for generate otp
+    path('generate-otp',views.GenerateOTPView.as_view(),name='generate-otp'),
 
 
 ]
