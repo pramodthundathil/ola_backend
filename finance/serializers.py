@@ -264,15 +264,22 @@ class FinanceRiskTierSerializer(serializers.Serializer):
     average_installment = serializers.FloatField()
 
 
-# ------------------------------
-# Finance AnalytCollection Serializers
-# ------------------------------
-class FinanceCollectionSerializer(serializers.Serializer):
-    total_installments = serializers.IntegerField()
-    total_collected = serializers.FloatField()
-    total_pending = serializers.FloatField()
-    collection_rate = serializers.FloatField()
-
+# ============================================================
+# Finance Collection Analytics Serializer (for Dashboard / Reports)
+# ============================================================
+class FinanceCollectionAnalyticsSerializer(serializers.Serializer):
+    total_installments = serializers.IntegerField(help_text="Total number of installments created.")
+    total_collected = serializers.DecimalField(max_digits=12, decimal_places=2, help_text="Total amount collected so far.")
+    total_pending = serializers.DecimalField(max_digits=12, decimal_places=2, help_text="Total amount still pending.")
+    total_overdue = serializers.DecimalField(max_digits=12, decimal_places=2, help_text="Total overdue amount.")
+    total_overdue_installments = serializers.IntegerField(help_text="Number of overdue installments.")
+    collection_rate = serializers.DecimalField(max_digits=5, decimal_places=2, help_text="Percentage of collection achieved.")
+    customers_with_overdue = serializers.IntegerField(help_text="Number of customers having overdue installments.")
+    regions_summary = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        help_text="Optional breakdown by region: [{'region': 'Kochi', 'collected': 50000, 'pending': 10000}]"
+    )
 
 class FinanceOverdueSerializer(serializers.Serializer):
     total_overdue_installments = serializers.IntegerField()

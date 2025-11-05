@@ -9,8 +9,7 @@ urlpatterns = [
     path('analytics/overview/', views.FinanceOverviewAPIView.as_view(), name='finance-overview'),  
     path('analytics/risk-tiers/', views.FinanceRiskTierView.as_view(), name='finance-risk-tier'),
     path("analytics/collections/", views.FinanceCollectionsView.as_view(), name="finance_analytics_collections"),
-    path("analytics/overdue/", views.FinanceOverdueView.as_view(), name="finance_analytics_overdue"),
-    path("payments/", views.PaymentRecordCreateAPIView.as_view(), name="payments-record"),  
+    path("analytics/overdue/", views.FinanceOverdueView.as_view(), name="finance_analytics_overdue"),    
     path('payments/emi/<int:emi_id>/', views.FinanceInstallmentPaymentView.as_view(), name='emi_payment'),     
     path("reports/", views.FinanceReportAPIView.as_view(), name="finance-report"),
        
@@ -18,10 +17,12 @@ urlpatterns = [
     path('finance/emi-schedule/', views.EMIScheduleAPIView.as_view(), name='emi-schedule'),
     
     # Payment Records API
-    path('finance/payments/', views.PaymentRecordAPIView.as_view(), name='payment-records'),
+    path("payment-create/", views.PaymentRecordCreateAPIView.as_view(), name="payments-record"), 
+    path('payments/', views.PaymentRecordAPIView.as_view(), name='payment-records'),    
 
     # FINACE MULTIPLE MANAGE
     path('finance-multiples/', views.FinanceMultipleListCreateView.as_view(), name='finance-multiple-list-create'),
     path('finance-multiples/<int:pk>/', views.FinanceMultipleDetailView.as_view(), name='finance-multiple-detail'),
+
 ]
 
