@@ -2,6 +2,8 @@
 from django.conf import settings
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from django.core.cache import cache
+
 
 
 # Django REST Framework Imports
@@ -24,9 +26,12 @@ from .serializers import (
      CustomerIncomeFileSerializer,
      )
 from .utils import fetch_credit_score_from_experian
+from .sms_utils import send_sms
 
 # Standard Library Imports
 import logging
+import random
+
 
 # External Library Imports
 import requests
@@ -51,7 +56,7 @@ import os
 import sqlite3
 import pandas as pd
 from django.conf import settings
-
+  
 
 # ============================================
 #   customer creation View
@@ -310,19 +315,28 @@ class CustomerManagementView(APIView):
             ).first()
 
             if existing_customer:
-                serializer = CustomerSerializer(existing_customer)
+                # customer = existing_customer
+                newly_created = False
+                existing_customer.otp_verified=False
+                existing_customer.save(update_fields=["otp_verified"])
                 return Response({
                     "status": "success",
                     "message": "Customer already exists.",
                     "newly_created_customer": False,
-                    "data": serializer.data
+                    "data": CustomerSerializer(existing_customer).data
                 }, status=status.HTTP_200_OK)
+            else:
+                serializer = CustomerSerializer(data={
+                    "document_type": document_type,
+                    "document_number": document_number
+                }, context={'request': request})
 
-            # create minimal customer
-            serializer = CustomerSerializer(data={
-                "document_type": document_type,
-                "document_number": document_number
-            }, context={'request': request})
+
+            # # create minimal customer
+            # serializer = CustomerSerializer(data={
+            #     "document_type": document_type,
+            #     "document_number": document_number
+            # }, context={'request': request})
 
             if serializer.is_valid():
                 customer = serializer.save()
@@ -341,9 +355,23 @@ class CustomerManagementView(APIView):
 
         # ---------- PATCH ----------
         @swagger_auto_schema(
-            operation_summary="Update a customer",
-            operation_description="Partially updates a customer. Provide `id` query parameter and only the fields you want to update.",
-            tags=["customer"],
+            operation_summary="Update a customer (with OTP verification if provided)",
+            operation_description="""
+            Partially updates a customer by ID.
+
+            - Provide the `id` query parameter to specify which customer to update.
+            - Optionally include `phone_number` and `otp` to verify the customer's phone before saving updates.
+            - If the OTP is valid, the customer's `otp_verified` field will be set to `true`.
+
+            **Example Flow (Frontend):**
+            1. User enters phone → clicks "Generate OTP" (calls `/customer/generate-otp/`)
+            2. User enters OTP + fills details → clicks "Verify & Submit"
+            3. This endpoint verifies OTP + updates customer data in one step.
+
+            Example:
+            PATCH /v1/customer/manage/?id=3
+            """,
+            tags=["customer", "otp"],
             manual_parameters=[
                 openapi.Parameter(
                     'id', openapi.IN_QUERY,
@@ -363,7 +391,18 @@ class CustomerManagementView(APIView):
                     'last_name': openapi.Schema(type=openapi.TYPE_STRING),
                     'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
                     'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                    'otp': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description="6-digit OTP for phone verification (optional)"
+                    ),
                     'status': openapi.Schema(type=openapi.TYPE_STRING),
+                },
+                example={
+                    "phone_number": "+50761234567",
+                    "otp": "123456",
+                    "first_name": "first_name",
+                    "last_name": "last name",
+                    "email": "customer@example.com"
                 }
             ),
             responses={
@@ -372,26 +411,34 @@ class CustomerManagementView(APIView):
                     schema=openapi.Schema(
                         type=openapi.TYPE_OBJECT,
                         properties={
-                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                            'document_number': openapi.Schema(type=openapi.TYPE_STRING),
-                            'document_type': openapi.Schema(type=openapi.TYPE_STRING),
-                            'first_name': openapi.Schema(type=openapi.TYPE_STRING),
-                            'last_name': openapi.Schema(type=openapi.TYPE_STRING),
-                            'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
-                            'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
-                            'status': openapi.Schema(type=openapi.TYPE_STRING),
-                            'created_by': openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True),
-                            'created_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
-                            'updated_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                            'status': openapi.Schema(type=openapi.TYPE_STRING, example="success"),
+                            'message': openapi.Schema(type=openapi.TYPE_STRING, example="Customer updated successfully."),
+                            'data': openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    'document_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'document_type': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'email': openapi.Schema(type=openapi.TYPE_STRING, format='email'),
+                                    'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'otp_verified': openapi.Schema(type=openapi.TYPE_BOOLEAN, example=True),
+                                    'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                    'created_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                                    'updated_at': openapi.Schema(type=openapi.FORMAT_DATETIME),
+                                }
+                            )
                         }
                     )
                 ),
-                400: "Validation error",
+                400: "Validation error or Invalid OTP",
                 404: "Customer not found",
             }
         )
         def patch(self, request):
             """
+            verify otp
             Partially update a customer by ID.
             Example:
             PATCH /v1/customer/manage/?id=3
@@ -413,6 +460,23 @@ class CustomerManagementView(APIView):
                     "message": "Customer not found.",
                     "data": None
                 }, status=status.HTTP_404_NOT_FOUND)
+            
+                # ---- Optional OTP Verification ----
+            phone = request.data.get("phone_number")
+            otp = request.data.get("otp")
+
+            if otp and phone:
+                cached_otp = cache.get(f"otp_{phone}")
+                if str(cached_otp) != str(otp):
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid or expired OTP.",
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # OTP verified
+                cache.delete(f"otp_{phone}")
+                customer.otp_verified = True
+                customer.save(update_fields=["otp_verified"])
 
 
             serializer = CustomerSerializer(customer, data=request.data, partial=True, context={'request': request})
@@ -1300,3 +1364,84 @@ class CustomerIncomeFileView(APIView):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
+
+# ===================================================
+# FOR GENERATE OTP , for phone number verification
+# ===================================================
+
+
+class GenerateOTPView(APIView):
+    permission_classes=[IsAuthenticatedUser]
+    """
+    Generate and send OTP to customer phone number.
+    """
+
+    @swagger_auto_schema(
+        operation_summary="Generate and send OTP",
+        operation_description="""
+        Generates a 6-digit OTP and sends it to the provided phone number using LabsMobile API.  
+        The OTP is valid for 5 minutes and stored temporarily in cache.
+        
+        **Frontend Flow:**
+        1. User enters phone number.  
+        2. Calls this endpoint to receive an OTP via SMS.  
+        3. Then enters the OTP in the next step to verify.
+        """,
+        tags=["customer", "otp"],
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["phone_number"],
+            properties={
+                "phone_number": openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="Customer phone number in international format (e.g. +5076XXXXXXX)"
+                ),
+            },
+        ),
+        responses={
+            200: openapi.Response(
+                description="OTP sent successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "status": openapi.Schema(type=openapi.TYPE_STRING, example="success"),
+                        "message": openapi.Schema(type=openapi.TYPE_STRING, example="OTP sent successfully."),
+                        "data": openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                "phone_number": openapi.Schema(type=openapi.TYPE_STRING, example="+5076XXXXXXX"),
+                            },
+                        ),
+                    },
+                ),
+            ),
+            400: openapi.Response(
+                description="Missing or invalid phone number",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "status": openapi.Schema(type=openapi.TYPE_STRING, example="error"),
+                        "message": openapi.Schema(type=openapi.TYPE_STRING, example="Phone number is required."),
+                    },
+                ),
+            ),
+        },
+    )
+    def post(self, request):
+        phone = request.data.get("phone_number")
+        if not phone:
+            return Response({"status": "error", "message": "Phone number is required."}, status=400)
+
+        otp = random.randint(100000, 999999)
+        cache.set(f"otp_{phone}", otp, timeout=300)  
+
+        # Send OTP via LabsMobile
+        message = f"Your Ola Credits verification code is {otp}"
+        send_sms(phone, message)
+        # print('otp==',otp)
+
+        return Response({
+            "status": "success",
+            "message": "OTP sent successfully.",
+            "data": {"phone_number": phone}
+        }, status=200)
