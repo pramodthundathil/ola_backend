@@ -19,5 +19,9 @@ urlpatterns = [
     
     # Payment Records API
     path('finance/payments/', views.PaymentRecordAPIView.as_view(), name='payment-records'),
+
+    # FINACE MULTIPLE MANAGE
+    path('finance-multiples/', views.FinanceMultipleListCreateView.as_view(), name='finance-multiple-list-create'),
+    path('finance-multiples/<int:pk>/', views.FinanceMultipleDetailView.as_view(), name='finance-multiple-detail'),
 ]
 

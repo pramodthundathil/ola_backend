@@ -1,6 +1,6 @@
 from datetime import date
 from rest_framework import serializers
-from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan
+from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan,FinanceMultiple
 from products.serializers import ProductModelSerializer
 from products.models import ProductModel
 
@@ -395,3 +395,22 @@ class PaymentRecord3DSerializer(serializers.ModelSerializer):
             for p in qs.order_by("-payment_date")[:5]  # last 5 transactions
         ]
     
+
+
+# ============================================================
+# FOR DYNAMIC INTREST (MULTIPLE) 
+# ============================================================
+
+class FinanceMultipleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FinanceMultiple
+        fields = [
+            'id', 
+            'term_months', 
+            'interval_days', 
+            'multiple', 
+            'is_active', 
+            'created_at', 
+            'updated_at'
+            ]
+        read_only_fields = ['created_at', 'updated_at']

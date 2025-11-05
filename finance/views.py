@@ -38,7 +38,7 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 # Local Application Imports
 # ============================================================
-from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog
+from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog,FinanceMultiple
 from store.models import Region
 from .utils.utils import get_device_price_with_cache, cache_response
 from home.permissions import CanViewReports
@@ -58,6 +58,7 @@ from .serializers import (
     FinanceCollectionSerializer,
     FinanceOverdueSerializer,
     EMIScheduleSerializerPlan,
+    FinanceMultipleSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
@@ -1819,3 +1820,222 @@ class PaymentRecordAPIView(APIView):
         except Exception as e:
             logger.exception("[PaymentRecordAPI] Error retrieving payment records.")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+
+
+# ============================================================
+# Create a dynamic multiple value (intrest) 
+# ============================================================
+
+
+class FinanceMultipleListCreateView(APIView):
+    permission_classes=[IsAdminOrGlobalManager]
+    """
+    Admin API → List all multiples or add a new one.
+    GET: list all
+    POST: create new
+    """
+    # -----------GET METHOD------------
+
+    @swagger_auto_schema(
+        # method='get',
+        operation_summary="List all Finance Multiples",
+        operation_description="Fetch all FinanceMultiple records ordered by term and interval.",
+        responses={
+            200: openapi.Response(
+                description="List of Finance Multiples",
+                examples={
+                    "application/json": {
+                        "status": "success",
+                        "message": "Finance multiple list fetched successfully.",
+                        "data": [
+                            {"id": 1, "term_months": 4, "interval_days": 15, "multiple": "1.7"},
+                            {"id": 2, "term_months": 6, "interval_days": 30, "multiple": "1.8"},
+                        ],
+                    }
+                },
+            ),
+        },
+        tags=["Finance Multiples"]
+    )
+
+    def get(self, request):
+        multiples = FinanceMultiple.objects.all().order_by('term_months', 'interval_days')
+        serializer = FinanceMultipleSerializer(multiples, many=True)
+        return Response({
+            "status": "success",
+            "message": "Finance multiple list fetched successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    # ------POST METHOD----------
+    
+    @swagger_auto_schema(
+        # method='post',
+        operation_summary="Create a new Finance Multiple",
+        operation_description="Add a new FinanceMultiple record (admin only).",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["term_months", "interval_days", "multiple"],
+            properties={
+                "term_months": openapi.Schema(type=openapi.TYPE_INTEGER, example=6),
+                "interval_days": openapi.Schema(type=openapi.TYPE_INTEGER, example=30),
+                "multiple": openapi.Schema(type=openapi.TYPE_STRING, example="1.8"),
+            },
+        ),
+        responses={
+            201: openapi.Response(
+                description="Multiple created successfully",
+                examples={
+                    "application/json": {
+                        "status": "success",
+                        "message": "Multiple added successfully",
+                        "data": {"id": 3, "term_months": 8, "interval_days": 15, "multiple": "2.2"},
+                    }
+                },
+            ),
+            400: "Validation failed",
+        },
+        tags=["Finance Multiples"]
+    )
+
+    def post(self, request):
+        serializer = FinanceMultipleSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "status": "success",
+                "message": "Multiple added successfully",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "data": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+# ============================================================
+# Create a dynamic multiple value (intrest)
+# ============================================================
+
+class FinanceMultipleDetailView(APIView):
+    permission_classes=[IsAdminOrGlobalManager]
+    """
+    Admin API → Retrieve, update, or delete a specific multiple.
+    """
+
+    def get_object(self, pk):
+        try:
+            return FinanceMultiple.objects.get(pk=pk)
+        except FinanceMultiple.DoesNotExist:
+            return None
+        
+    #  ---------GET METHOD-------
+       
+    @swagger_auto_schema(
+        # method='get',
+        operation_summary="Retrieve a specific Finance Multiple",
+        operation_description="Fetch details of a specific FinanceMultiple by ID.",
+        responses={
+            200: openapi.Response(
+                description="Finance multiple detail",
+                examples={
+                    "application/json": {
+                        "status": "success",
+                        "message": "Finance multiple fetched successfully.",
+                        "data": {"id": 1, "term_months": 4, "interval_days": 15, "multiple": "1.7"},
+                    }
+                },
+            ),
+            404: "Finance multiple not found",
+        },
+        tags=["Finance Multiples"]
+    )
+    def get(self, request, pk):
+        obj = self.get_object(pk)
+        if not obj:
+            return Response({
+                "status": "error",
+                "message": "Finance multiple not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+        serializer = FinanceMultipleSerializer(obj)
+        return Response({
+            "status": "success",
+            "message": "Finance multiple fetched successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    # -------PATCH METHOD---------
+    
+    @swagger_auto_schema(
+        # method='patch',
+        operation_summary="Update a specific Finance Multiple",
+        operation_description="Partially update term, interval, or multiple value by ID.",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                "term_months": openapi.Schema(type=openapi.TYPE_INTEGER, example=8),
+                "interval_days": openapi.Schema(type=openapi.TYPE_INTEGER, example=15),
+                "multiple": openapi.Schema(type=openapi.TYPE_STRING, example="2.2"),
+            },
+        ),
+        responses={
+            200: "Updated successfully",
+            404: "Finance multiple not found",
+        },
+        tags=["Finance Multiples"]
+    )
+
+    def patch(self, request, pk):
+        obj = self.get_object(pk)
+        if not obj:
+            return Response({
+                "status": "error",
+                "message": "Finance multiple not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+        serializer = FinanceMultipleSerializer(obj, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "status": "success",
+                "message": "Finance Multiple updated successfully",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        return Response({
+            "status": "error",
+            "message": "Validation failed.",
+            "data": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # ---------DELETE METHOD--------
+    
+    @swagger_auto_schema(
+        # method='delete',
+        operation_summary="Delete a Finance Multiple",
+        operation_description="Remove a specific FinanceMultiple record by ID (admin only).",
+        responses={
+            200: "Deleted successfully",
+            404: "Finance multiple not found",
+        },
+        tags=["Finance Multiples"]
+    )
+
+    def delete(self, request, pk):
+        obj = self.get_object(pk)
+        if not obj:
+            return Response({
+                "status": "error",
+                "message": "Finance multiple not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+
+        return Response({
+            "status": "success",
+            "message": "Finance multiple deleted successfully.",
+            "data": None
+        }, status=status.HTTP_200_OK)
+
