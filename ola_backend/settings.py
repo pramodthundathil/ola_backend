@@ -27,6 +27,8 @@ EXPERIAN_PASSWORD = os.getenv("EXPERIAN_PASSWORD")
 
 #lab mobiles 
 LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
+SMS_API_URL = os.getenv("SMS_API_URL") 
+SENDER = os.getenv("SENDER") 
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -271,4 +273,7 @@ EMAIL_HOST_PASSWORD = 'psoovwzscskarabv'
 
 EXCEL_CACHE_DB = BASE_DIR / "income_cache.sqlite3"
 
-
+# Configuration: Celery to connect to Redis
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_TIMEZONE = 'Asia/Kolkata'
