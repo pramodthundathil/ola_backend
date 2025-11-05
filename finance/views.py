@@ -5,11 +5,11 @@
 import logging
 from decimal import Decimal
 from datetime import timedelta, datetime
+from collections import defaultdict
 
 # swagger settup
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-
 from customer.permissions import IsAuthenticatedUser
 
 # ============================================================
@@ -55,7 +55,7 @@ from .serializers import (
     PaymentRecord3DSerializer,
     PaymentRecordSerializerPlan,
     FinanceRiskTierSerializer,
-    FinanceCollectionSerializer,
+    FinanceCollectionAnalyticsSerializer,
     FinanceOverdueSerializer,
     EMIScheduleSerializerPlan,
     FinanceMultipleSerializer,
@@ -273,8 +273,8 @@ class FinancePlanAPIView(APIView):
                 "customer__created_by__store",
                 "customer__created_by__store__region",
                 "credit_application",
-                "credit_score",
-            )            
+                "credit_score",                
+            )
             .filter(id=temp_plan_id)
             .first()
             )
@@ -346,12 +346,27 @@ class FinancePlanAPIView(APIView):
             # Serialize response
             # --------------------------------------------------------
             serialized_data = FinancePlanSerializer(final_plan).data
-            return Response({
-                "status": "success",
-                "message": "Finance Plan created successfully.",
-                "data": serialized_data
-            }, status=status.HTTP_201_CREATED)
 
+            # --- Add device details ---
+            device = getattr(final_plan, "device", None)
+
+            device_info = {
+                "category": getattr(device.brand.category, "name", None)
+                if getattr(device, "brand", None) and getattr(device.brand, "category", None)
+                else None,
+                "brand": getattr(device.brand, "name", None)
+                if getattr(device, "brand", None)
+                else None,
+                "model": getattr(device, "model_name", None),
+            }
+            return Response({
+            "status": "success",
+            "message": "Finance Plan created successfully.",
+            "data": {
+                **serialized_data,
+                "device_details": device_info
+            }
+            }, status=status.HTTP_201_CREATED)
         except ValidationError as ve:
             return Response({
                 "status": "error",
@@ -764,39 +779,280 @@ class FinanceRiskTierView(APIView):
 # Finance Collection Analytics 
 # ============================================================
 class FinanceCollectionsView(APIView):
-    permission_classes = [IsAdminOrGlobalManager]
+    """   
+    Provides analytics and detailed payment records for Finance Collections.
+    Includes:
+    - Total installments, collected, pending, overdue
+    - Customers with overdue
+    - Region-wise collection summary
+    - Flexible filters (date, status, method, type, store, region, etc.)
+    """
 
+    permission_classes = [IsAuthenticatedUser]
     @swagger_auto_schema(
-        operation_summary="Get Collection Analytics",
-        responses={200: FinanceCollectionSerializer},
+        operation_summary="Finance Collection Analytics",
+        operation_description="""
+        Provides analytics and detailed payment collection data for finance plans.
+
+        **Role-based Access:**
+        - **Superuser / Admin / FinanceManager / GlobalManager:** Full access to all records  
+        - **RegionalManager:** Payments belonging to stores within their region  
+        - **StoreManager:** Payments under their store  
+        - **SalesPerson:** Payments created by them  
+        - **Customer:** Payments for their own finance plans only  
+
+        **Analytics Included:**
+        - Total installments, collected, pending, overdue
+        - Customers with overdue
+        - Region-wise collection summary
+        - Collection rate (percentage of collected vs total due)
+
+        **Optional Filters:**  
+        - `payment_status`: Filter by Payment Status (Pending, Completed, Failed, Refunded, Cancelled)  
+        - `payment_method`: Filter by Payment Method (Punto Pago, Yappy, Western Union, Cash, Bank Transfer, Other)  
+        - `payment_type`: Filter by Payment Type (Down Payment, EMI, Late Fee, Full Settlement)  
+        - `region_id`: Filter by Region ID  
+        - `store_id`: Filter by Store ID  
+        - `customer_id`: Filter by Customer ID  
+        - `finance_plan_id`: Filter by Finance Plan ID  
+        - `start_date`: Filter by Payment Start Date (YYYY-MM-DD)  
+        - `end_date`: Filter by Payment End Date (YYYY-MM-DD)
+        """,
+        manual_parameters=[
+            openapi.Parameter("payment_status", openapi.IN_QUERY, description="Filter by Payment Status", type=openapi.TYPE_STRING),
+            openapi.Parameter("payment_method", openapi.IN_QUERY, description="Filter by Payment Method", type=openapi.TYPE_STRING),
+            openapi.Parameter("payment_type", openapi.IN_QUERY, description="Filter by Payment Type", type=openapi.TYPE_STRING),
+            openapi.Parameter("region_id", openapi.IN_QUERY, description="Filter by Region ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("store_id", openapi.IN_QUERY, description="Filter by Store ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("customer_id", openapi.IN_QUERY, description="Filter by Customer ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("finance_plan_id", openapi.IN_QUERY, description="Filter by Finance Plan ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("start_date", openapi.IN_QUERY, description="Filter by Payment Start Date (YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+            openapi.Parameter("end_date", openapi.IN_QUERY, description="Filter by Payment End Date (YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+        ],
+        responses={200: FinanceCollectionAnalyticsSerializer},
         tags=["Finance"]
     )
     def get(self, request):
         try:
-            payments = PaymentRecord.objects.all()
-            total_installments = payments.count()
-            total_collected = float(payments.filter(payment_status='COMPLETED')
-                                    .aggregate(Sum('payment_amount'))['payment_amount__sum'] or 0)
-            total_due = float(payments.aggregate(Sum('payment_amount'))['payment_amount__sum'] or 0)
+            user = request.user
+            user_role = getattr(user, "role", "Customer")
+
+            # ==================================================
+            # Base Query
+            # ==================================================
+            qs = (
+                PaymentRecord.objects.select_related(
+                    "finance_plan",
+                    "finance_plan__store",                
+                    "finance_plan__store__region",        
+                    "finance_plan__credit_application",
+                    "finance_plan__credit_application__customer",
+                    "finance_plan__credit_score",
+                    "finance_plan__device",
+                    "emi_schedule",
+                )
+                .prefetch_related("emi_schedule__payments")
+                .order_by("-created_at")
+            )
+
+            # ==================================================
+            # Role-Based Access
+            # ==================================================
+            if user.is_superuser or user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+                pass  # full access
+            elif user_role == "RegionalManager":
+                region = getattr(user, "region", None)
+                qs = qs.filter(finance_plan__store__region=region) if region else qs.none()
+            elif user_role == "StoreManager":
+                store = getattr(user, "store", None)
+                qs = qs.filter(finance_plan__store=store) if store else qs.none()
+            elif user_role == "SalesPerson":
+                qs = qs.filter(finance_plan__created_by=user)
+            elif user_role == "Customer":
+                qs = qs.filter(finance_plan__credit_application__customer=user)
+            else:
+                qs = qs.none()
+
+            # ==================================================
+            # Query Filters (status, type, date, etc.)
+            # ==================================================
+            params = request.query_params
+            filters = {
+                "payment_status__iexact": params.get("payment_status"),
+                "payment_method__iexact": params.get("payment_method"),
+                "payment_type__iexact": params.get("payment_type"),
+                "finance_plan__store__region__id": params.get("region_id"),
+                "finance_plan__store__id": params.get("store_id"),
+                "finance_plan__credit_application__customer__id": params.get("customer_id"),
+                "finance_plan__id": params.get("finance_plan_id"),
+            }
+
+            for key, value in filters.items():
+                if value:
+                    qs = qs.filter(**{key: value})
+
+            start_date = params.get("start_date")
+            end_date = params.get("end_date")
+
+            if start_date:
+                try:
+                    qs = qs.filter(payment_date__date__gte=datetime.strptime(start_date, "%Y-%m-%d"))
+                except ValueError:
+                    pass
+            if end_date:
+                try:
+                    qs = qs.filter(payment_date__date__lte=datetime.strptime(end_date, "%Y-%m-%d"))
+                except ValueError:
+                    pass
+
+            # ==================================================
+            # Analytics Calculation
+            # ==================================================
+            total_installments = qs.count()
+            total_collected = float(qs.filter(payment_status="COMPLETED").aggregate(total=Sum("payment_amount"))["total"] or 0)
+            total_due = float(qs.aggregate(total=Sum("payment_amount"))["total"] or 0)
             total_pending = total_due - total_collected
             collection_rate = (total_collected / total_due * 100) if total_due > 0 else 0.0
 
-            data = {
+            # --- Overdue Analytics ---
+            overdue_qs = qs.filter(
+                Q(payment_status__in=["PENDING", "FAILED"]) &
+                Q(emi_schedule__due_date__lt=timezone.now().date())
+            )
+            total_overdue = float(overdue_qs.aggregate(total=Sum("payment_amount"))["total"] or 0)
+            total_overdue_installments = overdue_qs.count()
+            customers_with_overdue = overdue_qs.values_list(
+                "finance_plan__credit_application__customer", flat=True
+            ).distinct().count()
+
+            # ==================================================
+            # Region Summary
+            # ==================================================
+            region_summary = defaultdict(lambda: {
+                "region_name": "",
+                "total_installments": 0,
+                "total_collected": 0.0,
+                "total_pending": 0.0,
+                "total_overdue": 0.0,
+            })
+
+            for payment in qs:
+                store = payment.finance_plan.store
+                region = getattr(store.region, "name", None) if store else None
+                if not region:
+                    continue
+
+                region_data = region_summary[region]
+                region_data["region_name"] = region
+                region_data["total_installments"] += 1
+
+                amt = float(payment.payment_amount or 0)
+                if payment.payment_status == "COMPLETED":
+                    region_data["total_collected"] += amt
+                elif payment.payment_status in ["PENDING", "FAILED"]:
+                    region_data["total_pending"] += amt
+
+                if payment.emi_schedule and payment.emi_schedule.due_date < timezone.now().date() and payment.payment_status in ["PENDING", "FAILED"]:
+                    region_data["total_overdue"] += amt
+
+            # ==================================================
+            # Serialize Analytics Data
+            # ==================================================
+            analytics_data = {
                 "total_installments": total_installments,
-                "total_collected": total_collected,
-                "total_pending": total_pending,
+                "total_collected": round(total_collected, 2),
+                "total_pending": round(total_pending, 2),
+                "total_overdue": round(total_overdue, 2),
+                "total_overdue_installments": total_overdue_installments,
                 "collection_rate": round(collection_rate, 2),
+                "customers_with_overdue": customers_with_overdue,
+                "regions_summary": list(region_summary.values()),
             }
 
-            serializer = FinanceCollectionSerializer(data)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            serializer = FinanceCollectionAnalyticsSerializer(analytics_data)
+            meta = serializer.data
+
+            # ==================================================
+            # Pagination & Results
+            # ==================================================
+            paginator = FinancePlanPagination()
+            page = paginator.paginate_queryset(qs, request)
+
+            results = []
+            for p in page:
+                fp = p.finance_plan
+                store = getattr(fp, "store", None)
+                region = getattr(store, "region", None)
+                dev = getattr(fp, "device", None)
+                ca = getattr(fp, "credit_application", None)
+                cust = getattr(ca, "customer", None)
+                emi = getattr(p, "emi_schedule", None)
+
+                item = {
+                    "payment_id": p.id,
+                    "payment_amount": float(p.payment_amount or 0),
+                    "payment_type": p.payment_type,
+                    "payment_method": p.payment_method,
+                    "payment_status": p.payment_status,
+                    "payment_date": p.payment_date.isoformat() if p.payment_date else None,
+                    "finance_plan": {
+                        "finance_plan_id": fp.id,
+                        "amount": float(fp.amount_to_finance or 0),
+                        "store": getattr(store, "name", None),
+                        "region": getattr(region, "name", None),
+                        "device": {"id": dev.id, "model_name": dev.model_name} if dev else None,
+                       "customer": {
+                        "id": cust.id,
+                        "name": f"{cust.first_name} {cust.last_name}",
+                        "phone": getattr(cust, "phone", None)} if cust else None,
+                    },
+                    "emi_schedule": {
+                        "emi_id": emi.id if emi else None,
+                        "due_date": emi.due_date.isoformat() if emi and emi.due_date else None,
+                        "amount_due": float(emi.amount_due or 0) if emi else None,
+                        "status": getattr(emi, "status", None) if emi else None,
+                    },
+                }
+                results.append(mask_sensitive_data(item, user_role))
+
+            # ==================================================
+            # Audit Log
+            # ==================================================
+            try:
+                AuditLog.objects.create(
+                    user=user if user.is_authenticated else None,
+                    action_type="FINANCE_COLLECTIONS_VIEWED",
+                    description=f"{user_role} viewed finance collections analytics.",
+                    metadata={
+                        "role": user_role,
+                        "filters": request.query_params.dict(),
+                        "total_records": total_installments,
+                    },
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+            except Exception as log_error:
+                logger.warning(f"Audit logging failed: {log_error}")
+
+            # ==================================================
+            # Response
+            # ==================================================
+            payload = {
+                "meta": meta,
+                "results": results,
+                "page": paginator.page.number if paginator.page else 1,
+                "page_size": paginator.get_page_size(request),
+            }
+
+            return paginator.get_paginated_response(payload)
 
         except Exception as e:
-            logger.error(f"Error generating collection analytics: {str(e)}", exc_info=True)
-            return Response({"detail": "Failed to generate collection analytics."},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
+            logger.error(f"Error generating finance collection analytics: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": "Failed to generate finance collection analytics."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        
+        
 # ============================================================
 # Finance Overdue Installment Analytics 
 # ============================================================       
@@ -1356,151 +1612,7 @@ class FinanceReportAPIView(APIView):
 
         except Exception as e:
             logger.error(f"FinanceReport Error: {str(e)}", exc_info=True)
-            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-
-# ============================================================
-# API: Region Wise Report
-# ============================================================
-class RegionWiseReportView(APIView):
-    """
-    Generates region-based finance performance summary.
-
-    Roles:
-    - Admin, GlobalManager, FinanceManager → all regions
-    - SalesAdvisor → only their assigned region
-
-    Features:
-    - 3D relational data fetching (Finance → Customer → Device → Transactions)
-    - Role-based permission enforcement
-    - Unified response format
-    - Optimized ORM queries
-    - Secure & cached output
-    """
-
-    permission_classes = [IsAuthenticatedUser]
-
-    @cache_response(timeout=300)  # Cache response for 5 minutes
-    def get(self, request):
-        try:
-            user = request.user
-            region_id = request.query_params.get("region_id")
-            month = request.query_params.get("month")
-
-            # ============================================================
-            # 1. 3D DATA FETCHING OPTIMIZATION
-            # ============================================================
-            queryset = (
-                FinancePlan.objects.select_related(
-                    "credit_application__customer__created_by__store__region",
-                    "device",
-                )
-                .prefetch_related(
-                    Prefetch("payments"),  # Example: transactions or EMI payments
-                )
-            )
-
-            # ============================================================
-            # 2. ROLE-BASED PERMISSION VALIDATION
-            # ============================================================
-            if user.is_superuser or user.role in ["Admin", "GlobalManager", "FinanceManager"]:
-                pass  # Full access
-            elif user.role == "SalesAdvisor":
-                if not getattr(user, "store", None) or not getattr(user.store, "region", None):
-                    return Response({
-                        "status": "error",
-                        "message": "No region linked to this Sales Advisor."
-                    }, status=status.HTTP_400_BAD_REQUEST)
-
-                queryset = queryset.filter(
-                    credit_application__customer__created_by__store__region=user.store.region
-                )
-            else:
-                return Response({
-                    "status": "error",
-                    "message": "You are not authorized to view this report."
-                }, status=status.HTTP_403_FORBIDDEN)
-
-            # ============================================================
-            # 3. OPTIONAL FILTERS
-            # ============================================================
-            if region_id and (user.is_superuser or user.role in ["Admin", "GlobalManager", "FinanceManager"]):
-                queryset = queryset.filter(
-                    credit_application__customer__created_by__store__region_id=region_id
-                )
-
-            if month:
-                try:
-                    month_int = int(month)
-                    if not 1 <= month_int <= 12:
-                        raise ValueError
-                    queryset = queryset.filter(created_at__month=month_int)
-                except ValueError:
-                    return Response({
-                        "status": "error",
-                        "message": "Invalid month. Must be between 1 and 12."
-                    }, status=status.HTTP_400_BAD_REQUEST)
-
-            # ============================================================
-            # 4. AGGREGATION & PERFORMANCE METRICS
-            # ============================================================
-            region_data = (
-                queryset.values(
-                    "credit_application__customer__created_by__store__region__id",
-                    "credit_application__customer__created_by__store__region__name"
-                )
-                .annotate(
-                    total_finance_plans=Count("id"),
-                    total_amount_financed=Sum("amount_to_finance"),
-                    total_down_payment=Sum("actual_down_payment"),
-                    approved_count=Count("id", filter=Q(score_status="APPROVED")),
-                    rejected_count=Count("id", filter=Q(score_status="REJECTED")),
-                    pending_count=Count("id", filter=Q(score_status="PENDING")),
-                )
-                .order_by("credit_application__customer__created_by__store__region__name")
-            )
-
-            # ============================================================
-            # 5. STRUCTURED RESPONSE
-            # ============================================================
-            response_data = [
-                {
-                    "region_id": r["credit_application__customer__created_by__store__region__id"],
-                    "region_name": r["credit_application__customer__created_by__store__region__name"],
-                    "total_finance_plans": r["total_finance_plans"],
-                    "total_amount_financed": str(r["total_amount_financed"] or 0),
-                    "total_down_payment": str(r["total_down_payment"] or 0),
-                    "approved_count": r["approved_count"],
-                    "rejected_count": r["rejected_count"],
-                    "pending_count": r["pending_count"],
-                }
-                for r in region_data
-            ]
-
-            # ============================================================
-            # 6. AUDIT LOGGING
-            # ============================================================
-            logger.info(
-                f"[RegionWiseReport] User={user.username}, Role={user.role}, "
-                f"Region={region_id}, Month={month}"
-            )
-
-            # ============================================================
-            # 7. SUCCESS RESPONSE
-            # ============================================================
-            return Response({
-                "status": "success",
-                "message": "Region-wise finance performance report fetched successfully.",
-                "filters": {"region_id": region_id, "month": month},
-                "data": response_data,
-            }, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"RegionWiseReport Error: {str(e)}", exc_info=True)
-            return Response({
-                "status": "error",
-                "message": str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)      
 
 
 # ============================================================
@@ -1585,7 +1697,7 @@ class PaymentRecordCreateAPIView(APIView):
 
                 # ----------------------- Audit Log -----------------------
                 AuditLog.objects.create(
-                    user=request.user,
+                    user=request.user if request.user.is_authenticated else None,
                     action_type="CREATE_PAYMENT",
                     description=(
                         f"Payment created for FinancePlan ID={payment.finance_plan.id}, "
@@ -1641,186 +1753,156 @@ class PaymentRecordCreateAPIView(APIView):
 
 
 # --------------------------------------------------------
-# API: Get Payment Records by Customer ID
+# API: Get Payment Records 
 # --------------------------------------------------------
 class PaymentRecordAPIView(APIView):
+    """
+    List all Payment Records or a Specific Record by ID
+    """  
     permission_classes = [IsAuthenticatedUser]
-    
+
     @swagger_auto_schema(
-        operation_summary="Get Payment Records by Customer ID",
+        operation_summary="Get Payment Records (Role-based & Filtered)",
         operation_description="""
-        Retrieve all payment records for a specific customer.
-        
-        **Query Parameters:**
-        - `customer_id` (required): Customer ID
-        - `payment_type` (optional): Filter by type (DOWN_PAYMENT, EMI, LATE_FEE, FULL_SETTLEMENT)
-        - `payment_status` (optional): Filter by status (PENDING, COMPLETED, FAILED, REFUNDED, CANCELLED)
-        - `payment_method` (optional): Filter by method (PUNTO_PAGO, YAPPY, WESTERN_UNION, CASH, etc.)
-        
-        **Examples:**
-        - `GET /api/finance/payments/?customer_id=5` → Get all payments
-        - `GET /api/finance/payments/?customer_id=5&payment_type=EMI` → Get only EMI payments
-        - `GET /api/finance/payments/?customer_id=5&payment_status=COMPLETED` → Get completed payments
+        Retrieve payment records with role-based access and filters.
+
+        **Filters:**
+        - `customer_id` (optional)
+        - `payment_type` (optional)
+        - `payment_status` (optional)
+        - `payment_method` (optional)
+        - `payment_date` (optional)
+        - `start_date` and `end_date` (optional)
         """,
         manual_parameters=[
-            openapi.Parameter(
-                'customer_id',
-                openapi.IN_QUERY,
-                description="Customer ID",
-                type=openapi.TYPE_INTEGER,
-                required=True
-            ),
-            openapi.Parameter(
-                'payment_type',
-                openapi.IN_QUERY,
-                description="Filter by payment type",
-                type=openapi.TYPE_STRING,
-                enum=['DOWN_PAYMENT', 'EMI', 'LATE_FEE', 'FULL_SETTLEMENT'],
-                required=False
-            ),
-            openapi.Parameter(
-                'payment_status',
-                openapi.IN_QUERY,
-                description="Filter by payment status",
-                type=openapi.TYPE_STRING,
-                enum=['PENDING', 'COMPLETED', 'FAILED', 'REFUNDED', 'CANCELLED'],
-                required=False
-            ),
-            openapi.Parameter(
-                'payment_method',
-                openapi.IN_QUERY,
-                description="Filter by payment method",
-                type=openapi.TYPE_STRING,
-                enum=['PUNTO_PAGO', 'YAPPY', 'WESTERN_UNION', 'CASH', 'BANK_TRANSFER', 'OTHER'],
-                required=False
-            )
+            openapi.Parameter('customer_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('payment_type', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('payment_status', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('payment_method', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('payment_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
         ],
-        responses={
-            200: openapi.Response(
-                description="Payment records list with summary",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'customer_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'customer_name': openapi.Schema(type=openapi.TYPE_STRING),
-                        'finance_plan_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'summary': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'total_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'completed_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'pending_payments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'total_amount_paid': openapi.Schema(type=openapi.TYPE_STRING),
-                                'payment_methods': openapi.Schema(type=openapi.TYPE_OBJECT),
-                            }
-                        ),
-                        'payments': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_OBJECT))
-                    }
-                )
-            ),
-            400: "customer_id parameter is required",
-            404: "No payment records found for this customer"
-        },
         tags=["Finance"]
     )
     def get(self, request):
         try:
+            user = request.user
+            role = getattr(user, 'role', None)
+
+            # === Filters ===
             customer_id = request.query_params.get('customer_id')
             payment_type = request.query_params.get('payment_type')
             payment_status = request.query_params.get('payment_status')
             payment_method = request.query_params.get('payment_method')
-            
-            if not customer_id:
-                return Response(
-                    {"error": "customer_id parameter is required"}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get customer
-            customer = get_object_or_404(Customer, id=customer_id)
-            
-            # Get finance plan for customer
-            finance_plan = FinancePlan.objects.filter(
-                credit_application__customer=customer
-            ).order_by('-created_at').first()
-            
-            if not finance_plan:
-                return Response(
-                    {"error": f"No finance plan found for customer ID {customer_id}"}, 
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Get payment records
-            payments = PaymentRecord.objects.filter(
-                finance_plan=finance_plan
-            ).order_by('-payment_date')
-            
-            # Apply filters
+            payment_date = request.query_params.get('payment_date')
+            start_date = request.query_params.get('start_date')
+            end_date = request.query_params.get('end_date')
+
+            # === Base queryset ===
+            payments = PaymentRecord.objects.select_related(
+                "finance_plan__credit_application__customer",
+                "finance_plan__device"
+            ).all()
+
+            # === Role-based access ===
+            if role == "Customer":
+                payments = payments.filter(finance_plan__credit_application__customer__user=user)            
+            elif role == "SalesPerson":
+                payments = payments.filter(processed_by=user)
+            elif role == "SalesAdvisor":
+                if hasattr(user, "region"):
+                    payments = payments.filter(finance_plan__credit_application__customer__region=user.region)
+                else:
+                    return Response({"status": "error", "message": "User region not assigned."}, status=403)
+            elif role == "StoreManager":
+                if hasattr(user, "store"):
+                    payments = payments.filter(finance_plan__credit_application__customer__store=user.store)
+                else:
+                    return Response({"status": "error", "message": "User store not assigned."}, status=403)
+            elif role not in ["FinanceManager", "Admin", "GlobalManager"]:
+                return Response({"status": "error", "message": "Unauthorized role."}, status=403)
+
+            # === Filters ===
+            if customer_id:
+                payments = payments.filter(finance_plan__credit_application__customer_id=customer_id)
             if payment_type:
                 payments = payments.filter(payment_type=payment_type.upper())
             if payment_status:
                 payments = payments.filter(payment_status=payment_status.upper())
             if payment_method:
                 payments = payments.filter(payment_method=payment_method.upper())
-            
+
+            # === Date filters ===
+            if payment_date:
+                payments = payments.filter(payment_date=payment_date)
+            elif start_date and end_date:
+                payments = payments.filter(payment_date__range=[start_date, end_date])
+            elif start_date:
+                payments = payments.filter(payment_date__gte=start_date)
+            elif end_date:
+                payments = payments.filter(payment_date__lte=end_date)
+
+            # === Default ordering by payment_date descending ===
+            payments = payments.order_by('-payment_date')
+
+            # === Summary ===
             if not payments.exists():
-                return Response(
-                    {"error": f"No payment records found for customer ID {customer_id}"}, 
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Calculate summary
+                return Response({"status": "success", "message": "No payment records found.", "data": []}, status=200)
+
             total_payments = payments.count()
-            completed_count = payments.filter(payment_status='COMPLETED').count()
-            pending_count = payments.filter(payment_status='PENDING').count()
-            
-            total_amount_paid = sum(
-                payment.payment_amount 
-                for payment in payments.filter(payment_status='COMPLETED')
-            )
-            
-            # Payment methods breakdown
-            payment_methods_summary = {}
-            for payment in payments.filter(payment_status='COMPLETED'):
-                method = payment.get_payment_method_display()
-                if method not in payment_methods_summary:
-                    payment_methods_summary[method] = {
-                        'count': 0,
-                        'total_amount': Decimal('0.00')
-                    }
-                payment_methods_summary[method]['count'] += 1
-                payment_methods_summary[method]['total_amount'] += payment.payment_amount
-            
-            # Convert Decimal to string for JSON serialization
-            for method in payment_methods_summary:
-                payment_methods_summary[method]['total_amount'] = str(
-                    payment_methods_summary[method]['total_amount']
-                )
-            
-            # Serialize data
+            completed = payments.filter(payment_status='COMPLETED').count()
+            pending = payments.filter(payment_status='PENDING').count()
+            total_amount = payments.filter(payment_status='COMPLETED').aggregate(Sum('payment_amount'))['payment_amount__sum'] or Decimal('0.00')
+
             serializer = PaymentRecordSerializerPlan(payments, many=True)
-            
-            response_data = {
-                'customer_id': customer.id,
-                'customer_name': f"{customer.first_name} {customer.last_name}",
-                'finance_plan_id': finance_plan.id,
-                'summary': {
-                    'total_payments': total_payments,
-                    'completed_payments': completed_count,
-                    'pending_payments': pending_count,
-                    'total_amount_paid': str(total_amount_paid),
-                    'payment_methods': payment_methods_summary,
+
+            response = {
+                "status": "success",
+                "message": f"Retrieved {total_payments} payment records.",
+                "summary": {
+                    "total_payments": total_payments,
+                    "completed_payments": completed,
+                    "pending_payments": pending,
+                    "total_amount_paid": str(total_amount),
                 },
-                'payments': serializer.data
+                "data": serializer.data
             }
-            
-            logger.info(f"[PaymentRecordAPI] Retrieved {total_payments} payment records for Customer ID={customer_id}")
-            return Response(response_data, status=status.HTTP_200_OK)
-            
+            logger.info(f"[PaymentRecordAPI] Retrieved {total_payments} payment records for role={role}")
+
+            # === Audit Log ===
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action_type="PAYMENT_VIEWED",
+                description=(
+                    f"Viewed {total_payments} payment records "
+                    f"(Role={role or 'N/A'}, CustomerID={customer_id or 'All'})"
+                ),
+                metadata={
+                    "filters": {
+                        "customer_id": customer_id,
+                        "payment_type": payment_type,
+                        "payment_status": payment_status,
+                        "payment_method": payment_method,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    },
+                    "total_records": total_payments,
+                    "completed": completed,
+                    "pending": pending,
+                    "total_amount_paid": str(total_amount),
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+            return Response(response, status=200)
+
         except Exception as e:
             logger.exception("[PaymentRecordAPI] Error retrieving payment records.")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"status": "error", "message": str(e)}, status=500)
         
+
+            
 
 
 # ============================================================
