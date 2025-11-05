@@ -25,6 +25,9 @@ EXPERIAN_CLIENT_SECRET = os.getenv("EXPERIAN_CLIENT_SECRET")
 EXPERIAN_USERNAME = os.getenv("EXPERIAN_USERNAME")
 EXPERIAN_PASSWORD = os.getenv("EXPERIAN_PASSWORD")
 
+#lab mobiles 
+LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -267,3 +270,5 @@ EMAIL_HOST_PASSWORD = 'psoovwzscskarabv'
 
 
 EXCEL_CACHE_DB = BASE_DIR / "income_cache.sqlite3"
+
+
