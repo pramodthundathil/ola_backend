@@ -315,43 +315,66 @@ class CustomerManagementView(APIView):
             ).first()
 
             if existing_customer:
-                # customer = existing_customer
-                newly_created = False
                 existing_customer.otp_verified=False
                 existing_customer.save(update_fields=["otp_verified"])
-                return Response({
-                    "status": "success",
-                    "message": "Customer already exists.",
-                    "newly_created_customer": False,
-                    "data": CustomerSerializer(existing_customer).data
-                }, status=status.HTTP_200_OK)
+                newly_created = False
+                customer = existing_customer
+
             else:
                 serializer = CustomerSerializer(data={
                     "document_type": document_type,
                     "document_number": document_number
                 }, context={'request': request})
 
+                if not serializer.is_valid():
+                    return Response({
+                    "status": "error",
+                    "message": "Validation failed.",
+                    "data": serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-            # # create minimal customer
-            # serializer = CustomerSerializer(data={
-            #     "document_type": document_type,
-            #     "document_number": document_number
-            # }, context={'request': request})
-
-            if serializer.is_valid():
                 customer = serializer.save()
-                return Response({
-                    "status": "success",
-                    "message": "Customer created successfully.",
-                    "newly_created_customer": True,
-                    "data": CustomerSerializer(customer).data
-                }, status=status.HTTP_201_CREATED)
+                newly_created = True
+
+
+            # ---------- CREDIT SCORE LOGIC ----------
+            credit_view = CreditScoreCheckAPIView()
+            credit_response = credit_view.get(request, customer.id)
+            credit_data = credit_response.data
+
+            credit_score = credit_data.get("data", {}).get("credit_score", {})
+            source = credit_data.get("data", {}).get("source", "experian")
 
             return Response({
-                "status": "error",
-                "message": "Validation failed.",
-                "data": serializer.errors
-            }, status=status.HTTP_400_BAD_REQUEST)
+                "status": "success",
+                "message": "Customer created successfully." if newly_created else "Customer already exists.",
+                "newly_created_customer": newly_created,
+                "data": CustomerSerializer(customer).data,
+                "credit_score": {
+                    "id": credit_score.get("id"),
+                    "source": source,
+                    "customer": (
+                        credit_score.get("customer", {}).get("id")
+                        if isinstance(credit_score.get("customer"), dict)
+                        else credit_score.get("customer")
+                    ),
+                    "apc_score": credit_score.get("apc_score"),
+                    "apc_score_date": credit_score.get("apc_score_date"),
+                    "apc_consultation_id": credit_score.get("apc_consultation_id"),
+                    "apc_status": credit_score.get("apc_status"),
+                    "good_payment_history_points": credit_score.get("good_payment_history_points"),
+                    "delinquency_penalty_points": credit_score.get("delinquency_penalty_points"),
+                    "number_of_previous_loans": credit_score.get("number_of_previous_loans"),
+                    "payment_capacity_status": credit_score.get("payment_capacity_status"),
+                    "final_credit_status": credit_score.get("final_credit_status"),
+                    "score_valid_until": credit_score.get("score_valid_until"),
+                    "is_expired": credit_score.get("is_expired"),
+                    "verbal_authorization_given": credit_score.get("verbal_authorization_given"),
+                    "consulted_by": credit_score.get("consulted_by"),
+                    "created_at": credit_score.get("created_at"),
+                    "updated_at": credit_score.get("updated_at"),
+                }
+            }, status=status.HTTP_201_CREATED if newly_created else status.HTTP_200_OK)    
 
         # ---------- PATCH ----------
         @swagger_auto_schema(
@@ -371,7 +394,7 @@ class CustomerManagementView(APIView):
             Example:
             PATCH /v1/customer/manage/?id=3
             """,
-            tags=["customer", "otp"],
+            tags=["customer"],
             manual_parameters=[
                 openapi.Parameter(
                     'id', openapi.IN_QUERY,
@@ -1387,7 +1410,7 @@ class GenerateOTPView(APIView):
         2. Calls this endpoint to receive an OTP via SMS.  
         3. Then enters the OTP in the next step to verify.
         """,
-        tags=["customer", "otp"],
+        tags=["customer"],
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=["phone_number"],
