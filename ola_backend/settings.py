@@ -26,8 +26,9 @@ EXPERIAN_USERNAME = os.getenv("EXPERIAN_USERNAME")
 EXPERIAN_PASSWORD = os.getenv("EXPERIAN_PASSWORD")
 
 #lab mobiles 
-LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
+# LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
 
+LAB_MOBILES_TOKEN = 'jmendoza@olacredits.com:xFvjPh6gIRyY4Jr8lXMDGlImxF1eMtya'
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
