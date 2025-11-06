@@ -59,6 +59,7 @@ from .serializers import (
     FinanceOverdueSerializer,
     EMIScheduleSerializerPlan,
     FinanceMultipleSerializer,
+    EMIPaymentRequestSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
@@ -315,7 +316,7 @@ class FinancePlanAPIView(APIView):
                 "total_amount_payable": Decimal("0.00"),
                 "installment_to_income_ratio": Decimal("0.00"),
             }
-            engine_input, _ = FinancePlan.objects.get_or_create(
+            engine_input, _ = FinancePlan.objects.update_or_create(
                 credit_application=finance_plan.credit_application,
                 defaults=finance_plan_data
             )             
@@ -1238,20 +1239,21 @@ class FinanceInstallmentPaymentView(APIView):
     """
     Handles EMI payment updates and rescheduling logic for Finance Plans.
     """
+    permission_classes = [IsAuthenticatedUser]
 
     @swagger_auto_schema(
         operation_summary="Create EMI Payment and Reschedule Future EMIs",
         operation_description=(
             "Records a payment for a specific EMI installment. "
             "If the payment is late, it deletes all future pending EMIs and regenerates them "
-            "starting 15 days after the actual payment date.\n\n"
+            "starting after the chosen interval_days.\n\n"
             "**Business Rules:**\n"
-            "- Normal case → next EMIs every 15 days\n"
+            "- Normal case → next EMIs every interval_days\n"
             "- If EMI is missed (Overdue) → schedule pauses\n"
-            "- Once overdue EMI is paid → next EMI = 15 days after payment\n"
-            "- Schedule resumes every 15 days"
+            "- Once overdue EMI is paid → next EMI = interval_days after payment\n"
+            "- Schedule resumes at same interval"
         ),
-        request_body=PaymentRecord3DSerializer,
+        request_body=EMIPaymentRequestSerializer,
         responses={
             200: "Payment recorded successfully and EMI schedule updated.",
             400: "Bad Request — Invalid data or duplicate payment.",
@@ -1265,8 +1267,23 @@ class FinanceInstallmentPaymentView(APIView):
         Record payment for a specific EMI and handle rescheduling logic.
         """
         try:
-            emi = EMISchedule.objects.select_related('finance_plan').get(id=emi_id)
+            # -----------------------------------------------------------------
+            #  Fetch EMI with full related details (3D fetch)
+            # -----------------------------------------------------------------
+            emi = (
+                EMISchedule.objects
+                .select_related(
+                    "finance_plan",
+                    "finance_plan__credit_application",
+                    "finance_plan__credit_application__customer",
+                    "finance_plan__device",
+                    "finance_plan__store",
+                    "finance_plan__store__region"
+                )
+                .get(id=emi_id)
+            )
             plan = emi.finance_plan
+            store = plan.store
 
             amount_paid = Decimal(request.data.get('amount_paid', '0.00'))
             payment_method = request.data.get('payment_method', 'OTHER')
@@ -1274,7 +1291,9 @@ class FinanceInstallmentPaymentView(APIView):
             if emi.status == 'PAID':
                 return Response({"message": "This EMI is already paid."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # ---- Create Payment Record ----
+            # -----------------------------------------------------------------
+            #  Create Payment Record
+            # -----------------------------------------------------------------
             payment = PaymentRecord.objects.create(
                 finance_plan=plan,
                 emi_schedule=emi,
@@ -1287,35 +1306,98 @@ class FinanceInstallmentPaymentView(APIView):
                 notes=f"Payment for EMI #{emi.installment_number}"
             )
 
-            # ---- Update EMI ----
-            emi.amount_paid += amount_paid
-            emi.update_status()
-            emi.paid_date = timezone.now().date()
-            emi.save()
+            # -----------------------------------------------------------------
+            # Apply Payment to EMI 
+            # -----------------------------------------------------------------
+            payment.apply_to_emi()
 
-            logger.info(f"EMI #{emi.installment_number} paid for plan {plan.id} on {emi.paid_date}")
+            # -----------------------------------------------------------------
+            #  Audit Log Entry
+            # -----------------------------------------------------------------
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action_type="CREATE_EMI_PAYMENT",
+                description=(
+                    f"EMI Payment recorded for FinancePlan ID={plan.id}, "
+                    f"EMI #{emi.installment_number}, Amount={amount_paid}, "
+                    f"Method={payment_method}, Store={store.name if store else 'N/A'}"
+                ),
+                metadata={
+                    "finance_plan_id": plan.id,
+                    "emi_id": emi.id,
+                    "amount": str(amount_paid),
+                    "payment_method": payment_method,
+                    "store": store.name if store else None,
+                    "region": store.region.name if store and store.region else None
+                }
+            )
 
-            # ---- Check for Late Payment ----
-            if emi.due_date < emi.paid_date:
+            # -----------------------------------------------------------------
+            #  Late Payment → Reschedule future EMIs
+            # -----------------------------------------------------------------
+            if emi.due_date < timezone.now().date():
                 logger.warning(f"EMI #{emi.installment_number} was late. Rescheduling future EMIs...")
 
-                # Delete all upcoming unpaid EMIs
                 future_emis = plan.emi_schedule.filter(
                     installment_number__gt=emi.installment_number
                 ).exclude(status='PAID')
-                deleted_count, _ = future_emis.delete()
 
+                deleted_count, _ = future_emis.delete()
                 logger.info(f"Deleted {deleted_count} future EMIs for plan {plan.id}")
 
-                # Recreate from new base date
-                next_emi_date = emi.paid_date + timedelta(days=15)
+                interval_days = plan.installment_frequency_days or 15
+                next_emi_date = timezone.now().date() + timedelta(days=interval_days)
                 self.generate_future_emis(plan, next_emi_date, emi.installment_number + 1)
 
-            return Response(
-                {"message": "Payment recorded successfully and EMI schedule updated."},
-                status=status.HTTP_200_OK
-            )
-        
+                # -----------------------------------------------------------------
+                #  Prepare Response
+                # -----------------------------------------------------------------
+            if emi.status == 'PAID':
+                user_message = f"EMI #{emi.installment_number} fully paid. Thank you!"
+            elif emi.status == 'PARTIALLY_PAID':
+                user_message = (
+                    f"EMI #{emi.installment_number} partially paid. "
+                    f"Balance remaining: ₹{emi.installment_amount - emi.amount_paid}"
+                )
+            elif emi.status == 'OVERDUE':
+                user_message = f"EMI #{emi.installment_number} is overdue. Please clear the balance soon."
+            else:
+                user_message = "Payment recorded successfully."
+            response_data = {
+            "message": user_message,
+            "payment": {
+                "id": payment.id,
+                "amount": str(payment.payment_amount),
+                "method": payment.payment_method,
+                "status": payment.payment_status,
+                "date": str(payment.payment_date.date()),
+            },
+            "finance_plan": {
+                "id": plan.id,
+                "apc_score": plan.apc_score,
+                "risk_tier": plan.risk_tier,
+                "selected_term": plan.selected_term,
+                "interval_days": plan.installment_frequency_days,
+                "total_amount": str(plan.total_amount_payable),
+            },
+            "store": {
+                "id": store.id,
+                "name": store.name,
+                "code": store.code,
+                "region": store.region.name if store and store.region else None,
+                "channel": store.get_channel_display(),
+            } if store else None,
+            "emi": {
+                "installment_number": emi.installment_number,
+                "status": emi.status,
+                "amount_paid": str(emi.amount_paid),
+                "paid_date": str(emi.paid_date),
+                "due_date": str(emi.due_date),
+            }
+            }
+
+            return Response(response_data, status=status.HTTP_200_OK)
+
         except EMISchedule.DoesNotExist:
             logger.error("EMI schedule not found.")
             return Response({"error": "EMI schedule not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -1327,10 +1409,14 @@ class FinanceInstallmentPaymentView(APIView):
 
     def generate_future_emis(self, plan, start_date, start_number):
         """
-        Dynamically generate future EMIs every 15 days after a late payment.
+        Dynamically generate future EMIs every `installment_frequency_days` after a late payment.
         """
         total_installments = plan.selected_term
-        emi_amount = plan.monthly_installment
+        interval_days = plan.installment_frequency_days or 15
+
+        # Adjust amount proportionally if interval ≠ 30 days
+        days_ratio = Decimal(interval_days) / Decimal(30)
+        emi_amount = plan.monthly_installment * days_ratio
 
         for i in range(start_number, total_installments + 1):
             EMISchedule.objects.create(
@@ -1341,8 +1427,9 @@ class FinanceInstallmentPaymentView(APIView):
                 balance_remaining=emi_amount,
                 status='UPCOMING'
             )
-            start_date += timedelta(days=15)
-        logger.info(f"Regenerated EMIs #{start_number}–{total_installments} for plan {plan.id}")
+            start_date += timedelta(days=interval_days)
+
+        logger.info(f"Regenerated EMIs #{start_number} - {total_installments} for plan {plan.id}")
 
 
 # ============================================================

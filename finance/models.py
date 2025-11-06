@@ -115,7 +115,7 @@ class AuditLog(models.Model):
         ('FINANCE_REPORT_VIEWED','Finance Report Viewed'),
         ('CREATE_PAYMENT','Create Payment'),
         ('PAYMENT_VIEWED','Payment Viewed'),
-        ('FINANCE_COLLECTIONS_VIEWED','Finance Collection Viewed'),
+        ('CREATE_EMI_PAYMENT', 'Create EMI Payment'),
 
 
     ]
