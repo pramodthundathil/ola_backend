@@ -315,6 +315,8 @@ class FinancePlanAPIView(APIView):
                 "total_amount_payable": Decimal("0.00"),
                 "installment_to_income_ratio": Decimal("0.00"),
             }
+            finance_plan_data["created_by"] = request.user
+            finance_plan_data["store"] = getattr(request.user, "store", None)
             engine_input, _ = FinancePlan.objects.get_or_create(
                 credit_application=finance_plan.credit_application,
                 defaults=finance_plan_data

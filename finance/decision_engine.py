@@ -6,7 +6,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
+from finance.models import FinanceMultiple
+from django.core.exceptions import ValidationError
 
 
 # ==================================================
@@ -52,14 +53,31 @@ class AutoDecisionEngine:
             self.plan.customer_monthly_income * self.plan.payment_capacity_factor
         )
 
-        # Step 4: Allowed plans (with intervals)
         allowed_terms = rules["allowed_terms"]
         intervals = [15, 30]
-        plans = [
-            {"months": term, "interval_days": interval}
-            for term in allowed_terms
-            for interval in intervals
-        ]
+
+        plans = []
+
+        for term in allowed_terms:
+            for interval in intervals:
+                multiple = (
+                    FinanceMultiple.objects.filter(
+                        term_months=term,
+                        interval_days=interval,
+                        is_active=True
+                    )
+                    .values_list("multiple", flat=True)
+                    .first()
+                )
+                if multiple is None:
+                    raise ValidationError(
+                        f"FinanceMultiple not configured for {term} months / {interval} days."
+                    )
+                plans.append({
+                    "months": term,
+                    "interval_days": interval,
+                    "multiple": float(multiple)
+                })        
         self.plan.allowed_plans = plans
 
         # Step 5: Save
