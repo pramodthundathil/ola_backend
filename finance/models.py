@@ -5,7 +5,8 @@ from customer.models import CreditApplication, Customer
 from django.core.cache import cache
 from store.models import Store
 
-
+from decimal import Decimal, ROUND_UP, InvalidOperation
+from django.core.exceptions import ValidationError
 User = get_user_model()
 
 
@@ -414,20 +415,40 @@ class FinancePlan(models.Model):
         
         self.minimum_down_payment_percentage = min_percentage
         return (self.device_price * min_percentage) / Decimal('100')
-    
 
     def calculate_emi(self):
         """
-        Calculate EMI (Interest-Free)
-        Formula: EMI = amount_to_finance / term
-        Rounded to whole number (no cents)
+        Calculate EMI using:
+        monthly payment = (amount_to_finance × multiple) / (term)
+        Includes validation for all required fields.
         """
-        if self.selected_term and self.amount_to_finance:
-            raw_emi = self.amount_to_finance / Decimal(str(self.selected_term))
-            self.monthly_installment = raw_emi.quantize(Decimal('1'), rounding='ROUND_UP')
-        else:
-            self.monthly_installment = Decimal('0') 
+        if not self.selected_term:
+            raise ValidationError("Selected term is missing for finance plan.")
+        if not self.amount_to_finance or self.amount_to_finance <= 0:
+            raise ValidationError("Amount to finance must be greater than zero.")
+        if not self.installment_frequency_days:
+            raise ValidationError("Installment frequency (interval days) is missing.")
+
+        multiple = FinanceMultiple.objects.filter(
+            term_months=self.selected_term,
+            interval_days=self.installment_frequency_days,
+            is_active=True
+        ).values_list("multiple", flat=True).first()
+
+        if not multiple:
+            raise ValidationError(
+                f"No FinanceMultiple configuration found for term {self.selected_term} months "
+                f"and {self.installment_frequency_days} days."
+            )
+
+        try:
+            emi = (self.amount_to_finance * Decimal(str(multiple))) / (Decimal(str(self.selected_term)))
+            self.monthly_installment = emi.quantize(Decimal('1'), rounding=ROUND_UP)
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValidationError("Invalid EMI calculation. Please check your finance configuration.")
+
         return self.monthly_installment
+
 
     
     def check_payment_capacity(self):
@@ -435,9 +456,9 @@ class FinancePlan(models.Model):
         Check if EMI is within payment capacity
         Rule: monthly_installment ≤ k × monthly_income
         """
-
         rules = self.get_tier_rules()
         self.payment_capacity_factor = rules['payment_capacity_factor']
+
         
         if self.risk_tier == 'TIER_D':
             self.payment_capacity_passed = False
@@ -457,7 +478,7 @@ class FinancePlan(models.Model):
                 self.monthly_installment <= self.maximum_allowed_installment
             )
         else:
-            self.payment_capacity_passed = False    
+            self.payment_capacity_passed = False 
         return self.payment_capacity_passed
     
     def validate_conditions(self):
@@ -470,7 +491,6 @@ class FinancePlan(models.Model):
         
         # Check 2: Term is allowed for this tier
         term_ok = self.selected_term in rules['allowed_terms']
-        
         # Check 3: Payment capacity
         capacity_ok = self.check_payment_capacity()
         
