@@ -117,6 +117,7 @@ class AuditLog(models.Model):
         ('CREATE_PAYMENT','Create Payment'),
         ('PAYMENT_VIEWED','Payment Viewed'),
         ('CREATE_EMI_PAYMENT', 'Create EMI Payment'),
+        ('VIEW_EMI_SCHEDULE','View EMI Schedule')
 
 
     ]
