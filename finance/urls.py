@@ -24,5 +24,11 @@ urlpatterns = [
     path('finance-multiples/', views.FinanceMultipleListCreateView.as_view(), name='finance-multiple-list-create'),
     path('finance-multiples/<int:pk>/', views.FinanceMultipleDetailView.as_view(), name='finance-multiple-detail'),
 
+    
+    # PAYMENT
+    path('verify-customer/', views.VerifyCustomerAPIView.as_view(), name='verify-customer'),
+    path('directa/',views.WesternUnionPaymentAPIView.as_view(),name='western-union-payment')
+
+
 ]
 
