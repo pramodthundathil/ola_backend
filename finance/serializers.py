@@ -430,3 +430,15 @@ class EMIPaymentRequestSerializer(serializers.Serializer):
     amount_paid = serializers.DecimalField(max_digits=10, decimal_places=2)
     payment_method = serializers.CharField(max_length=50)
 
+# ========== SERIALIZER FOR WESTERN UNION VERIFY CUSTOMER=============
+
+class VerifyCustomerSerializer(serializers.Serializer):
+    customer_id = serializers.CharField()
+    operation_type = serializers.CharField()
+    utility = serializers.CharField()
+    terminal_id = serializers.CharField()
+    date = serializers.CharField()
+    time = serializers.CharField()
+    operation_code = serializers.CharField()
+    user = serializers.CharField()
+    password = serializers.CharField()

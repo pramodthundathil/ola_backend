@@ -6,11 +6,13 @@ import logging
 from decimal import Decimal
 from datetime import timedelta, datetime
 from collections import defaultdict
+from decimal import Decimal
 
 # swagger settup
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from customer.permissions import IsAuthenticatedUser
+from django.conf import settings
 
 # ============================================================
 # Django Imports
@@ -61,6 +63,7 @@ from .serializers import (
     EMIScheduleSerializerPlan,
     FinanceMultipleSerializer,
     EMIPaymentRequestSerializer,
+    VerifyCustomerSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
@@ -2269,3 +2272,298 @@ class FinanceMultipleDetailView(APIView):
             "data": None
         }, status=status.HTTP_200_OK)
 
+# ===================================
+# WESTERN UNION (CASH PAYMENT) API
+# ===================================
+
+class VerifyCustomerAPIView(APIView):
+    permission_classes=[AllowAny]
+    """
+    Step 1: Customer enters ID/account number to check EMI details.
+    Endpoint: /verify-customer/
+    only for western union dashboard
+    """
+    @swagger_auto_schema(
+        tags=["Western Union Payments"],
+        operation_summary="Verify Customer and Fetch EMI Details- FOR WESTERN UNION (NOT FOR FROTEND)",
+        operation_description=(
+            "This API is called by Western Union to verify a customer and retrieve pending EMI details. "
+            "The request must include customer ID, operation type, and other transaction parameters."
+        ),
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=[
+                "customer_id", "operation_type", "utility",
+                "terminal_id", "date", "time", "operation_code",
+                "user", "password"
+            ],
+            properties={
+                "customer_id": openapi.Schema(type=openapi.TYPE_STRING, example="123456"),
+                "operation_type": openapi.Schema(type=openapi.TYPE_STRING, example="CashIn"),
+                "utility": openapi.Schema(type=openapi.TYPE_STRING, example="90061234"),
+                "terminal_id": openapi.Schema(type=openapi.TYPE_STRING, example="D00561"),
+                "date": openapi.Schema(type=openapi.TYPE_STRING, example="20251107"),
+                "time": openapi.Schema(type=openapi.TYPE_STRING, example="101940"),
+                "operation_code": openapi.Schema(type=openapi.TYPE_STRING, example="C"),
+                "user": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
+                "password": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
+            },
+        ),
+        responses={
+            200: openapi.Response(
+                description="Customer and EMI details found successfully",
+                examples={
+                    "application/json": {
+                        "operation_type": "CashIn",
+                        "customer_id": "123456",
+                        "customer_name": "Rahul Sharma",
+                        "utility": "90061234",
+                        "terminal": "D00561",
+                        "date": "20251107",
+                        "time": "101940",
+                        "operation_code": "C",
+                        "response_code": "0",
+                        "response_message": "Query successful",
+                        "items": [
+                            {
+                                "id_item": "LOAN123",
+                                "amount": "10000",
+                                "description": "Loan installment - Due 2025-11-15",
+                                "due_date": "20251115"
+                            }
+                        ]
+                    }
+                },
+            ),
+            404: openapi.Response(
+                description="Customer not found",
+                examples={"application/json": {"response_code": "7", "response_message": "Customer not found"}}
+            ),
+            200: openapi.Response(
+                description="No pending payments found",
+                examples={"application/json": {"response_code": "6", "response_message": "No pending payments found"}}
+            ),
+        },
+    )
+    def post(self, request):
+
+        serializer = VerifyCustomerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+
+        #  Validate credentials
+        if data.get("user") != settings.WESTERN_USER  or data.get("password") != settings.WESTERN_PASS:
+            return Response(
+                {"response_code": "9", "response_message": "Invalid credentials"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        customer_id = data.get("customer_id")
+
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response(
+                {"response_code": "7", "response_message": "Customer not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Fetch pending EMI
+        pending_emi = EMISchedule.objects.filter(
+            finance_plan__credit_application__customer=customer,
+            status__in=["DUE", "OVERDUE","PARTIALLY_PAID"]
+        ).first()
+
+        if not pending_emi:
+            return Response(
+                {"response_code": "6", "response_message": "No pending payments found"},
+                status=status.HTTP_200_OK
+            )
+
+        response = {
+            "operation_type": "CashIn",
+            "customer_id": str(customer.id),
+            "customer_name": f"{customer.first_name} {customer.last_name}",
+            "utility": data.get("utility"),
+            "terminal": data.get("terminal_id"),
+            "date": data.get("date"),
+            "time": data.get("time"),
+            "operation_code": data.get("operation_code"),
+            "response_code": "0",
+            "response_message": "Query successful",
+            "items": [
+                {
+                    "id_item": str(pending_emi.id),
+                    "amount": str(pending_emi.balance_remaining),
+                    "description": f"Loan installment - Due {pending_emi.due_date}",
+                    "due_date": pending_emi.due_date.strftime("%Y%m%d"),
+                }
+            ]
+        }
+        return Response(response, status=status.HTTP_200_OK)
+
+
+# ==============================================
+# WESTERN UNION (CASH PAYMENT) SUCESS/FAIL VIEW
+# =============================================
+
+
+class WesternUnionPaymentAPIView(APIView):
+    permission_classes=[]
+    """
+    Step 2: Western Union calls this API after customer pays cash.
+    Endpoint: /directa/
+    only for western union dashboard
+    """
+    @swagger_auto_schema(
+        operation_summary="Process Western Union Payment- FOR WESTERN UNION (NOT FOR FROTEND)",
+        operation_description=(
+            "This API is called by Western Union after a customer deposits cash at a kiosk. "
+            "It validates the EMI, checks amount limits, updates the payment record, and marks the EMI as paid."
+        ),
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=[
+                "operation_type", "customer_id", "id_item", "terminal",
+                "date", "time", "sequence", "transaction_code",
+                "operation_code", "barcode", "utility", "amount",
+                "payment_method", "user", "password"
+            ],
+            properties={
+                "operation_type": openapi.Schema(type=openapi.TYPE_STRING, example="CashIn"),
+                "customer_id": openapi.Schema(type=openapi.TYPE_STRING, example="123456"),
+                "id_item": openapi.Schema(type=openapi.TYPE_STRING, example="LOAN123"),
+                "terminal": openapi.Schema(type=openapi.TYPE_STRING, example="D00561"),
+                "date": openapi.Schema(type=openapi.TYPE_STRING, example="20251107"),
+                "time": openapi.Schema(type=openapi.TYPE_STRING, example="102000"),
+                "sequence": openapi.Schema(type=openapi.TYPE_STRING, example="1125"),
+                "transaction_code": openapi.Schema(type=openapi.TYPE_STRING, example="D00561202511071020001125"),
+                "operation_code": openapi.Schema(type=openapi.TYPE_STRING, example="D"),
+                "barcode": openapi.Schema(type=openapi.TYPE_STRING, example="90061234000232500005656500"),
+                "utility": openapi.Schema(type=openapi.TYPE_STRING, example="90061234"),
+                "amount": openapi.Schema(type=openapi.TYPE_STRING, example="10000"),
+                "payment_method": openapi.Schema(type=openapi.TYPE_STRING, example="E01 (Cash)"),
+                "user": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
+                "password": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
+            }
+        ),
+        responses={
+            200: openapi.Response(
+                description="Payment Successful",
+                examples={
+                    "application/json": {
+                        "operation_type": "CashIn",
+                        "utility": "90061234",
+                        "terminal": "D00561",
+                        "date": "20251107",
+                        "time": "102000",
+                        "sequence": "1125",
+                        "transaction_code": "D00561202511071020001125",
+                        "operation_code": "D",
+                        "response_code": "0",
+                        "response_message": "Payment successful",
+                        "ticket_text": "Thank you! Your payment of ₹10000 was received successfully."
+                    }
+                },
+            ),
+            400: openapi.Response(
+                description="Overpayment or Invalid Input",
+                examples={
+                    "application/json": {
+                        "response_code": "5",
+                        "response_message": "Payment exceeds pending EMI amount",
+                        "ticket_text": "Payment rejected. Pending amount is ₹9500.00. Please retry with the exact amount."
+                    }
+                },
+            ),
+            404: openapi.Response(
+                description="EMI Record Not Found",
+                examples={
+                    "application/json": {
+                        "response_code": "4",
+                        "response_message": "EMI record not found",
+                        "ticket_text": "Payment could not be processed."
+                    }
+                },
+            ),
+        },
+        tags=["Western Union Payments"]
+    )
+
+    def post(self, request):
+        data = request.data
+
+        if data.get("user") != settings.WESTERN_USER  or data.get("password") != settings.WESTERN_PASS:
+            return Response(
+                {"response_code": "9", "response_message": "Invalid credentials"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        try:
+            emi = EMISchedule.objects.get(id=data.get("id_item"))
+        except EMISchedule.DoesNotExist:
+            return Response({
+                "operation_type": data.get("operation_type"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "date": data.get("date"),
+                "time": data.get("time"),
+                "sequence": data.get("sequence"),
+                "transaction_code": data.get("transaction_code"),
+                "operation_code": data.get("operation_code"),
+                "response_code": "4",
+                "response_message": "EMI record not found",
+                "ticket_text": "Payment could not be processed."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Update EMI status and record payment
+        pending_amount = Decimal(emi.installment_amount - emi.amount_paid)
+        amount = Decimal(data.get("amount", 0))
+
+        #  Reject overpayment
+        if amount > pending_amount:
+            return Response({
+                "operation_type": data.get("operation_type"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "date": data.get("date"),
+                "time": data.get("time"),
+                "sequence": data.get("sequence"),
+                "transaction_code": data.get("transaction_code"),
+                "operation_code": data.get("operation_code"),
+                "response_code": "5",
+                "response_message": "Payment exceeds pending EMI amount",
+                "ticket_text": f"Payment rejected. Pending amount is ₹{pending_amount:.2f}. Please retry with the exact amount."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        emi.amount_paid += amount
+        emi.update_status()
+        emi.save()
+
+        # Save payment record
+        PaymentRecord.objects.create(
+            finance_plan=emi.finance_plan,
+            emi_schedule=emi,
+            payment_type="EMI",
+            payment_method="WESTERN_UNION",
+            payment_amount=amount,
+            payment_date=timezone.now(),
+            payment_status="COMPLETED",
+            transaction_reference=data.get("transaction_code"),
+            notes="Payment received via Western Union"
+        )
+
+        return Response({
+            "operation_type": data.get("operation_type"),
+            "utility": data.get("utility"),
+            "terminal": data.get("terminal"),
+            "date": data.get("date"),
+            "time": data.get("time"),
+            "sequence": data.get("sequence"),
+            "transaction_code": data.get("transaction_code"),
+            "operation_code": data.get("operation_code"),
+            "response_code": "0",
+            "response_message": "Payment successful",
+            "ticket_text": f"Thank you! Your payment of ₹{amount} was received successfully."
+        }, status=status.HTTP_200_OK)
