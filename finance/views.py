@@ -511,7 +511,7 @@ class FinancePlanAPIView(APIView):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
             # --------------------- Role-Based Access ---------------------
-            if user_role in ['admin', 'global_manager', 'financial_manager']:
+            if user_role in ['admin', 'global_manager', 'financemanager']:
                 pass
             elif user_role == "store_manager":
                 finance_qs = finance_qs.filter(
@@ -627,13 +627,13 @@ class FinancePlanDetailAPIView(APIView):
             plan = get_object_or_404(finance_qs, id=plan_id)
 
             # --------------------- Role-Based Access ---------------------
-            if user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+            if user_role in ['admin', 'global_manager', 'financemanager']:
                 pass
-            elif user_role == "SalesManager":
+            elif user_role == "sales_manager":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
-            elif user_role == "SalesAdvisor":
+            elif user_role == "sales_advisor":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
-            elif user_role == "SalesPerson":
+            elif user_role == "salesperson":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
             else:
                 # If the logged-in user is a customer
@@ -865,15 +865,15 @@ class FinanceCollectionsView(APIView):
             # ==================================================
             # Role-Based Access
             # ==================================================
-            if user.is_superuser or user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+            if user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']:
                 pass  # full access
-            elif user_role == "RegionalManager":
+            elif user_role == "sales_advisor":
                 region = getattr(user, "region", None)
                 qs = qs.filter(finance_plan__store__region=region) if region else qs.none()
-            elif user_role == "StoreManager":
+            elif user_role == "store_manager":
                 store = getattr(user, "store", None)
                 qs = qs.filter(finance_plan__store=store) if store else qs.none()
-            elif user_role == "SalesPerson":
+            elif user_role == "salesperson":
                 qs = qs.filter(finance_plan__created_by=user)
             elif user_role == "Customer":
                 qs = qs.filter(finance_plan__credit_application__customer=user)
@@ -1190,7 +1190,7 @@ class EMIScheduleAPIView(APIView):
             elif role == "salesperson":
                 emi_qs = emi_qs.filter(finance_plan__created_by=user)
 
-            elif role == "customer":
+            elif role == "Customer":
                 emi_qs = emi_qs.filter(finance_plan__credit_application__customer__user=user)
 
             else:
@@ -1601,9 +1601,9 @@ class FinanceReportAPIView(APIView):
             )
 
             # ---------------- Role-Based Access ----------------
-            if user.is_superuser or user_role in ["Admin", "GlobalManager", "FinanceManager"]:
+            if user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']:
                 pass  # Full access
-            elif user_role == "SalesAdvisor":
+            elif user_role == "sales_advisor":
                 if not getattr(user, "store", None) or not getattr(user.store, "region", None):
                     return Response(
                         {"status": "error", "message": "No region linked to this Sales Advisor."},
@@ -1619,7 +1619,7 @@ class FinanceReportAPIView(APIView):
                 )
 
             # ---------------- Filters ----------------
-            if region_id and (user.is_superuser or user_role in ["Admin", "GlobalManager", "FinanceManager"]):
+            if region_id and (user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']):
                 queryset = queryset.filter(
                     credit_application__customer__created_by__store__region_id=region_id
                 )
@@ -1954,7 +1954,7 @@ class PaymentRecordAPIView(APIView):
             ).all()
 
             # === Role-based access ===
-            if role == "customer":
+            if role == "Customer":
                 payments = payments.filter(finance_plan__credit_application__customer__user=user)            
             elif role == "salesperson":
                 payments = payments.filter(processed_by=user)
@@ -1968,7 +1968,7 @@ class PaymentRecordAPIView(APIView):
                     payments = payments.filter(finance_plan__credit_application__customer__store=user.store)
                 else:
                     return Response({"status": "error", "message": "User store not assigned."}, status=403)
-            elif role not in ['admin', 'global_manager', 'financial_manager']:
+            elif role not in ['admin', 'global_manager', 'financemanager']:
                 return Response({"status": "error", "message": "Unauthorized role."}, status=403)
 
             # === Filters ===
