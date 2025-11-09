@@ -218,6 +218,10 @@ class FinancePlan(models.Model):
         (30, '30 Days (Monthly)'),
     ]
     
+    # String reference: AutoFinancePlan defined below FinancePlan
+    auto_plan = models.ForeignKey("AutoFinancePlan", on_delete=models.CASCADE)
+
+    #auto_plan = models.ForeignKey("AutoFinancePlan", related_name="finance_plans", on_delete=models.CASCADE)  
     credit_application = models.OneToOneField(
         CreditApplication,
         on_delete=models.CASCADE,
@@ -950,6 +954,7 @@ class AutoFinancePlan(models.Model):
     high_end_extra_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    has_finance_plan = models.BooleanField(default=False)
 
     def __str__(self):
         return f"AutoFinancePlan - {self.customer.document_number if self.customer else 'N/A'}"

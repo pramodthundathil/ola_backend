@@ -43,13 +43,11 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog,FinanceMultiple
 from store.models import Region
-from .utils.utils import get_device_price_with_cache, cache_response
+from .utils.utils import get_device_price_with_cache
 from home.permissions import CanViewReports
-from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
+from customer.models import Customer, CreditApplication, CreditScore
 from .serializers import (
-    FinancePlanSerializer,
-    RegionWiseReportSerializer,
-    CommonReportSerializer,
+    FinancePlanSerializer,   
     FinancePlanCreateSerializer,
     AutoFinancePlanCreateSerializer,
     FinanceOverviewSerializer,
@@ -69,6 +67,7 @@ from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
 from .utils.masking import mask_sensitive_data
 from customer .utils import get_customer_monthly_income
+
 # ============================================================
 # Logger Setup
 # ============================================================
@@ -140,20 +139,46 @@ class AutoFinancePlanView(APIView):
             # ----To get monthly income of customer---------
             document_number = customer.document_number
             monthly_income = get_customer_monthly_income(document_number)
-            engine_input, _= AutoFinancePlan.objects.update_or_create(
-            credit_application=credit_app,
-            defaults={
-                "customer": customer,
-                "credit_score": credit_score,
-                "apc_score": apc_score,
-                "risk_tier": "",
-                "customer_monthly_income": monthly_income,
-                "payment_capacity_factor": Decimal("0.00"),
-                "maximum_allowed_installment": Decimal("0.00"),
-                "minimum_down_payment_percentage": Decimal("0.00"),
-             }
+            auto_plan, created = AutoFinancePlan.objects.get_or_create(
+                credit_application=credit_app,
+                defaults={
+                    "customer": customer,
+                    "credit_score": credit_score,
+                    "apc_score": apc_score,
+                    "risk_tier": "",
+                    "customer_monthly_income": monthly_income,
+                    "payment_capacity_factor": Decimal("0.00"),
+                    "maximum_allowed_installment": Decimal("0.00"),
+                    "minimum_down_payment_percentage": Decimal("0.00"),
+                    "has_finance_plan": False,
+                }
             )
-            engine = AutoDecisionEngine(engine_input)
+
+            # If finance plan already exists for this auto plan
+            if auto_plan.has_finance_plan:
+                #  Create a NEW AutoPlan for new FinancePlan requests
+                auto_plan = AutoFinancePlan.objects.create(
+                    credit_application=credit_app,
+                    customer=customer,
+                    credit_score=credit_score,
+                    apc_score=apc_score,
+                    risk_tier="",
+                    customer_monthly_income=monthly_income,
+                    payment_capacity_factor=Decimal("0.00"),
+                    maximum_allowed_installment=Decimal("0.00"),
+                    minimum_down_payment_percentage=Decimal("0.00"),
+                    has_finance_plan=False,
+                )
+            else:
+                # Update existing autoplan since no FinancePlan created yet
+                AutoFinancePlan.objects.filter(id=auto_plan.id).update(
+                    credit_score=credit_score,
+                    apc_score=apc_score,
+                    customer_monthly_income=monthly_income,
+                    risk_tier="",
+                )
+
+            engine = AutoDecisionEngine(auto_plan)
             engine_out=engine.run()
 
             # ---- Audit Logging ----
@@ -169,11 +194,11 @@ class AutoFinancePlanView(APIView):
                     "status": "success",
                     "message": "Auto Finance Plan generated successfully.",
                     "data": {
-                        "plan_id": engine_input.id,
+                        "plan_id": auto_plan.id,
                         "customer_id": customer.id,
                         "credit_application_id": credit_app.id,
                         "apc_score": apc_score,
-                        "risk_tier": engine_input.risk_tier,
+                        "risk_tier": auto_plan.risk_tier,
                         "monthly_income": str(engine_out.customer_monthly_income),
                         "maximum_allowed_installment": str(engine_out.maximum_allowed_installment),
                         "minimum_down_payment_percentage": str(engine_out.minimum_down_payment_percentage),
@@ -328,7 +353,10 @@ class FinancePlanAPIView(APIView):
                 created_by=request.user,
                 store=getattr(request.user, "store", None),
                 defaults=finance_plan_data
-            )         
+            )
+             # Mark AutoPlan as finalized
+            finance_plan.has_finance_plan = True
+            finance_plan.save(update_fields=["has_finance_plan"])         
 
             logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
