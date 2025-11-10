@@ -442,3 +442,57 @@ class VerifyCustomerSerializer(serializers.Serializer):
     operation_code = serializers.CharField()
     user = serializers.CharField()
     password = serializers.CharField()
+
+
+# ============================================================
+# FOR GETTING COMPLETE FINANCE DETAILS
+# ============================================================
+class FinanceFullDetailsSerializer(serializers.Serializer):
+    finance_plan = FinancePlanNestedSerializer()
+    emi_schedule = EMIScheduleSerializer(many=True)
+    overdue_details = FinanceOverdueSerializer()
+    payments = PaymentRecordSerializerPlan(many=True)
+    interest_details = serializers.DictField(required=False)
+    total_paid = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_outstanding = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pending_emis_count = serializers.IntegerField()
+    paid_emis_count = serializers.IntegerField()
+    overdue_emis_count = serializers.IntegerField()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        
+        finance_plan = instance.get('finance_plan')  # <-- use .get() since instance is a dict
+        
+        multiple = FinanceMultiple.objects.filter(
+            term_months=finance_plan.selected_term,
+            interval_days=finance_plan.installment_frequency_days,
+            is_active=True
+        ).first()
+
+        if multiple:
+            principal = float(finance_plan.device_price)
+            interest_amount = principal * (float(multiple.multiple) - 1)
+            total_payable = principal + interest_amount
+
+            # Compute EMI count if not directly stored
+            emi_count = getattr(finance_plan, 'total_installments', None)
+            if not emi_count:
+                emi_count = int(finance_plan.selected_term * 30 / finance_plan.installment_frequency_days)
+
+            emi_amount = total_payable / emi_count if emi_count else None
+
+            data['interest_details'] = {
+                "term_months": finance_plan.selected_term,
+                "interval_days": finance_plan.installment_frequency_days,
+                "multiple": float(multiple.multiple),
+                "principal_amount": principal,
+                "interest_amount": interest_amount,
+                "total_payable": total_payable,
+                "emi_count": emi_count,
+                "emi_amount": emi_amount
+            }
+        else:
+            data['interest_details'] = None
+
+        return data
