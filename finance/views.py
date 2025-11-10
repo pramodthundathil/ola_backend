@@ -19,6 +19,7 @@ from django.conf import settings
 # ============================================================
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.utils.dateparse import parse_date
 from django.db.models import Count, Sum, Avg, Q, Prefetch
 from django.db.models.functions import TruncWeek, TruncMonth
 from django.utils import timezone
@@ -61,6 +62,7 @@ from .serializers import (
     FinanceOverdueSerializer,
     EMIScheduleSerializerPlan,
     FinanceMultipleSerializer,
+    EMIPaymentRequestSerializer,
     VerifyCustomerSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
@@ -317,13 +319,16 @@ class FinancePlanAPIView(APIView):
                 "monthly_installment": Decimal("0.00"),
                 "total_amount_payable": Decimal("0.00"),
                 "installment_to_income_ratio": Decimal("0.00"),
-            }
+            }            
             finance_plan_data["created_by"] = request.user
             finance_plan_data["store"] = getattr(request.user, "store", None)
-            engine_input, _ = FinancePlan.objects.get_or_create(
+
+            engine_input, created = FinancePlan.objects.get_or_create(
                 credit_application=finance_plan.credit_application,
+                created_by=request.user,
+                store=getattr(request.user, "store", None),
                 defaults=finance_plan_data
-            )             
+            )         
 
             logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
@@ -509,17 +514,17 @@ class FinancePlanAPIView(APIView):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
             # --------------------- Role-Based Access ---------------------
-            if user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+            if user_role in ['admin', 'global_manager', 'financemanager']:
                 pass
-            elif user_role == "StoreManager":
+            elif user_role == "store_manager":
                 finance_qs = finance_qs.filter(
                     credit_application__customer__created_by__store=user.store
                 )
-            elif user_role == "SalesAdvisor":
+            elif user_role == "sales_advisor":
                 finance_qs = finance_qs.filter(
                     credit_application__customer__created_by__store__region=user.store.region
                 )
-            elif user_role == "SalesPerson":
+            elif user_role == "salesperson":
                 finance_qs = finance_qs.filter(
                     credit_application__customer__created_by=user
                 )
@@ -625,13 +630,13 @@ class FinancePlanDetailAPIView(APIView):
             plan = get_object_or_404(finance_qs, id=plan_id)
 
             # --------------------- Role-Based Access ---------------------
-            if user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+            if user_role in ['admin', 'global_manager', 'financemanager']:
                 pass
-            elif user_role == "SalesManager":
+            elif user_role == "sales_manager":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
-            elif user_role == "SalesAdvisor":
+            elif user_role == "sales_advisor":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
-            elif user_role == "SalesPerson":
+            elif user_role == "salesperson":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
             else:
                 # If the logged-in user is a customer
@@ -863,15 +868,15 @@ class FinanceCollectionsView(APIView):
             # ==================================================
             # Role-Based Access
             # ==================================================
-            if user.is_superuser or user_role in ["Admin", "FinanceManager", "GlobalManager"]:
+            if user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']:
                 pass  # full access
-            elif user_role == "RegionalManager":
+            elif user_role == "sales_advisor":
                 region = getattr(user, "region", None)
                 qs = qs.filter(finance_plan__store__region=region) if region else qs.none()
-            elif user_role == "StoreManager":
+            elif user_role == "store_manager":
                 store = getattr(user, "store", None)
                 qs = qs.filter(finance_plan__store=store) if store else qs.none()
-            elif user_role == "SalesPerson":
+            elif user_role == "salesperson":
                 qs = qs.filter(finance_plan__created_by=user)
             elif user_role == "Customer":
                 qs = qs.filter(finance_plan__credit_application__customer=user)
@@ -1094,146 +1099,201 @@ class FinanceOverdueView(APIView):
         
 
 # --------------------------------------------------------
-# API: Get EMI Schedule by Customer ID
+# API: Get EMI Schedule (Single or Multiple Customers)
 # --------------------------------------------------------
 class EMIScheduleAPIView(APIView):
+    """
+    Retrieve EMI schedules with flexible filters & role-based access.
+    Roles:
+        - Admin / FinanceManager / GlobalManager -> Full access
+        - RegionalManager / SalesAdvisor -> Only for their region
+        - StoreManager -> Only EMIs in their store
+        - SalesPerson -> Only EMIs created by them
+        - Customer -> Only their own EMIs
+    """
     permission_classes = [IsAuthenticatedUser]
-    
+    pagination_class = FinancePlanPagination  
+
     @swagger_auto_schema(
-        operation_summary="Get EMI Schedule by Customer ID",
+        operation_summary="Retrieve EMI Schedules (Single or Multiple Customers)",
         operation_description="""
-        Retrieve all EMI schedules (upcoming, due, paid, overdue) for a specific customer.
-        
-        **Query Parameters:**
-        - `customer_id` (required): Customer ID
-        - `status` (optional): Filter by status (UPCOMING, DUE, PAID, OVERDUE, PARTIALLY_PAID)
-        
-        **Examples:**
-        - `GET /api/finance/emi-schedule/?customer_id=5` → Get all EMI schedules
-        - `GET /api/finance/emi-schedule/?customer_id=5&status=PAID` → Get only paid EMIs
+        Retrieve EMI schedules with role-based access and multiple filter options.
+        Works for both single customer and multi-customer queries based on role access.
         """,
         manual_parameters=[
-            openapi.Parameter(
-                'customer_id',
-                openapi.IN_QUERY,
-                description="Customer ID",
-                type=openapi.TYPE_INTEGER,
-                required=True
-            ),
-            openapi.Parameter(
-                'status',
-                openapi.IN_QUERY,
-                description="Filter by EMI status",
-                type=openapi.TYPE_STRING,
-                enum=['UPCOMING', 'DUE', 'PAID', 'OVERDUE', 'PARTIALLY_PAID'],
-                required=False
-            )
+            openapi.Parameter("customer_id", openapi.IN_QUERY, description="Customer ID (optional)", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("finance_plan_id", openapi.IN_QUERY, description="Finance Plan ID (optional)", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("status", openapi.IN_QUERY, description="Filter by EMI status", type=openapi.TYPE_STRING, enum=["UPCOMING", "DUE", "PAID", "OVERDUE", "PARTIALLY_PAID"]),
+            openapi.Parameter("installment_number", openapi.IN_QUERY, description="Installment number", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("due_from", openapi.IN_QUERY, description="Filter by due_date ≥ (YYYY-MM-DD)", type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter("due_to", openapi.IN_QUERY, description="Filter by due_date ≤ (YYYY-MM-DD)", type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter("paid_from", openapi.IN_QUERY, description="Filter by paid_date ≥ (YYYY-MM-DD)", type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter("paid_to", openapi.IN_QUERY, description="Filter by paid_date ≤ (YYYY-MM-DD)", type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter("order_by", openapi.IN_QUERY, description="Order results (default: installment_number)", type=openapi.TYPE_STRING),
         ],
-        responses={
-            200: openapi.Response(
-                description="EMI Schedule list with summary",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'customer_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'customer_name': openapi.Schema(type=openapi.TYPE_STRING),
-                        'finance_plan_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'summary': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'total_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'paid_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'upcoming_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'overdue_installments': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'total_amount': openapi.Schema(type=openapi.TYPE_STRING),
-                                'amount_paid': openapi.Schema(type=openapi.TYPE_STRING),
-                                'balance_remaining': openapi.Schema(type=openapi.TYPE_STRING),
-                            }
-                        ),
-                        'schedules': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_OBJECT))
-                    }
-                )
-            ),
-            400: "customer_id parameter is required",
-            404: "No EMI schedules found for this customer"
-        },
         tags=["Finance"]
     )
     def get(self, request):
         try:
-            customer_id = request.query_params.get('customer_id')
-            status_filter = request.query_params.get('status')
-            
-            if not customer_id:
-                return Response(
-                    {"error": "customer_id parameter is required"}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get customer
-            customer = get_object_or_404(Customer, id=customer_id)
-            
-            # Get finance plan for customer
-            finance_plan = FinancePlan.objects.filter(
-                credit_application__customer=customer
-            ).order_by('-created_at').first()
-            
-            if not finance_plan:
-                return Response(
-                    {"error": f"No finance plan found for customer ID {customer_id}"}, 
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Get EMI schedules
-            emi_schedules = EMISchedule.objects.filter(
-                finance_plan=finance_plan
-            ).order_by('installment_number')
-            
-            # Apply status filter if provided
+            user = request.user
+            role = getattr(user, "role", "").lower()
+
+            # ----------------------------
+            # Query Params
+            # ----------------------------
+            customer_id = request.query_params.get("customer_id")
+            finance_plan_id = request.query_params.get("finance_plan_id")
+            status_filter = request.query_params.get("status")
+            installment_number = request.query_params.get("installment_number")
+            due_from = request.query_params.get("due_from")
+            due_to = request.query_params.get("due_to")
+            paid_from = request.query_params.get("paid_from")
+            paid_to = request.query_params.get("paid_to")
+            order_by = request.query_params.get("order_by", "installment_number")
+
+            # Validate order_by (prevent '14'-like values)
+            allowed_order_fields = [
+                "installment_number", "due_date", "paid_date",
+                "status", "created_at", "-installment_number", "-due_date", "-paid_date", "-created_at"
+            ]
+            if order_by not in allowed_order_fields:
+                order_by = "installment_number"
+
+            # ----------------------------
+            # Base Query (3D Fetching)
+            # ----------------------------
+            emi_qs = EMISchedule.objects.select_related(
+                "finance_plan",
+                "finance_plan__credit_application__customer",
+                "finance_plan__store__region",
+                "finance_plan__device",
+                "finance_plan__created_by",
+            )
+
+            # ----------------------------
+            # Apply Role-Based Filtering
+            # ----------------------------
+            if role in ('admin', 'global_manager', 'financemanager'):
+                pass  # Full access
+
+            elif role == "sales_advisor":
+                region = getattr(user, "region", None)
+                if region:
+                    emi_qs = emi_qs.filter(finance_plan__store__region=region)
+                else:
+                    return Response({"error": "Region not assigned to user"}, status=403)
+
+            elif role == "store_manager":
+                store = getattr(user, "store", None)
+                if store:
+                    emi_qs = emi_qs.filter(finance_plan__store=store)
+                else:
+                    return Response({"error": "Store not assigned to user"}, status=403)
+
+            elif role == "salesperson":
+                emi_qs = emi_qs.filter(finance_plan__created_by=user)
+
+            elif role == "Customer":
+                emi_qs = emi_qs.filter(finance_plan__credit_application__customer__user=user)
+
+            else:
+                return Response({"error": "Unauthorized role"}, status=403)
+
+            # ----------------------------
+            # Apply Filters (Optional)
+            # ----------------------------
+            if finance_plan_id:
+                emi_qs = emi_qs.filter(finance_plan_id=int(finance_plan_id))
+            if customer_id:
+                emi_qs = emi_qs.filter(finance_plan__credit_application__customer_id=int(customer_id))
             if status_filter:
-                emi_schedules = emi_schedules.filter(status=status_filter.upper())
-            
-            if not emi_schedules.exists():
-                return Response(
-                    {"error": f"No EMI schedules found for customer ID {customer_id}"}, 
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Calculate summary
-            total_installments = emi_schedules.count()
-            paid_count = emi_schedules.filter(status='PAID').count()
-            upcoming_count = emi_schedules.filter(status='UPCOMING').count()
-            overdue_count = emi_schedules.filter(status='OVERDUE').count()
-            
-            total_amount = sum(emi.installment_amount for emi in emi_schedules)
-            amount_paid = sum(emi.amount_paid for emi in emi_schedules)
-            balance_remaining = sum(emi.balance_remaining for emi in emi_schedules)
-            
-            # Serialize data
-            serializer = EMIScheduleSerializerPlan(emi_schedules, many=True)
-            
+                emi_qs = emi_qs.filter(status=status_filter.upper())
+            if installment_number:
+                emi_qs = emi_qs.filter(id=int(installment_number))
+
+            if due_from and (parsed := parse_date(due_from)):
+                emi_qs = emi_qs.filter(due_date__gte=parsed)
+            if due_to and (parsed := parse_date(due_to)):
+                emi_qs = emi_qs.filter(due_date__lte=parsed)
+            if paid_from and (parsed := parse_date(paid_from)):
+                emi_qs = emi_qs.filter(paid_date__gte=parsed)
+            if paid_to and (parsed := parse_date(paid_to)):
+                emi_qs = emi_qs.filter(paid_date__lte=parsed)
+
+            emi_qs = emi_qs.order_by(order_by)
+
+            if not emi_qs.exists():
+                return Response({"error": "No EMI schedules found matching filters or permissions"}, status=404)
+
+            # ----------------------------
+            # Aggregations & Summary
+            # ----------------------------
+            total_installments = emi_qs.count()
+            paid_count = emi_qs.filter(status="PAID").count()
+            partially_paid_count = emi_qs.filter(status="PARTIALLY_PAID").count()
+            upcoming_count = emi_qs.filter(status="UPCOMING").count()
+            overdue_count = emi_qs.filter(status="OVERDUE").count()
+
+            totals = emi_qs.aggregate(
+                total_amount=Sum("installment_amount"),
+                amount_paid=Sum("amount_paid"),
+                balance_remaining=Sum("balance_remaining"),
+            )
+
+            # ----------------------------
+            # Pagination
+            # ----------------------------
+            paginator = self.pagination_class()
+            page = paginator.paginate_queryset(emi_qs, request, view=self)
+            serializer = EMIScheduleSerializerPlan(page, many=True)
+
             response_data = {
-                'customer_id': customer.id,
-                'customer_name': f"{customer.first_name} {customer.last_name}",
-                'finance_plan_id': finance_plan.id,
-                'summary': {
-                    'total_installments': total_installments,
-                    'paid_installments': paid_count,
-                    'upcoming_installments': upcoming_count,
-                    'overdue_installments': overdue_count,
-                    'total_amount': str(total_amount),
-                    'amount_paid': str(amount_paid),
-                    'balance_remaining': str(balance_remaining),
+                "access_role": role,
+                "filters_applied": {
+                    "customer_id": customer_id,
+                    "finance_plan_id": finance_plan_id,
+                    "status": status_filter,
+                    "installment_number": installment_number,
+                    "due_from": due_from,
+                    "due_to": due_to,
+                    "paid_from": paid_from,
+                    "paid_to": paid_to,
                 },
-                'schedules': serializer.data
+                "summary": {
+                    "total_installments": total_installments,
+                    "paid_installments": paid_count,
+                    "partially_paid_installments": partially_paid_count,
+                    "upcoming_installments": upcoming_count,
+                    "overdue_installments": overdue_count,
+                    "total_amount": str(totals["total_amount"] or Decimal("0.00")),
+                    "amount_paid": str(totals["amount_paid"] or Decimal("0.00")),
+                    "balance_remaining": str(totals["balance_remaining"] or Decimal("0.00")),
+                },
+                "schedules": serializer.data,
             }
-            
-            logger.info(f"[EMIScheduleAPI] Retrieved {total_installments} EMI schedules for Customer ID={customer_id}")
-            return Response(response_data, status=status.HTTP_200_OK)
-            
+
+            # ----------------------------
+            # Audit Logging (Non-Blocking)
+            # ----------------------------
+            try:
+                AuditLog.objects.create(
+                    user=request.user if request.user.is_authenticated else None,
+                    action_type="VIEW_EMI_SCHEDULE",
+                    description=f"User viewed EMI schedules | Role={role.upper()} | Filters={dict(request.query_params)}",
+                    metadata={
+                        "filters": dict(request.query_params),
+                        "results_count": total_installments,
+                        "access_role": role,
+                    },
+                )
+            except Exception as log_error:
+                logger.warning(f"[AuditLog Warning] Failed to record view event: {log_error}")
+
+            return paginator.get_paginated_response(response_data)
+
         except Exception as e:
             logger.exception("[EMIScheduleAPI] Error retrieving EMI schedules.")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": str(e)}, status=500)
 
 
 # --------------------------------------
@@ -1243,20 +1303,21 @@ class FinanceInstallmentPaymentView(APIView):
     """
     Handles EMI payment updates and rescheduling logic for Finance Plans.
     """
+    permission_classes = [IsAuthenticatedUser]
 
     @swagger_auto_schema(
         operation_summary="Create EMI Payment and Reschedule Future EMIs",
         operation_description=(
             "Records a payment for a specific EMI installment. "
             "If the payment is late, it deletes all future pending EMIs and regenerates them "
-            "starting 15 days after the actual payment date.\n\n"
+            "starting after the chosen interval_days.\n\n"
             "**Business Rules:**\n"
-            "- Normal case → next EMIs every 15 days\n"
+            "- Normal case → next EMIs every interval_days\n"
             "- If EMI is missed (Overdue) → schedule pauses\n"
-            "- Once overdue EMI is paid → next EMI = 15 days after payment\n"
-            "- Schedule resumes every 15 days"
+            "- Once overdue EMI is paid → next EMI = interval_days after payment\n"
+            "- Schedule resumes at same interval"
         ),
-        request_body=PaymentRecord3DSerializer,
+        request_body=EMIPaymentRequestSerializer,
         responses={
             200: "Payment recorded successfully and EMI schedule updated.",
             400: "Bad Request — Invalid data or duplicate payment.",
@@ -1270,8 +1331,23 @@ class FinanceInstallmentPaymentView(APIView):
         Record payment for a specific EMI and handle rescheduling logic.
         """
         try:
-            emi = EMISchedule.objects.select_related('finance_plan').get(id=emi_id)
+            # -----------------------------------------------------------------
+            #  Fetch EMI with full related details (3D fetch)
+            # -----------------------------------------------------------------
+            emi = (
+                EMISchedule.objects
+                .select_related(
+                    "finance_plan",
+                    "finance_plan__credit_application",
+                    "finance_plan__credit_application__customer",
+                    "finance_plan__device",
+                    "finance_plan__store",
+                    "finance_plan__store__region"
+                )
+                .get(id=emi_id)
+            )
             plan = emi.finance_plan
+            store = plan.store
 
             amount_paid = Decimal(request.data.get('amount_paid', '0.00'))
             payment_method = request.data.get('payment_method', 'OTHER')
@@ -1279,7 +1355,9 @@ class FinanceInstallmentPaymentView(APIView):
             if emi.status == 'PAID':
                 return Response({"message": "This EMI is already paid."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # ---- Create Payment Record ----
+            # -----------------------------------------------------------------
+            #  Create Payment Record
+            # -----------------------------------------------------------------
             payment = PaymentRecord.objects.create(
                 finance_plan=plan,
                 emi_schedule=emi,
@@ -1292,35 +1370,98 @@ class FinanceInstallmentPaymentView(APIView):
                 notes=f"Payment for EMI #{emi.installment_number}"
             )
 
-            # ---- Update EMI ----
-            emi.amount_paid += amount_paid
-            emi.update_status()
-            emi.paid_date = timezone.now().date()
-            emi.save()
+            # -----------------------------------------------------------------
+            # Apply Payment to EMI 
+            # -----------------------------------------------------------------
+            payment.apply_to_emi()
 
-            logger.info(f"EMI #{emi.installment_number} paid for plan {plan.id} on {emi.paid_date}")
+            # -----------------------------------------------------------------
+            #  Audit Log Entry
+            # -----------------------------------------------------------------
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action_type="CREATE_EMI_PAYMENT",
+                description=(
+                    f"EMI Payment recorded for FinancePlan ID={plan.id}, "
+                    f"EMI #{emi.installment_number}, Amount={amount_paid}, "
+                    f"Method={payment_method}, Store={store.name if store else 'N/A'}"
+                ),
+                metadata={
+                    "finance_plan_id": plan.id,
+                    "emi_id": emi.id,
+                    "amount": str(amount_paid),
+                    "payment_method": payment_method,
+                    "store": store.name if store else None,
+                    "region": store.region.name if store and store.region else None
+                }
+            )
 
-            # ---- Check for Late Payment ----
-            if emi.due_date < emi.paid_date:
+            # -----------------------------------------------------------------
+            #  Late Payment → Reschedule future EMIs
+            # -----------------------------------------------------------------
+            if emi.due_date < timezone.now().date():
                 logger.warning(f"EMI #{emi.installment_number} was late. Rescheduling future EMIs...")
 
-                # Delete all upcoming unpaid EMIs
                 future_emis = plan.emi_schedule.filter(
                     installment_number__gt=emi.installment_number
                 ).exclude(status='PAID')
-                deleted_count, _ = future_emis.delete()
 
+                deleted_count, _ = future_emis.delete()
                 logger.info(f"Deleted {deleted_count} future EMIs for plan {plan.id}")
 
-                # Recreate from new base date
-                next_emi_date = emi.paid_date + timedelta(days=15)
+                interval_days = plan.installment_frequency_days or 15
+                next_emi_date = timezone.now().date() + timedelta(days=interval_days)
                 self.generate_future_emis(plan, next_emi_date, emi.installment_number + 1)
 
-            return Response(
-                {"message": "Payment recorded successfully and EMI schedule updated."},
-                status=status.HTTP_200_OK
-            )
-        
+                # -----------------------------------------------------------------
+                #  Prepare Response
+                # -----------------------------------------------------------------
+            if emi.status == 'PAID':
+                user_message = f"EMI #{emi.installment_number} fully paid. Thank you!"
+            elif emi.status == 'PARTIALLY_PAID':
+                user_message = (
+                    f"EMI #{emi.installment_number} partially paid. "
+                    f"Balance remaining: ₹{emi.installment_amount - emi.amount_paid}"
+                )
+            elif emi.status == 'OVERDUE':
+                user_message = f"EMI #{emi.installment_number} is overdue. Please clear the balance soon."
+            else:
+                user_message = "Payment recorded successfully."
+            response_data = {
+            "message": user_message,
+            "payment": {
+                "id": payment.id,
+                "amount": str(payment.payment_amount),
+                "method": payment.payment_method,
+                "status": payment.payment_status,
+                "date": str(payment.payment_date.date()),
+            },
+            "finance_plan": {
+                "id": plan.id,
+                "apc_score": plan.apc_score,
+                "risk_tier": plan.risk_tier,
+                "selected_term": plan.selected_term,
+                "interval_days": plan.installment_frequency_days,
+                "total_amount": str(plan.total_amount_payable),
+            },
+            "store": {
+                "id": store.id,
+                "name": store.name,
+                "code": store.code,
+                "region": store.region.name if store and store.region else None,
+                "channel": store.get_channel_display(),
+            } if store else None,
+            "emi": {
+                "installment_number": emi.installment_number,
+                "status": emi.status,
+                "amount_paid": str(emi.amount_paid),
+                "paid_date": str(emi.paid_date),
+                "due_date": str(emi.due_date),
+            }
+            }
+
+            return Response(response_data, status=status.HTTP_200_OK)
+
         except EMISchedule.DoesNotExist:
             logger.error("EMI schedule not found.")
             return Response({"error": "EMI schedule not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -1332,10 +1473,14 @@ class FinanceInstallmentPaymentView(APIView):
 
     def generate_future_emis(self, plan, start_date, start_number):
         """
-        Dynamically generate future EMIs every 15 days after a late payment.
+        Dynamically generate future EMIs every `installment_frequency_days` after a late payment.
         """
         total_installments = plan.selected_term
-        emi_amount = plan.monthly_installment
+        interval_days = plan.installment_frequency_days or 15
+
+        # Adjust amount proportionally if interval ≠ 30 days
+        days_ratio = Decimal(interval_days) / Decimal(30)
+        emi_amount = plan.monthly_installment * days_ratio
 
         for i in range(start_number, total_installments + 1):
             EMISchedule.objects.create(
@@ -1346,8 +1491,9 @@ class FinanceInstallmentPaymentView(APIView):
                 balance_remaining=emi_amount,
                 status='UPCOMING'
             )
-            start_date += timedelta(days=15)
-        logger.info(f"Regenerated EMIs #{start_number}–{total_installments} for plan {plan.id}")
+            start_date += timedelta(days=interval_days)
+
+        logger.info(f"Regenerated EMIs #{start_number} - {total_installments} for plan {plan.id}")
 
 
 # ============================================================
@@ -1458,9 +1604,9 @@ class FinanceReportAPIView(APIView):
             )
 
             # ---------------- Role-Based Access ----------------
-            if user.is_superuser or user_role in ["Admin", "GlobalManager", "FinanceManager"]:
+            if user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']:
                 pass  # Full access
-            elif user_role == "SalesAdvisor":
+            elif user_role == "sales_advisor":
                 if not getattr(user, "store", None) or not getattr(user.store, "region", None):
                     return Response(
                         {"status": "error", "message": "No region linked to this Sales Advisor."},
@@ -1476,7 +1622,7 @@ class FinanceReportAPIView(APIView):
                 )
 
             # ---------------- Filters ----------------
-            if region_id and (user.is_superuser or user_role in ["Admin", "GlobalManager", "FinanceManager"]):
+            if region_id and (user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']):
                 queryset = queryset.filter(
                     credit_application__customer__created_by__store__region_id=region_id
                 )
@@ -1813,19 +1959,19 @@ class PaymentRecordAPIView(APIView):
             # === Role-based access ===
             if role == "Customer":
                 payments = payments.filter(finance_plan__credit_application__customer__user=user)            
-            elif role == "SalesPerson":
+            elif role == "salesperson":
                 payments = payments.filter(processed_by=user)
-            elif role == "SalesAdvisor":
+            elif role == "sales_advisor":
                 if hasattr(user, "region"):
                     payments = payments.filter(finance_plan__credit_application__customer__region=user.region)
                 else:
                     return Response({"status": "error", "message": "User region not assigned."}, status=403)
-            elif role == "StoreManager":
+            elif role == "store_manager":
                 if hasattr(user, "store"):
                     payments = payments.filter(finance_plan__credit_application__customer__store=user.store)
                 else:
                     return Response({"status": "error", "message": "User store not assigned."}, status=403)
-            elif role not in ["FinanceManager", "Admin", "GlobalManager"]:
+            elif role not in ['admin', 'global_manager', 'financemanager']:
                 return Response({"status": "error", "message": "Unauthorized role."}, status=403)
 
             # === Filters ===
