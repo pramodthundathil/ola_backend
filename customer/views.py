@@ -482,36 +482,47 @@ class CustomerManagementView(APIView):
                     "message": "Customer not found.",
                     "data": None
                 }, status=status.HTTP_404_NOT_FOUND)
-            
-                # ---- Optional OTP Verification ----
+
+            # ---- Optional OTP Verification ----
             phone = request.data.get("phone_number")
             otp = request.data.get("otp")
-            if not otp:
-                return Response({
-                    "status": "error",
-                    "message": "OTP is requierd.",
-                },status=status.HTTP_400_BAD_REQUEST) 
+            otp_valid = None  # track OTP status
 
             if otp and phone:
                 cached_otp = cache.get(f"otp_{phone}")
-                if str(cached_otp) != str(otp):
-                    return Response({
-                        "status": "error",
-                        "message": "Invalid or expired OTP.",
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                
-                # OTP verified
-                cache.delete(f"otp_{phone}")
-                customer.otp_verified = True
-                customer.save(update_fields=["otp_verified"])
+                if str(cached_otp) == str(otp):
+                    cache.delete(f"otp_{phone}")
+                    customer.otp_verified = True
+                    customer.save(update_fields=["otp_verified"])
+                    otp_valid = True
+                else:
+                    otp_valid = False
 
+            # ---- Continue updating other fields ----
+            data = request.data.copy()
+            data.pop("otp", None)
+            
 
-            serializer = CustomerSerializer(customer, data=request.data, partial=True, context={'request': request})
+            serializer = CustomerSerializer(customer, data=data, partial=True, context={'request': request})
             if serializer.is_valid():
                 updated_customer = serializer.save()
+                
+
+                if otp_valid is False:
+                    message = "OTP verification failed."
+                    otp_status="failed"
+                    
+                elif otp_valid is True:
+                    message = "Customer updated successfully (OTP verified)."
+                    otp_status="sucess"
+                else:
+                    message = "Customer updated successfully."
+                    otp_status="not_provided"
+
                 return Response({
                     "status": "success",
-                    "message": "Customer updated successfully.",
+                    "message": message,
+                    "otp_verification":otp_status,
                     "data": CustomerSerializer(updated_customer).data
                 }, status=status.HTTP_200_OK)
 
@@ -520,8 +531,6 @@ class CustomerManagementView(APIView):
                 "message": "Validation failed.",
                 "data": serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
-
-
         # ---------- DELETE ----------
         @swagger_auto_schema(
             operation_summary="Delete a customer",
