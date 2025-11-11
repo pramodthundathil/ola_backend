@@ -27,15 +27,14 @@ urlpatterns = [
     # FINACE MULTIPLE MANAGE
     path('finance-multiples/', views.FinanceMultipleListCreateView.as_view(), name='finance-multiple-list-create'),
     path('finance-multiples/<int:pk>/', views.FinanceMultipleDetailView.as_view(), name='finance-multiple-detail'),
-
     
     # PAYMENT
     path('verify-customer/', views.VerifyCustomerAPIView.as_view(), name='verify-customer'),
     path('directa/',views.WesternUnionPaymentAPIView.as_view(),name='western-union-payment'),
 
-    #Complete Details
-    path('finance/full-details/',views.FinanceCompleteDetailsAPIView.as_view(),name='finance-full-details'),
-
+    #Finance Complete Details
+    path('full-details/admin/',views.FinanceCompleteDetailsAdminAPIView.as_view(),name='finance-full-details'),
+    path('full-details/sales-advisor/',views.FinanceCompleteDetailsSalesAdvisorAPIView.as_view(),name='finance-full-details-sales-manager'),
+    path('full-details/store-manager/',views.FinanceCompleteDetailsStoreManagerAPIView.as_view(),name='finance-full-details-store-manager'),
 
 ]
-
