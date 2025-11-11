@@ -1475,7 +1475,8 @@ class GenerateOTPView(APIView):
         return Response({
             "status": "success",
             "message": "OTP sent successfully.",
-            "data": {"phone_number": phone}
+            "data": {"phone_number": phone},
+            "otp": otp
         }, status=200)
 
 # ====================================================
