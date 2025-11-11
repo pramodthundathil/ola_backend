@@ -461,9 +461,18 @@ class FinanceFullDetailsSerializer(serializers.Serializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        
-        finance_plan = instance.get('finance_plan')  # <-- use .get() since instance is a dict
-        
+
+        finance_plan = instance["finance_plan"]
+
+        # include region_id and store_id
+        data["region_id"] = (
+            finance_plan.store.region_id if finance_plan.store else None
+        )
+        data["store_id"] = (
+            finance_plan.store.id if finance_plan.store else None
+        )
+
+        # Interest logic
         multiple = FinanceMultiple.objects.filter(
             term_months=finance_plan.selected_term,
             interval_days=finance_plan.installment_frequency_days,
@@ -475,14 +484,14 @@ class FinanceFullDetailsSerializer(serializers.Serializer):
             interest_amount = principal * (float(multiple.multiple) - 1)
             total_payable = principal + interest_amount
 
-            # Compute EMI count if not directly stored
-            emi_count = getattr(finance_plan, 'total_installments', None)
+            emi_count = getattr(finance_plan, "total_installments", None)
             if not emi_count:
-                emi_count = int(finance_plan.selected_term * 30 / finance_plan.installment_frequency_days)
+                emi_count = int(finance_plan.selected_term * 30 /
+                                finance_plan.installment_frequency_days)
 
-            emi_amount = total_payable / emi_count if emi_count else None
+            emi_amount = total_payable / emi_count
 
-            data['interest_details'] = {
+            data["interest_details"] = {
                 "term_months": finance_plan.selected_term,
                 "interval_days": finance_plan.installment_frequency_days,
                 "multiple": float(multiple.multiple),
@@ -490,9 +499,9 @@ class FinanceFullDetailsSerializer(serializers.Serializer):
                 "interest_amount": interest_amount,
                 "total_payable": total_payable,
                 "emi_count": emi_count,
-                "emi_amount": emi_amount
+                "emi_amount": emi_amount,
             }
         else:
-            data['interest_details'] = None
+            data["interest_details"] = None
 
         return data
