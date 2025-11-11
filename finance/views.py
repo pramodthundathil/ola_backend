@@ -44,7 +44,7 @@ from drf_yasg.utils import swagger_auto_schema
 from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog,FinanceMultiple
 from store.models import Region
 from .utils.utils import get_device_price_with_cache
-from home.permissions import CanViewReports
+from home.permissions import CanViewAdminFinanceDetails, CanViewSalesAdvisorFinance, CanViewStoreManagerFinance
 from customer.models import Customer, CreditApplication, CreditScore
 from .serializers import (
     FinancePlanSerializer, 
@@ -67,7 +67,6 @@ from .serializers import (
     FinanceFullDetailsSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
-from home.permissions import CanViewFinanceDetails
 from .decision_engine import DecisionEngine, AutoDecisionEngine
 from .utils.masking import mask_sensitive_data
 from customer .utils import get_customer_monthly_income
@@ -142,7 +141,23 @@ class AutoFinancePlanView(APIView):
 
             # ----To get monthly income of customer---------
             document_number = customer.document_number
+            if not document_number:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Customer document number not found."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             monthly_income = get_customer_monthly_income(document_number)
+            if monthly_income is None:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Unable to fetch monthly income."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             auto_plan, created = AutoFinancePlan.objects.get_or_create(
                 credit_application=credit_app,
                 defaults={
@@ -2601,15 +2616,15 @@ class WesternUnionPaymentAPIView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-# ============================================================
-# Get Complete Finance Details 
-# ============================================================
-class FinanceCompleteDetailsAPIView(APIView):
+# ====================================================================
+# Get Complete Finance Details : Admin/Finance Manager/Global Manager
+# =====================================================================
+class FinanceCompleteDetailsAdminAPIView(APIView):
     """
     API to get COMPLETE Finance details including:
     Finance plan, Customer, EMI schedules, Device, Store, Region, Payment summary
     """
-    permission_classes = [AllowAny]
+    permission_classes = [CanViewAdminFinanceDetails]
 
     @swagger_auto_schema(
         operation_summary="Get complete Finance details",
@@ -2786,3 +2801,132 @@ class FinanceCompleteDetailsAPIView(APIView):
                 {"detail": f"Error fetching customer finance details: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+# ====================================================================
+# Get Complete Finance Details : Sales Advisor
+# =====================================================================
+class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIView):
+    """
+    Finance details restricted to the Sales Advisor's region.
+    Automatically injects region_id from authenticated user.
+    """
+    #permission_classes = [CanViewSalesAdvisorFinance]
+    permission_classes = [AllowAny]
+
+
+    @swagger_auto_schema(
+        operation_summary="Get Finance Details (Sales Advisor)",
+        operation_description="""
+        Returns full finance details automatically filtered based on the logged-in Sales Advisor's region.
+
+        **Filters (optional):**
+        - customer_id
+        - store_id
+        - device_id
+        - status (PAID, PENDING, OVERDUE)
+        - date_from (YYYY-MM-DD)
+        - date_to (YYYY-MM-DD)
+        """,
+        manual_parameters=[
+            openapi.Parameter('customer_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('store_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('device_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('status', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('date_from', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('date_to', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+        ],
+        tags=["Finance"]
+    )
+    def get(self, request):
+        try:
+            user = request.user
+            user_store = user.store
+            if not user_store:
+                return Response(
+                    {"detail": "Store not assigned to this user."},
+                    status=403
+                )
+            request_region_id = user_store.region_id
+            if not request_region_id:
+                logger.warning(f"User {user.id} attempted access without region assigned.")
+                return Response(
+                    {"detail": "Region not assigned to this Sales Advisor."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Clone query params and add region_id
+            mutable_params = request.query_params.copy()
+            mutable_params["region_id"] = request_region_id
+            request._request.GET = mutable_params
+            logger.info(
+                f"Finance data requested by SalesAdvisor ID={user.id}, Region={request_region_id}"
+            )
+
+            # Call parent view
+            response = super().get(request)
+
+            # ---- Extract summary counts from final response ----
+            data = response.data
+            total_plans = len(data.get("finance_plans", [])) if isinstance(data, dict) else 0
+
+            # Extract filters from request
+            filters = {
+                "customer_id": request.query_params.get("customer_id"),
+                "store_id": request.query_params.get("store_id"),
+                "device_id": request.query_params.get("device_id"),
+                "status": request.query_params.get("status"),
+                "date_from": request.query_params.get("date_from"),
+                "date_to": request.query_params.get("date_to"),
+                "region_id": request_region_id,
+            }
+
+            # --- Create Audit Log ---
+            AuditLog.objects.create(
+                user=user if user.is_authenticated else None,
+                action_type="COMPLETE_FINANCE_VIEWED",
+                description=(
+                    f"Viewed {total_plans} finance records "
+                    f"(Role=SALES_ADVISOR, Region={request_region_id})"
+                ),
+                metadata={
+                    "filters": filters,
+                    "total_records": total_plans,
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error(
+                f"Error in SalesAdvisorFinanceDetailsAPIView for user {request.user.id}: {str(e)}",
+                exc_info=True
+            )
+
+            # Audit the error also
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action_type="FINANCE_VIEW_ERROR",
+                description=f"Error occurred: {str(e)}",
+                metadata={
+                    "filters": dict(request.query_params),
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+
+            return Response(
+                {"detail": f"Failed to process request: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+  
+
+
+# ====================================================================
+# Get Complete Finance Details : Admin/Finance Manager/Global Manager
+# =====================================================================
+class FinanceCompleteDetailsStoreManagerAPIView(APIView):
+    pass
