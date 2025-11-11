@@ -20,7 +20,9 @@ urlpatterns = [
     
     # for generate otp
     path('generate-otp',views.GenerateOTPView.as_view(),name='generate-otp'),
-
+    
+    # customer dashboard
+    path('<int:customer_id>/dashboard/', views.CustomerDashboardAPIView.as_view(), name='customer-dashboard'),
 
 ]
 
