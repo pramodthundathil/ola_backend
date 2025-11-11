@@ -5,7 +5,6 @@ from django.core.exceptions import ValidationError
 from django.core.cache import cache
 
 
-
 # Django REST Framework Imports
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -15,7 +14,7 @@ from rest_framework import status
 # Local  Imports
 from .models import ( Customer,CreditScore,
                      CreditConfig,PersonalReference,
-                     CustomerIncomeFile,
+                     CustomerIncomeFile,CustomerIncome,
                      )
 from .serializers import (
      CustomerSerializer,
@@ -487,6 +486,11 @@ class CustomerManagementView(APIView):
                 # ---- Optional OTP Verification ----
             phone = request.data.get("phone_number")
             otp = request.data.get("otp")
+            if not otp:
+                return Response({
+                    "status": "error",
+                    "message": "OTP is requierd.",
+                },status=status.HTTP_400_BAD_REQUEST) 
 
             if otp and phone:
                 cached_otp = cache.get(f"otp_{phone}")
@@ -1473,3 +1477,224 @@ class GenerateOTPView(APIView):
             "message": "OTP sent successfully.",
             "data": {"phone_number": phone}
         }, status=200)
+
+# ====================================================
+#  CUSTOMER DASHBOARD VIEW (ALL CUSTOMERRELATED DATA)
+# ====================================================
+
+class CustomerDashboardAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    """
+    for fetch all customer related data for customer dashboard
+    """
+
+    @swagger_auto_schema(
+        operation_summary="Get complete customer dashboard",
+        operation_description="""
+        Returns a unified dashboard view for a specific customer.  
+        This endpoint aggregates all related customer data — identity verification, 
+        credit score, latest credit application, decision engine, device enrollment, 
+        personal references, and income information.
+
+        **Accessible by:** Admin, Manager, or Salesperson  
+        **Example Usage:**  
+        `GET /api/customers/12/dashboard/`
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                "customer_id",
+                openapi.IN_PATH,
+                description="Customer ID whose dashboard data should be fetched",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                description="Customer dashboard fetched successfully",
+                examples={
+                    "application/json": {
+                        "status": "success",
+                        "message": "Customer dashboard fetched successfully.",
+                        "data": {
+                            "customer": {
+                                "id": 12,
+                                "first_name": "John",
+                                "last_name": "Doe",
+                                "document_number": "8-123-456",
+                                "email": "john@example.com",
+                                "phone_number": "+5076000000",
+                                "status": "ACTIVE"
+                            },
+                            "identity_verification": {
+                                "overall_status": "VERIFIED",
+                                "biometric_status": "COMPLETED",
+                                "face_match_score": 98.5,
+                                "liveness_check_passed": True
+                            },
+                            "credit_score": {
+                                "apc_score": 540,
+                                "apc_status": "APPROVED",
+                                "final_credit_status": "APPROVED"
+                            },
+                            "credit_application": {
+                                "status": "APPROVED",
+                                "device_brand": "Samsung",
+                                "device_model": "Galaxy A55",
+                                "amount_to_finance": 800.00
+                            },
+                            "decision_engine": {
+                                "total_score": 90,
+                                "final_decision": "APPROVED"
+                            },
+                            "device_enrollment": {
+                                "imei": "123456789012345",
+                                "enrollment_status": "COMPLETED",
+                                "is_locked": False
+                            },
+                            "personal_references": [
+                                {"id": 1, "full_name": "Jane Doe", "relationship": "Sister"},
+                                {"id": 2, "full_name": "Carlos Diaz", "relationship": "Friend"}
+                            ],
+                            "income": {
+                                "employer": "TechCorp",
+                                "monthly_income": "1250.00"
+                            }
+                        }
+                    }
+                }
+            ),
+            404: openapi.Response(
+                description="Customer not found",
+                examples={"application/json": {
+                    "status": "error",
+                    "message": "Customer not found.",
+                    "data": None
+                }}
+            )
+        },
+        tags=["customer-dashboard"]
+    )
+
+
+    def get(self, request, customer_id):
+        # --- optimized query ---
+        customer = (
+            Customer.objects
+            .select_related("identity_verification")
+            .prefetch_related(
+                "credit_scores",
+                "personal_references",
+                "credit_applications__decision_engine_result",
+                "credit_applications__device_enrollment"
+            )
+
+            .filter(id=customer_id)
+            .first()
+        )
+
+        if not customer:
+            return Response({
+                "status": "error",
+                "message": "Customer not found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # --- related data ---
+        identity = getattr(customer, "identity_verification", None)
+        latest_credit_score = customer.credit_scores.order_by("-created_at").first()
+        latest_application = customer.credit_applications.order_by("-created_at").first()
+        decision_engine = getattr(latest_application, "decision_engine_result", None) if latest_application else None
+        device_enrollment = getattr(latest_application, "device_enrollment", None) if latest_application else None
+        personal_refs = customer.personal_references.all()
+        income = CustomerIncome.objects.filter(document_id=customer.document_number).first()
+
+        # --- response structure ---
+        response_data = {
+            "customer": CustomerSerializer(customer).data,
+            "identity_verification": {
+                "overall_status": identity.overall_status if identity else None,
+                "biometric_status": identity.biometric_status if identity else None,
+                "face_match_score": identity.face_match_score if identity else None,
+                "liveness_check_passed": identity.liveness_check_passed if identity else None,
+                "email_verified_at": identity.email_verified_at if identity else None,
+                "phone_verified_at": identity.phone_verified_at if identity else None,
+                "verification_completed_at": identity.verification_completed_at if identity else None,
+                "rejection_reason": identity.rejection_reason if identity else None,
+            },
+            "credit_score": CreditScoreSerializer(latest_credit_score).data if latest_credit_score else None,
+            "credit_application": {
+                "status": latest_application.status if latest_application else None,
+                "device_brand": latest_application.device_brand if latest_application else None,
+                "device_model": latest_application.device_model if latest_application else None,
+                "device_price": latest_application.device_price if latest_application else None,
+                "initial_payment": latest_application.initial_payment if latest_application else None,
+                "amount_to_finance": latest_application.amount_to_finance if latest_application else None,
+                "number_of_installments": latest_application.number_of_installments if latest_application else None,
+                "installment_amount": latest_application.installment_amount if latest_application else None,
+                "total_amount": latest_application.total_amount if latest_application else None,
+                "interest_rate": latest_application.interest_rate if latest_application else None,
+                "created_at": latest_application.created_at if latest_application else None,
+                "expires_at": latest_application.expires_at if latest_application else None,
+            },
+            "decision_engine": {
+                "apc_score_value": decision_engine.apc_score_value if decision_engine else None,
+                "internal_score_value": decision_engine.internal_score_value if decision_engine else None,
+                "identity_validation_passed": decision_engine.identity_validation_passed if decision_engine else None,
+                "payment_capacity_passed": decision_engine.payment_capacity_passed if decision_engine else None,
+                "references_passed": decision_engine.references_passed if decision_engine else None,
+                "anti_fraud_passed": decision_engine.anti_fraud_passed if decision_engine else None,
+                "commercial_conditions_passed": decision_engine.commercial_conditions_passed if decision_engine else None,
+                "total_score": decision_engine.total_score if decision_engine else None,
+                "final_decision": decision_engine.final_decision if decision_engine else None,
+                "rejection_reasons": decision_engine.rejection_reasons if decision_engine else None,
+            },
+            "device_enrollment": {
+                "imei": device_enrollment.imei if device_enrollment else None,
+                "device_brand": device_enrollment.device_brand if device_enrollment else None,
+                "device_model": device_enrollment.device_model if device_enrollment else None,
+                "enrollment_status": device_enrollment.enrollment_status if device_enrollment else None,
+                "locking_system": device_enrollment.locking_system if device_enrollment else None,
+                "is_locked": device_enrollment.is_locked if device_enrollment else None,
+                "lock_applied_at": device_enrollment.lock_applied_at if device_enrollment else None,
+            },
+            "personal_references": PersonalReferenceSerializer(personal_refs, many=True).data,
+            "income": {
+                "employer": income.employer if income else None,
+                "monthly_income": income.monthly_income if income else None,
+            },
+            "summary": {
+                "total_credit_applications": customer.credit_applications.count(),
+                "approved_applications": customer.credit_applications.filter(status="APPROVED").count(),
+                "rejected_applications": customer.credit_applications.filter(status="REJECTED").count(),
+                "active_status": customer.status,
+                "total_references": personal_refs.count(),
+            },
+            "credit_summary": {
+                "latest_apc_score": latest_credit_score.apc_score if latest_credit_score else None,
+                "previous_apc_score": customer.credit_scores.order_by("-created_at")[1].apc_score if customer.credit_scores.count() > 1 else None,
+                "credit_score_trend": (
+                    "improved" if customer.credit_scores.count() > 1 and
+                                latest_credit_score.apc_score > customer.credit_scores.order_by("-created_at")[1].apc_score
+                    else "declined" if customer.credit_scores.count() > 1 and
+                                latest_credit_score.apc_score < customer.credit_scores.order_by("-created_at")[1].apc_score
+                    else "no_change"
+                )
+            },
+            "device_enrollment_summary": {
+                "total_devices": customer.credit_applications.filter(device_imei__isnull=False).count(),
+                "enrolled_devices": customer.credit_applications.filter(
+                    device_enrollment__enrollment_status="COMPLETED"
+                ).count(),
+                "locked_devices": customer.credit_applications.filter(
+                    device_enrollment__is_locked=True
+                ).count(),
+            }
+        }
+
+        return Response({
+            "status": "success",
+            "message": "Customer dashboard fetched successfully.",
+            "data": response_data
+        }, status=status.HTTP_200_OK)
