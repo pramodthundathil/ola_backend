@@ -135,3 +135,7 @@ class CanViewReports(permissions.BasePermission):
         )
 
 
+class CanViewFinanceDetails(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.role in ["admin", "financial_manager", "global_manager"]
+
