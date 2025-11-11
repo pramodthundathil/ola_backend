@@ -219,7 +219,7 @@ class FinancePlan(models.Model):
     ]
     
     # String reference: AutoFinancePlan defined below FinancePlan
-    auto_plan = models.ForeignKey("AutoFinancePlan", on_delete=models.CASCADE)
+    auto_plan = models.ForeignKey("AutoFinancePlan", on_delete=models.SET_NULL, null=True, blank=True)
    
     credit_application = models.OneToOneField(
         CreditApplication,

@@ -26,9 +26,15 @@ EXPERIAN_USERNAME = os.getenv("EXPERIAN_USERNAME")
 EXPERIAN_PASSWORD = os.getenv("EXPERIAN_PASSWORD")
 
 #lab mobiles 
-LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
-SMS_API_URL = os.getenv("SMS_API_URL") 
-SENDER = os.getenv("SENDER") 
+# LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
+# SMS_API_URL = os.getenv("SMS_API_URL") 
+# SENDER = os.getenv("SENDER") 
+
+#SMS Sending credentials
+LAB_MOBILES_TOKEN = 'jmendoza@olacredits.com:xFvjPh6gIRyY4Jr8lXMDGlImxF1eMtya'
+
+SENDER = 'blank'
+SMS_API_URL = 'https://api.labsmobile.com/json/send'
 
 # western union credentials
 WESTERN_USER = os.getenv("WESTERN_USER")
