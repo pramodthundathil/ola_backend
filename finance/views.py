@@ -43,13 +43,12 @@ from drf_yasg.utils import swagger_auto_schema
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog,FinanceMultiple
 from store.models import Region
-from .utils.utils import get_device_price_with_cache, cache_response
-from home.permissions import CanViewReports
-from customer.models import Customer, CreditApplication, CreditScore, CustomerIncome
+from .utils.utils import get_device_price_with_cache
+from home.permissions import CanViewAdminFinanceDetails, CanViewSalesAdvisorFinance, CanViewStoreManagerFinance
+from customer.models import Customer, CreditApplication, CreditScore
 from .serializers import (
-    FinancePlanSerializer,
-    RegionWiseReportSerializer,
-    CommonReportSerializer,
+    FinancePlanSerializer, 
+    FinancePlanNestedSerializer,  
     FinancePlanCreateSerializer,
     AutoFinancePlanCreateSerializer,
     FinanceOverviewSerializer,
@@ -61,14 +60,17 @@ from .serializers import (
     FinanceCollectionAnalyticsSerializer,
     FinanceOverdueSerializer,
     EMIScheduleSerializerPlan,
+    EMIScheduleSerializer,
     FinanceMultipleSerializer,
     EMIPaymentRequestSerializer,
     VerifyCustomerSerializer,
+    FinanceFullDetailsSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
 from .decision_engine import DecisionEngine, AutoDecisionEngine
 from .utils.masking import mask_sensitive_data
 from customer .utils import get_customer_monthly_income
+
 # ============================================================
 # Logger Setup
 # ============================================================
@@ -139,21 +141,63 @@ class AutoFinancePlanView(APIView):
 
             # ----To get monthly income of customer---------
             document_number = customer.document_number
+            if not document_number:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Customer document number not found."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             monthly_income = get_customer_monthly_income(document_number)
-            engine_input, _= AutoFinancePlan.objects.update_or_create(
-            credit_application=credit_app,
-            defaults={
-                "customer": customer,
-                "credit_score": credit_score,
-                "apc_score": apc_score,
-                "risk_tier": "",
-                "customer_monthly_income": monthly_income,
-                "payment_capacity_factor": Decimal("0.00"),
-                "maximum_allowed_installment": Decimal("0.00"),
-                "minimum_down_payment_percentage": Decimal("0.00"),
-             }
+            if monthly_income is None:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Unable to fetch monthly income."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            auto_plan, created = AutoFinancePlan.objects.get_or_create(
+                credit_application=credit_app,
+                defaults={
+                    "customer": customer,
+                    "credit_score": credit_score,
+                    "apc_score": apc_score,
+                    "risk_tier": "",
+                    "customer_monthly_income": monthly_income,
+                    "payment_capacity_factor": Decimal("0.00"),
+                    "maximum_allowed_installment": Decimal("0.00"),
+                    "minimum_down_payment_percentage": Decimal("0.00"),
+                    "has_finance_plan": False,
+                }
             )
-            engine = AutoDecisionEngine(engine_input)
+
+            # If finance plan already exists for this auto plan
+            if auto_plan.has_finance_plan:
+                #  Create a NEW AutoPlan for new FinancePlan requests
+                auto_plan = AutoFinancePlan.objects.create(
+                    credit_application=credit_app,
+                    customer=customer,
+                    credit_score=credit_score,
+                    apc_score=apc_score,
+                    risk_tier="",
+                    customer_monthly_income=monthly_income,
+                    payment_capacity_factor=Decimal("0.00"),
+                    maximum_allowed_installment=Decimal("0.00"),
+                    minimum_down_payment_percentage=Decimal("0.00"),
+                    has_finance_plan=False,
+                )
+            else:
+                # Update existing autoplan since no FinancePlan created yet
+                AutoFinancePlan.objects.filter(id=auto_plan.id).update(
+                    credit_score=credit_score,
+                    apc_score=apc_score,
+                    customer_monthly_income=monthly_income,
+                    risk_tier="",
+                )
+
+            engine = AutoDecisionEngine(auto_plan)
             engine_out=engine.run()
 
             # ---- Audit Logging ----
@@ -169,11 +213,11 @@ class AutoFinancePlanView(APIView):
                     "status": "success",
                     "message": "Auto Finance Plan generated successfully.",
                     "data": {
-                        "plan_id": engine_input.id,
+                        "plan_id": auto_plan.id,
                         "customer_id": customer.id,
                         "credit_application_id": credit_app.id,
                         "apc_score": apc_score,
-                        "risk_tier": engine_input.risk_tier,
+                        "risk_tier": auto_plan.risk_tier,
                         "monthly_income": str(engine_out.customer_monthly_income),
                         "maximum_allowed_installment": str(engine_out.maximum_allowed_installment),
                         "minimum_down_payment_percentage": str(engine_out.minimum_down_payment_percentage),
@@ -328,7 +372,10 @@ class FinancePlanAPIView(APIView):
                 created_by=request.user,
                 store=getattr(request.user, "store", None),
                 defaults=finance_plan_data
-            )         
+            )
+             # Mark AutoPlan as finalized
+            finance_plan.has_finance_plan = True
+            finance_plan.save(update_fields=["has_finance_plan"])         
 
             logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
 
@@ -514,7 +561,7 @@ class FinancePlanAPIView(APIView):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
             # --------------------- Role-Based Access ---------------------
-            if user_role in ['admin', 'global_manager', 'financemanager']:
+            if user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass
             elif user_role == "store_manager":
                 finance_qs = finance_qs.filter(
@@ -630,7 +677,7 @@ class FinancePlanDetailAPIView(APIView):
             plan = get_object_or_404(finance_qs, id=plan_id)
 
             # --------------------- Role-Based Access ---------------------
-            if user_role in ['admin', 'global_manager', 'financemanager']:
+            if user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass
             elif user_role == "sales_manager":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
@@ -868,7 +915,7 @@ class FinanceCollectionsView(APIView):
             # ==================================================
             # Role-Based Access
             # ==================================================
-            if user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']:
+            if user.is_superuser or user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass  # full access
             elif user_role == "sales_advisor":
                 region = getattr(user, "region", None)
@@ -1173,7 +1220,7 @@ class EMIScheduleAPIView(APIView):
             # ----------------------------
             # Apply Role-Based Filtering
             # ----------------------------
-            if role in ('admin', 'global_manager', 'financemanager'):
+            if role in ('admin', 'global_manager', 'financial_manager'):
                 pass  # Full access
 
             elif role == "sales_advisor":
@@ -1604,7 +1651,7 @@ class FinanceReportAPIView(APIView):
             )
 
             # ---------------- Role-Based Access ----------------
-            if user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']:
+            if user.is_superuser or user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass  # Full access
             elif user_role == "sales_advisor":
                 if not getattr(user, "store", None) or not getattr(user.store, "region", None):
@@ -1622,7 +1669,7 @@ class FinanceReportAPIView(APIView):
                 )
 
             # ---------------- Filters ----------------
-            if region_id and (user.is_superuser or user_role in ['admin', 'global_manager', 'financemanager']):
+            if region_id and (user.is_superuser or user_role in ['admin', 'global_manager', 'financial_manager']):
                 queryset = queryset.filter(
                     credit_application__customer__created_by__store__region_id=region_id
                 )
@@ -1971,7 +2018,7 @@ class PaymentRecordAPIView(APIView):
                     payments = payments.filter(finance_plan__credit_application__customer__store=user.store)
                 else:
                     return Response({"status": "error", "message": "User store not assigned."}, status=403)
-            elif role not in ['admin', 'global_manager', 'financemanager']:
+            elif role not in ['admin', 'global_manager', 'financial_manager']:
                 return Response({"status": "error", "message": "Unauthorized role."}, status=403)
 
             # === Filters ===
@@ -2567,3 +2614,319 @@ class WesternUnionPaymentAPIView(APIView):
             "response_message": "Payment successful",
             "ticket_text": f"Thank you! Your payment of ₹{amount} was received successfully."
         }, status=status.HTTP_200_OK)
+
+
+# ====================================================================
+# Get Complete Finance Details : Admin/Finance Manager/Global Manager
+# =====================================================================
+class FinanceCompleteDetailsAdminAPIView(APIView):
+    """
+    API to get COMPLETE Finance details including:
+    Finance plan, Customer, EMI schedules, Device, Store, Region, Payment summary
+    """
+    permission_classes = [CanViewAdminFinanceDetails]
+
+    @swagger_auto_schema(
+        operation_summary="Get complete Finance details",
+        operation_description="""
+        If `customer_id` is provided → returns full finance snapshot for that customer.
+        If not → returns paginated list of all finance plans with filters.
+        """,
+        manual_parameters=[
+            openapi.Parameter("customer_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                              description="Return full finance details for 1 customer"),
+            openapi.Parameter("store_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                              description="Filter by Store"),
+            openapi.Parameter("region_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                              description="Filter by Region"),
+            openapi.Parameter("device_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                              description="Filter by Device"),
+            openapi.Parameter("status", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                              description="Filter EMI status (PAID, PENDING, OVERDUE)"),
+            openapi.Parameter("date_from", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                              description="Filter emi due_date >= this date (YYYY-MM-DD)"),
+            openapi.Parameter("date_to", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                              description="Filter emi due_date <= this date (YYYY-MM-DD)"),
+        ],
+        tags=["Finance"]
+    )
+    def get(self, request):
+        try:
+            customer_id = request.query_params.get("customer_id")
+            store_id = request.query_params.get("store_id")
+            region_id = request.query_params.get("region_id")
+            device_id = request.query_params.get("device_id")
+            status_filter = request.query_params.get("status")
+            date_from = request.query_params.get("date_from")
+            date_to = request.query_params.get("date_to")
+
+            pagination = FinancePlanPagination()
+
+            # Single customer complete details
+            if customer_id:
+                return self.get_customer_finance_details(
+                    customer_id,
+                    status_filter=status_filter,
+                    date_from=date_from,
+                    date_to=date_to
+                )
+
+            # List view
+            queryset = FinancePlan.objects.select_related(
+                "customer",
+                "device",
+                "store",
+                "store__region"
+            ).prefetch_related(
+                Prefetch("emi_schedules", queryset=EMISchedule.objects.order_by("due_date"))
+            )
+
+            # Apply filters on FinancePlans
+            if store_id:
+                queryset = queryset.filter(store_id=store_id)
+            if region_id:
+                queryset = queryset.filter(store__region_id=region_id)
+            if device_id:
+                queryset = queryset.filter(device_id=device_id)
+            if status_filter:
+                queryset = queryset.filter(emi_schedules__status=status_filter.upper())
+            if date_from:
+                queryset = queryset.filter(emi_schedules__due_date__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(emi_schedules__due_date__lte=date_to)
+            queryset = queryset.distinct()
+
+            # Pagination
+            paginated_data = pagination.paginate_queryset(queryset, request)
+            serializer = FinancePlanSerializer(paginated_data, many=True)
+            return pagination.get_paginated_response(serializer.data)
+
+        except Exception as e:
+            return Response(
+                {"detail": f"Error fetching finance data: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    # ---------------------------------------------------------------
+    # Full Finance details for one customer with EMI filters
+    # ---------------------------------------------------------------
+    def get_customer_finance_details(self, customer_id, status_filter=None, date_from=None, date_to=None):
+        try:
+            finance_plan = get_object_or_404(
+                FinancePlan.objects.select_related(
+                    "device",
+                    "store",
+                    "store__region",
+                    "credit_application__customer",
+                ).prefetch_related(
+                    Prefetch("emi_schedule", queryset=EMISchedule.objects.order_by("due_date"))
+                ),
+                credit_application__customer_id=customer_id
+            )
+
+            # All EMIs
+            emi_schedules = finance_plan.emi_schedule.all()
+
+            # Apply EMI filters
+            if status_filter:
+                emi_schedules = emi_schedules.filter(status=status_filter.upper())
+            if date_from:
+                emi_schedules = emi_schedules.filter(due_date__gte=date_from)
+            if date_to:
+                emi_schedules = emi_schedules.filter(due_date__lte=date_to)
+
+            overdue_emis = emi_schedules.filter(status="OVERDUE")
+            upcoming_emis = emi_schedules.filter(status="PENDING")
+
+            # Aggregates
+            total_paid = emi_schedules.aggregate(total=Sum("amount_paid"))["total"] or 0
+            outstanding_balance = sum(emi.balance_remaining for emi in emi_schedules)
+            overdue_total = overdue_emis.aggregate(total=Sum("installment_amount"))["total"] or 0
+
+            # Generate interest_details dynamically
+            multiple = FinanceMultiple.objects.filter(
+                term_months=finance_plan.selected_term,
+                interval_days=finance_plan.installment_frequency_days,
+                is_active=True
+            ).first()
+
+            if multiple:
+                principal = float(finance_plan.device_price)
+                interest_amount = principal * (float(multiple.multiple) - 1)
+                total_payable = principal + interest_amount
+
+                emi_count = getattr(finance_plan, "total_installments", None)
+                if not emi_count:
+                    # Calculate if not explicitly stored
+                    emi_count = int(finance_plan.selected_term * 30 / finance_plan.installment_frequency_days)
+
+                emi_amount = total_payable / emi_count if emi_count else None
+
+                interest_details = {
+                    "term_months": finance_plan.selected_term,
+                    "interval_days": finance_plan.installment_frequency_days,
+                    "multiple": float(multiple.multiple),
+                    "principal_amount": principal,
+                    "interest_amount": interest_amount,
+                    "total_payable": total_payable,
+                    "emi_count": emi_count,
+                    "emi_amount": emi_amount
+                }
+            else:
+                interest_details = None
+
+            # Build response
+            serializer_data = {
+                "finance_plan": finance_plan,
+                "emi_schedule": emi_schedules,
+                "overdue_details": {
+                    "total_overdue_installments": overdue_emis.count(),
+                    "total_overdue_amount": overdue_total,
+                    "customers_with_overdue": 1,
+                },
+                "payments": finance_plan.payments.all(),
+                "interest_details": interest_details,
+                "total_paid": total_paid,
+                "total_outstanding": outstanding_balance,
+                "pending_emis_count": upcoming_emis.count(),
+                "paid_emis_count": emi_schedules.filter(status="PAID").count(),
+                "overdue_emis_count": overdue_emis.count(),
+            }
+
+            serializer = FinanceFullDetailsSerializer(serializer_data)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {"detail": f"Error fetching customer finance details: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+# ====================================================================
+# Get Complete Finance Details : Sales Advisor
+# =====================================================================
+class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIView):
+    """
+    Finance details restricted to the Sales Advisor's region.
+    Automatically injects region_id from authenticated user.
+    """
+    #permission_classes = [CanViewSalesAdvisorFinance]
+    permission_classes = [AllowAny]
+
+
+    @swagger_auto_schema(
+        operation_summary="Get Finance Details (Sales Advisor)",
+        operation_description="""
+        Returns full finance details automatically filtered based on the logged-in Sales Advisor's region.
+
+        **Filters (optional):**
+        - customer_id
+        - store_id
+        - device_id
+        - status (PAID, PENDING, OVERDUE)
+        - date_from (YYYY-MM-DD)
+        - date_to (YYYY-MM-DD)
+        """,
+        manual_parameters=[
+            openapi.Parameter('customer_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('store_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('device_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+            openapi.Parameter('status', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('date_from', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+            openapi.Parameter('date_to', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+        ],
+        tags=["Finance"]
+    )
+    def get(self, request):
+        try:
+            user = request.user
+            user_store = user.store
+            if not user_store:
+                return Response(
+                    {"detail": "Store not assigned to this user."},
+                    status=403
+                )
+            request_region_id = user_store.region_id
+            if not request_region_id:
+                logger.warning(f"User {user.id} attempted access without region assigned.")
+                return Response(
+                    {"detail": "Region not assigned to this Sales Advisor."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Clone query params and add region_id
+            mutable_params = request.query_params.copy()
+            mutable_params["region_id"] = request_region_id
+            request._request.GET = mutable_params
+            logger.info(
+                f"Finance data requested by SalesAdvisor ID={user.id}, Region={request_region_id}"
+            )
+
+            # Call parent view
+            response = super().get(request)
+
+            # ---- Extract summary counts from final response ----
+            data = response.data
+            total_plans = len(data.get("finance_plans", [])) if isinstance(data, dict) else 0
+
+            # Extract filters from request
+            filters = {
+                "customer_id": request.query_params.get("customer_id"),
+                "store_id": request.query_params.get("store_id"),
+                "device_id": request.query_params.get("device_id"),
+                "status": request.query_params.get("status"),
+                "date_from": request.query_params.get("date_from"),
+                "date_to": request.query_params.get("date_to"),
+                "region_id": request_region_id,
+            }
+
+            # --- Create Audit Log ---
+            AuditLog.objects.create(
+                user=user if user.is_authenticated else None,
+                action_type="COMPLETE_FINANCE_VIEWED",
+                description=(
+                    f"Viewed {total_plans} finance records "
+                    f"(Role=SALES_ADVISOR, Region={request_region_id})"
+                ),
+                metadata={
+                    "filters": filters,
+                    "total_records": total_plans,
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error(
+                f"Error in SalesAdvisorFinanceDetailsAPIView for user {request.user.id}: {str(e)}",
+                exc_info=True
+            )
+
+            # Audit the error also
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action_type="FINANCE_VIEW_ERROR",
+                description=f"Error occurred: {str(e)}",
+                metadata={
+                    "filters": dict(request.query_params),
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+
+            return Response(
+                {"detail": f"Failed to process request: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+  
+
+
+# ====================================================================
+# Get Complete Finance Details : Admin/Finance Manager/Global Manager
+# =====================================================================
+class FinanceCompleteDetailsStoreManagerAPIView(APIView):
+    pass
