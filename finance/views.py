@@ -106,17 +106,40 @@ class AutoFinancePlanView(APIView):
     def post(self, request):
         try:
             # -----Validate Input------------
+            # serializer = AutoFinancePlanCreateSerializer(data=request.data)
+            # serializer.is_valid(raise_exception=True)
+             # 1️⃣ Validate input
             serializer = AutoFinancePlanCreateSerializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
+            if not serializer.is_valid():
+                return Response(
+                    {"status": "error", "message": serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            
             customer_id = serializer.validated_data["customer_id"]
+            
 
             # -------3D Data Fetch ----------
-            customer = (
-                Customer.objects
-                .prefetch_related('credit_applications', 'credit_scores')
-                .only("id", "document_number")
-                .get(id=customer_id)
-            )
+            # customer = (
+            #     Customer.objects
+            #     .prefetch_related('credit_applications', 'credit_scores')
+            #     .only("id", "document_number")
+            #     .get(id=customer_id)
+            # )
+
+            # 2️⃣ Fetch customer
+            try:
+                customer = (
+                    Customer.objects
+                    .prefetch_related('credit_applications', 'credit_scores')
+                    .only("id", "document_number")
+                    .get(id=customer_id)
+                )
+            except Customer.DoesNotExist:
+                return Response(
+                    {"status": "error", "message": "Customer not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
             # --------Get latest credit score (non-expired)----------
             credit_score = (
@@ -149,7 +172,17 @@ class AutoFinancePlanView(APIView):
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            monthly_income = get_customer_monthly_income(document_number)
+            # monthly_income = get_customer_monthly_income(document_number)
+            # 6️⃣ Fetch monthly income
+            try:
+                monthly_income = get_customer_monthly_income(customer.document_number)
+            except Exception as e:
+                logger.exception(f"Error fetching monthly income: {str(e)}")
+                return Response(
+                    {"status": "error", "message": "Failed to fetch monthly income."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            
             if monthly_income is None:
                 return Response(
                     {
@@ -197,15 +230,34 @@ class AutoFinancePlanView(APIView):
                     risk_tier="",
                 )
 
-            engine = AutoDecisionEngine(auto_plan)
-            engine_out=engine.run()
+            # engine = AutoDecisionEngine(auto_plan)
+            # engine_out=engine.run()
+            # 8️⃣ Run decision engine
+            try:
+                engine = AutoDecisionEngine(auto_plan)
+                engine_out = engine.run()
+            except Exception as e:
+                logger.exception(f"Error running decision engine: {str(e)}")
+                return Response(
+                    {"status": "error", "message": "Failed to run decision engine."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             # ---- Audit Logging ----
-            AuditLog.objects.create(
-                user=request.user,
-                action_type="CREATE_AUTO_FINANCE_PLAN",
-                customer=customer,
-            )
+            # AuditLog.objects.create(
+            #     user=request.user,
+            #     action_type="CREATE_AUTO_FINANCE_PLAN",
+            #     customer=customer,
+            # )
+            # 9️⃣ Audit log
+            try:
+                AuditLog.objects.create(
+                    user=request.user if request.user.is_authenticated else None,
+                    action_type="CREATE_AUTO_FINANCE_PLAN",
+                    customer=customer,
+                )
+            except Exception as e:
+                logger.warning(f"Audit log failed: {str(e)}")
 
             # ---- Success Response ----
             return Response(
