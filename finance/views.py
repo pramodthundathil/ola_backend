@@ -42,7 +42,7 @@ from drf_yasg.utils import swagger_auto_schema
 # Local Application Imports
 # ============================================================
 from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog,FinanceMultiple
-from store.models import Region
+from store.models import Region, Store
 from .utils.utils import get_device_price_with_cache
 from home.permissions import CanViewAdminFinanceDetails, CanViewSalesAdvisorFinance, CanViewStoreManagerFinance
 from customer.models import Customer, CreditApplication, CreditScore
@@ -421,12 +421,13 @@ class FinancePlanAPIView(APIView):
             finance_plan_data["created_by"] = request.user
             finance_plan_data["store"] = getattr(request.user, "store", None)
 
-            engine_input, created = FinancePlan.objects.create(
+            engine_input, created = FinancePlan.objects.get_or_create(
                 credit_application=finance_plan.credit_application,
                 created_by=request.user,
                 store=getattr(request.user, "store", None),
                 defaults=finance_plan_data
             )
+            
              # Mark AutoPlan as finalized
             finance_plan.has_finance_plan = True
             finance_plan.save(update_fields=["has_finance_plan"])         
@@ -473,6 +474,7 @@ class FinancePlanAPIView(APIView):
             return Response({
             "status": "success",
             "message": "Finance Plan created successfully.",
+            "New":created,
             "data": {
                 **serialized_data,
                 "device_details": device_info
@@ -2720,16 +2722,7 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
 
             pagination = FinancePlanPagination()
 
-            # Single customer complete details
-            if customer_id:
-                return self.get_customer_finance_details(
-                    customer_id,
-                    status_filter=status_filter,
-                    date_from=date_from,
-                    date_to=date_to
-                )
-
-            # List view
+            # Base queryset
             queryset = FinancePlan.objects.select_related(
                 "credit_application__customer",
                 "device",
@@ -2739,7 +2732,9 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
                 Prefetch("emi_schedule", queryset=EMISchedule.objects.order_by("due_date"))
             )
 
-            # Apply filters on FinancePlans
+            # Apply filters
+            if customer_id:
+                queryset = queryset.filter(credit_application__customer_id=customer_id)
             if store_id:
                 queryset = queryset.filter(store_id=store_id)
             if region_id:
@@ -2747,17 +2742,30 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
             if device_id:
                 queryset = queryset.filter(device_id=device_id)
             if status_filter:
-                queryset = queryset.filter(emi_schedules__status=status_filter.upper())
+                queryset = queryset.filter(emi_schedule__status=status_filter.upper())
             if date_from:
-                queryset = queryset.filter(emi_schedules__due_date__gte=date_from)
+                queryset = queryset.filter(emi_schedule__due_date__gte=date_from)
             if date_to:
-                queryset = queryset.filter(emi_schedules__due_date__lte=date_to)
+                queryset = queryset.filter(emi_schedule__due_date__lte=date_to)
+
             queryset = queryset.distinct()
 
-            # Pagination
-            paginated_data = pagination.paginate_queryset(queryset, request)
-            serializer = FinancePlanSerializer(paginated_data, many=True)
-            return pagination.get_paginated_response(serializer.data)
+            # If ANY filter is applied — or even if not — always return detailed view
+            paginated_qs = pagination.paginate_queryset(queryset, request)
+            detailed_data = []
+
+            for finance_plan in paginated_qs:
+                cust_id = finance_plan.credit_application.customer.id
+                customer_data = self.get_customer_finance_details(
+                    cust_id,
+                    status_filter=status_filter,
+                    date_from=date_from,
+                    date_to=date_to,
+                    return_response=False 
+                )
+                detailed_data.append(customer_data)
+
+            return pagination.get_paginated_response(detailed_data)
 
         except Exception as e:
             return Response(
@@ -2768,7 +2776,14 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
     # ---------------------------------------------------------------
     # Full Finance details for one customer with EMI filters
     # ---------------------------------------------------------------
-    def get_customer_finance_details(self, customer_id, status_filter=None, date_from=None, date_to=None):
+    def get_customer_finance_details(
+    self,
+    customer_id,
+    status_filter=None,
+    date_from=None,
+    date_to=None,
+    return_response=True,
+    ):
         try:
             finance_plan = get_object_or_404(
                 FinancePlan.objects.select_related(
@@ -2781,6 +2796,7 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
                 ),
                 credit_application__customer_id=customer_id
             )
+            customer = finance_plan.credit_application.customer
 
             # All EMIs
             emi_schedules = finance_plan.emi_schedule.all()
@@ -2801,7 +2817,7 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
             outstanding_balance = sum(emi.balance_remaining for emi in emi_schedules)
             overdue_total = overdue_emis.aggregate(total=Sum("installment_amount"))["total"] or 0
 
-            # Generate interest_details dynamically
+            # Interest details
             multiple = FinanceMultiple.objects.filter(
                 term_months=finance_plan.selected_term,
                 interval_days=finance_plan.installment_frequency_days,
@@ -2815,7 +2831,6 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
 
                 emi_count = getattr(finance_plan, "total_installments", None)
                 if not emi_count:
-                    # Calculate if not explicitly stored
                     emi_count = int(finance_plan.selected_term * 30 / finance_plan.installment_frequency_days)
 
                 emi_amount = total_payable / emi_count if emi_count else None
@@ -2833,8 +2848,17 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
             else:
                 interest_details = None
 
+            # Customer details
+            customer_details = {
+                "id": customer.id,
+                "name": f"{customer.first_name} {customer.last_name}",
+                "phone": customer.phone_number,
+                "email": customer.email,
+                }
+
             # Build response
             serializer_data = {
+                "customer": customer_details,
                 "finance_plan": finance_plan,
                 "emi_schedule": emi_schedules,
                 "overdue_details": {
@@ -2850,15 +2874,17 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
                 "paid_emis_count": emi_schedules.filter(status="PAID").count(),
                 "overdue_emis_count": overdue_emis.count(),
             }
-
             serializer = FinanceFullDetailsSerializer(serializer_data)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-
+            if return_response:
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            else:
+                return serializer.data
         except Exception as e:
-            return Response(
-                {"detail": f"Error fetching customer finance details: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            error_msg = {"detail": f"Error fetching customer finance details: {str(e)}"}
+            if return_response:
+                return Response(error_msg, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            else:
+                return error_msg 
 
 
 # ====================================================================
@@ -2869,9 +2895,7 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
     Finance details restricted to the Sales Advisor's region.
     Automatically injects region_id from authenticated user.
     """
-    #permission_classes = [CanViewSalesAdvisorFinance]
-    permission_classes = [AllowAny]
-
+    permission_classes = [CanViewSalesAdvisorFinance] 
 
     @swagger_auto_schema(
         operation_summary="Get Finance Details (Sales Advisor)",
@@ -2939,24 +2963,24 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
                 "status": request.query_params.get("status"),
                 "date_from": request.query_params.get("date_from"),
                 "date_to": request.query_params.get("date_to"),
-                "region_id": request_region_id,
+                "region_id": str(request_region_id),
             }
 
             # --- Create Audit Log ---
-            # AuditLog.objects.create(
-            #     user=user if user.is_authenticated else None,
-            #     action_type="COMPLETE_FINANCE_VIEWED",
-            #     description=(
-            #         f"Viewed {total_plans} finance records "
-            #         f"(Role=SALES_ADVISOR, Region={request_region_id})"
-            #     ),
-            #     metadata={
-            #         "filters": filters,
-            #         "total_records": total_plans,
-            #         "timestamp": str(timezone.now()),
-            #     },
-            #     ip_address=request.META.get("REMOTE_ADDR"),
-            # )
+            AuditLog.objects.create(
+                user=user if user.is_authenticated else None,
+                action_type="COMPLETE_FINANCE_VIEWED",
+                description=(
+                    f"Viewed {total_plans} finance records "
+                    f"(Role=sales_advisor, Region={request_region_id})"
+                ),
+                metadata={
+                    "filters": filters,
+                    "total_records": total_plans,
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
 
             return response
 
@@ -2983,11 +3007,220 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-  
-
 
 # ====================================================================
 # Get Complete Finance Details : Admin/Finance Manager/Global Manager
 # =====================================================================
-class FinanceCompleteDetailsStoreManagerAPIView(APIView):
-    pass
+class FinanceCompleteDetailsStoreManagerAPIView(FinanceCompleteDetailsAdminAPIView):
+    """
+    API for Store Manager to get COMPLETE Finance details for their own store(s).   
+    """
+    permission_classes = [CanViewStoreManagerFinance] 
+    @swagger_auto_schema(
+        operation_summary="Get complete Finance details (Store Manager)",
+        operation_description="""
+        Returns all finance details accessible to the Store Manager.
+        - Can view only finance plans belonging to their store(s).
+        - Supports same filters as admin: status, date range, etc.
+        """,
+        manual_parameters=[
+            openapi.Parameter("store_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                              description="Optional filter (must belong to this manager)"),
+            openapi.Parameter("device_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                              description="Filter by Device"),
+            openapi.Parameter("status", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                              description="Filter EMI status (PAID, PENDING, OVERDUE)"),
+            openapi.Parameter("date_from", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                              description="Filter emi due_date >= this date (YYYY-MM-DD)"),
+            openapi.Parameter("date_to", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                              description="Filter emi due_date <= this date (YYYY-MM-DD)"),
+        ],
+        tags=["Finance"]
+    )
+    def get_base_queryset(self, request):
+        user = request.user
+        manager_stores = Store.objects.filter(store_manager=user)
+        if not manager_stores.exists():
+            return Response({"detail": "No stores assigned to this manager."}, status=403)
+
+        return super().get_base_queryset(request).filter(store__in=manager_stores)
+    # def get(self, request):
+    #     try:
+    #         user = request.user
+    #         print(user)
+    #         store_id = request.query_params.get("store_id")
+    #         device_id = request.query_params.get("device_id")
+    #         status_filter = request.query_params.get("status")
+    #         date_from = request.query_params.get("date_from")
+    #         date_to = request.query_params.get("date_to")
+
+    #         pagination = FinancePlanPagination()
+
+    #         # Restrict store manager to their assigned stores
+    #         manager_stores = Store.objects.filter(store_manager=user)
+    #         print("*",manager_stores)
+    #         if not manager_stores.exists():
+    #             return Response({"detail": "No stores assigned to this manager."}, status=403)
+
+    #         # Base queryset
+    #         queryset = FinancePlan.objects.select_related(
+    #             "credit_application__customer",
+    #             "device",
+    #             "store",
+    #             "store__region"
+    #         ).prefetch_related(
+    #             Prefetch("emi_schedule", queryset=EMISchedule.objects.order_by("due_date"))
+    #         )
+
+    #         # Restrict by assigned stores
+    #         queryset = queryset.filter(store__in=manager_stores)
+
+    #         # Optional filters
+    #         if store_id:
+    #             queryset = queryset.filter(store_id=store_id, store__in=manager_stores)
+    #         if device_id:
+    #             queryset = queryset.filter(device_id=device_id)
+    #         if status_filter:
+    #             queryset = queryset.filter(emi_schedule__status=status_filter.upper())
+    #         if date_from:
+    #             queryset = queryset.filter(emi_schedule__due_date__gte=date_from)
+    #         if date_to:
+    #             queryset = queryset.filter(emi_schedule__due_date__lte=date_to)
+
+    #         queryset = queryset.distinct()
+
+    #         # Pagination
+    #         paginated_data = pagination.paginate_queryset(queryset, request)
+    #         serializer = FinancePlanSerializer(paginated_data, many=True)
+    #         return pagination.get_paginated_response(serializer.data)
+
+    #     except Exception as e:
+    #         return Response(
+    #             {"detail": f"Error fetching store manager finance data: {str(e)}"},
+    #             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    #         )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# class FinanceCompleteDetailsStoreManagerAPIView(FinanceCompleteDetailsAdminAPIView):
+#     """
+#     Finance details restricted to the Store_Manger's assigned store.
+#     Automatically injects store_id from authenticated user.
+#     """
+#     permission_classes = [CanViewStoreManagerFinance] 
+
+#     @swagger_auto_schema(
+#         operation_summary="Get Finance Details (Store Manager)",
+#         operation_description="""
+#         Returns full finance details automatically filtered based on the logged-in Store_Manger's assigned store.
+
+#         **Filters (optional):**
+#         - customer_id
+#         - store_id
+#         - device_id
+#         - status (PAID, PENDING, OVERDUE)
+#         - date_from (YYYY-MM-DD)
+#         - date_to (YYYY-MM-DD)
+#         """,
+#         manual_parameters=[
+#             openapi.Parameter('customer_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+#             openapi.Parameter('store_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+#             openapi.Parameter('device_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
+#             openapi.Parameter('status', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+#             openapi.Parameter('date_from', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+#             openapi.Parameter('date_to', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
+#         ],
+#         tags=["Finance"]
+#     )
+ 
+#     def get(self, request):
+#         try:
+#             user = request.user
+#             user_store = getattr(user, "store", None)
+
+#             if not user_store:
+#                 return Response(
+#                     {"detail": "Store not assigned to this Store Manager."},
+#                     status=status.HTTP_403_FORBIDDEN
+#                 )
+
+#             # Inject store_id into request query params
+#             request_store_id = user_store.id
+#             mutable_params = request.query_params.copy()
+#             mutable_params["store_id"] = request_store_id
+#             request._request.GET = mutable_params  # override original GET params
+#             logger.info(
+#                 f"Finance data requested by Store Manager ID={user.id}, Store={request_store_id}"
+#             )
+
+#             # Call parent view
+#             response = super().get(request)
+
+#             # ---- Extract summary counts from final response ----
+#             data = response.data
+#             total_plans = len(data.get("finance_plans", [])) if isinstance(data, dict) else 0
+
+#             # Extract filters from request
+#             filters = {
+#                 "customer_id": request.query_params.get("customer_id"),
+#                 "store_id": request.query_params.get("store_id"),
+#                 "device_id": request.query_params.get("device_id"),
+#                 "status": request.query_params.get("status"),
+#                 "date_from": request.query_params.get("date_from"),
+#                 "date_to": request.query_params.get("date_to"),
+#                 "store_id": request_store_id,
+#             }
+
+#             # --- Create Audit Log ---
+#             AuditLog.objects.create(
+#                 user=user if user.is_authenticated else None,
+#                 action_type="COMPLETE_FINANCE_VIEWED",
+#                 description=(
+#                     f"Viewed {total_plans} finance records "
+#                     f"(Role=sales_advisor, Region={request_store_id})"
+#                 ),
+#                 metadata={
+#                     "filters": filters,
+#                     "total_records": total_plans,
+#                     "timestamp": str(timezone.now()),
+#                 },
+#                 ip_address=request.META.get("REMOTE_ADDR"),
+#             )
+
+#             return response
+
+#         except Exception as e:
+#             logger.error(
+#                 f"Error in SalesAdvisorFinanceDetailsAPIView for user {request.user.id}: {str(e)}",
+#                 exc_info=True
+#             )
+
+#             # Audit the error also
+#             AuditLog.objects.create(
+#                 user=request.user if request.user.is_authenticated else None,
+#                 action_type="FINANCE_VIEW_ERROR",
+#                 description=f"Error occurred: {str(e)}",
+#                 metadata={
+#                     "filters": dict(request.query_params),
+#                     "timestamp": str(timezone.now()),
+#                 },
+#                 ip_address=request.META.get("REMOTE_ADDR"),
+#             )
+
+#             return Response(
+#                 {"detail": f"Failed to process request: {str(e)}"},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )   
