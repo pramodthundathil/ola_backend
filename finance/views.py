@@ -108,13 +108,15 @@ class AutoFinancePlanView(APIView):
             # -----Validate Input------------
             # serializer = AutoFinancePlanCreateSerializer(data=request.data)
             # serializer.is_valid(raise_exception=True)
-             # 1️⃣ Validate input
+
+    # 1️⃣ Validate input
             serializer = AutoFinancePlanCreateSerializer(data=request.data)
             if not serializer.is_valid():
                 return Response(
                     {"status": "error", "message": serializer.errors},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            
             
             customer_id = serializer.validated_data["customer_id"]
             
