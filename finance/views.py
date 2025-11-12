@@ -367,7 +367,7 @@ class FinancePlanAPIView(APIView):
             finance_plan_data["created_by"] = request.user
             finance_plan_data["store"] = getattr(request.user, "store", None)
 
-            engine_input, created = FinancePlan.objects.get_or_create(
+            engine_input, created = FinancePlan.objects.create(
                 credit_application=finance_plan.credit_application,
                 created_by=request.user,
                 store=getattr(request.user, "store", None),
@@ -672,14 +672,12 @@ class FinancePlanDetailAPIView(APIView):
                     "device__brand"
                 )
                 .prefetch_related("emi_schedule", "payments")
-            )
-
-            plan = get_object_or_404(finance_qs, id=plan_id)
+            )          
 
             # --------------------- Role-Based Access ---------------------
             if user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass
-            elif user_role == "sales_manager":
+            elif user_role == "store_manager":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
             elif user_role == "sales_advisor":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
@@ -688,6 +686,12 @@ class FinancePlanDetailAPIView(APIView):
             else:
                 # If the logged-in user is a customer
                 finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
+            plan = finance_qs.filter(id=plan_id).first()
+            if not plan:
+                return Response({
+                    "status": "error",
+                    "message": f"Finance Plan with ID={plan_id} not found."
+                }, status=status.HTTP_404_NOT_FOUND)
             serializer = FinancePlanSerializer(plan)
             masked_data = mask_sensitive_data(serializer.data, user_role)
 
@@ -695,7 +699,7 @@ class FinancePlanDetailAPIView(APIView):
             AuditLog.objects.create(
             user=user,
             action_type="FINANCE_PLAN_VIEWED", 
-            description=f"Viewed Finance Plan ID={id} by {user.username if user else 'Anonymous'}",
+            description=f"Viewed Finance Plan ID={plan_id} by {user.username if user else 'Anonymous'}",
             metadata={"role": user_role},
             ip_address=request.META.get("REMOTE_ADDR")
             )
@@ -1153,7 +1157,7 @@ class EMIScheduleAPIView(APIView):
     Retrieve EMI schedules with flexible filters & role-based access.
     Roles:
         - Admin / FinanceManager / GlobalManager -> Full access
-        - RegionalManager / SalesAdvisor -> Only for their region
+        - SalesAdvisor -> Only for their region
         - StoreManager -> Only EMIs in their store
         - SalesPerson -> Only EMIs created by them
         - Customer -> Only their own EMIs
@@ -1651,7 +1655,7 @@ class FinanceReportAPIView(APIView):
             )
 
             # ---------------- Role-Based Access ----------------
-            if user.is_superuser or user_role in ['admin', 'global_manager', 'financial_manager']:
+            if user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass  # Full access
             elif user_role == "sales_advisor":
                 if not getattr(user, "store", None) or not getattr(user.store, "region", None):
@@ -2673,12 +2677,12 @@ class FinanceCompleteDetailsAdminAPIView(APIView):
 
             # List view
             queryset = FinancePlan.objects.select_related(
-                "customer",
+                "credit_application__customer",
                 "device",
                 "store",
                 "store__region"
             ).prefetch_related(
-                Prefetch("emi_schedules", queryset=EMISchedule.objects.order_by("due_date"))
+                Prefetch("emi_schedule", queryset=EMISchedule.objects.order_by("due_date"))
             )
 
             # Apply filters on FinancePlans
@@ -2838,6 +2842,7 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
         ],
         tags=["Finance"]
     )
+ 
     def get(self, request):
         try:
             user = request.user
@@ -2848,6 +2853,7 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
                     status=403
                 )
             request_region_id = user_store.region_id
+            print(request_region_id)
             if not request_region_id:
                 logger.warning(f"User {user.id} attempted access without region assigned.")
                 return Response(
@@ -2858,6 +2864,7 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
             # Clone query params and add region_id
             mutable_params = request.query_params.copy()
             mutable_params["region_id"] = request_region_id
+            print(mutable_params["region_id"])
             request._request.GET = mutable_params
             logger.info(
                 f"Finance data requested by SalesAdvisor ID={user.id}, Region={request_region_id}"
@@ -2882,20 +2889,20 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
             }
 
             # --- Create Audit Log ---
-            AuditLog.objects.create(
-                user=user if user.is_authenticated else None,
-                action_type="COMPLETE_FINANCE_VIEWED",
-                description=(
-                    f"Viewed {total_plans} finance records "
-                    f"(Role=SALES_ADVISOR, Region={request_region_id})"
-                ),
-                metadata={
-                    "filters": filters,
-                    "total_records": total_plans,
-                    "timestamp": str(timezone.now()),
-                },
-                ip_address=request.META.get("REMOTE_ADDR"),
-            )
+            # AuditLog.objects.create(
+            #     user=user if user.is_authenticated else None,
+            #     action_type="COMPLETE_FINANCE_VIEWED",
+            #     description=(
+            #         f"Viewed {total_plans} finance records "
+            #         f"(Role=SALES_ADVISOR, Region={request_region_id})"
+            #     ),
+            #     metadata={
+            #         "filters": filters,
+            #         "total_records": total_plans,
+            #         "timestamp": str(timezone.now()),
+            #     },
+            #     ip_address=request.META.get("REMOTE_ADDR"),
+            # )
 
             return response
 

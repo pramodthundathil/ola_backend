@@ -7,7 +7,7 @@ def mask_sensitive_data(data, role):
         return [mask_sensitive_data(d, role) for d in data]
     elif isinstance(data, dict):
         masked = data.copy()
-        if role not in ["Admin", "FinanceManager", "GlobalManager"]:
+        if role not in ['admin', 'global_manager', 'financial_manager']:
             if "customer" in masked:
                 customer = masked["customer"]
                 customer["name"] = customer.get("name", "")[:2] + "****"
