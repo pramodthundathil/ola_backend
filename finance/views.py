@@ -23,7 +23,7 @@ from django.utils.dateparse import parse_date
 from django.db.models import Count, Sum, Avg, Q, Prefetch
 from django.db.models.functions import TruncWeek, TruncMonth
 from django.utils import timezone
-from django.db import models 
+from django.db import models, DatabaseError
 from django.core.cache import cache
 
 # ============================================================
@@ -399,7 +399,7 @@ class FinancePlanAPIView(APIView):
                 "credit_score": finance_plan.credit_score,
                 "apc_score": finance_plan.apc_score,
                 "risk_tier": finance_plan.risk_tier or "",
-                "customer_monthly_income": finance_plan.customer_monthly_income,
+                "customer_monthly_income": 3000,
                 "payment_capacity_factor": finance_plan.payment_capacity_factor or Decimal("0.00"),
                 "maximum_allowed_installment": finance_plan.maximum_allowed_installment or Decimal("0.00"),
                 "minimum_down_payment_percentage": finance_plan.minimum_down_payment_percentage or Decimal("0.00"),
@@ -419,13 +419,15 @@ class FinancePlanAPIView(APIView):
                 "installment_to_income_ratio": Decimal("0.00"),
             }            
             finance_plan_data["created_by"] = request.user
-            finance_plan_data["store"] = getattr(request.user, "store", None)
+            finance_plan_data["store"] = getattr(request.user, "store", None)           
 
-            engine_input, created = FinancePlan.objects.get_or_create(
+            engine_input, created = FinancePlan.objects.update_or_create(
                 credit_application=finance_plan.credit_application,
-                created_by=request.user,
-                store=getattr(request.user, "store", None),
-                defaults=finance_plan_data
+                defaults={
+                    **finance_plan_data,
+                    "created_by": request.user,
+                    "store": getattr(request.user, "store", None),
+                }
             )
             
              # Mark AutoPlan as finalized
@@ -3009,7 +3011,7 @@ class FinanceCompleteDetailsSalesAdvisorAPIView(FinanceCompleteDetailsAdminAPIVi
 
 
 # ====================================================================
-# Get Complete Finance Details : Admin/Finance Manager/Global Manager
+# Get Complete Finance Details : Store Manager
 # =====================================================================
 class FinanceCompleteDetailsStoreManagerAPIView(FinanceCompleteDetailsAdminAPIView):
     """
@@ -3037,190 +3039,86 @@ class FinanceCompleteDetailsStoreManagerAPIView(FinanceCompleteDetailsAdminAPIVi
         ],
         tags=["Finance"]
     )
+    # def get_base_queryset(self, request):
+    #     user = request.user
+    #     manager_stores = Store.objects.filter(store_manager=user)
+    #     if not manager_stores.exists():
+    #         return Response({"detail": "No stores assigned to this manager."}, status=403)
+
+    #     return super().get_base_queryset(request).filter(store__in=manager_stores)
+    
     def get_base_queryset(self, request):
         user = request.user
-        manager_stores = Store.objects.filter(store_manager=user)
-        if not manager_stores.exists():
-            return Response({"detail": "No stores assigned to this manager."}, status=403)
+        try:
+            manager_stores = Store.objects.filter(store_manager=user)
+            if not manager_stores.exists():
+                logger.warning(f"User {user.id} attempted access without assigned stores.")
+                
+                # --- Audit Log Entry ---
+                AuditLog.objects.create(
+                    user=user if user.is_authenticated else None,
+                    action_type="STORE_ACCESS_DENIED",
+                    description="Attempted to access finance data without assigned stores.",
+                    metadata={
+                        "filters": dict(request.query_params),
+                        "timestamp": str(timezone.now()),
+                    },
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+                
+                return Response(
+                    {"detail": "No stores assigned to this manager."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
-        return super().get_base_queryset(request).filter(store__in=manager_stores)
-    # def get(self, request):
-    #     try:
-    #         user = request.user
-    #         print(user)
-    #         store_id = request.query_params.get("store_id")
-    #         device_id = request.query_params.get("device_id")
-    #         status_filter = request.query_params.get("status")
-    #         date_from = request.query_params.get("date_from")
-    #         date_to = request.query_params.get("date_to")
+            base_qs = super().get_base_queryset(request)
+            filtered_qs = base_qs.filter(store__in=manager_stores)
 
-    #         pagination = FinancePlanPagination()
+            logger.info(
+                f"StoreManager ID={user.id} accessing {filtered_qs.count()} finance records "
+                f"from {manager_stores.count()} assigned store(s)."
+            )
 
-    #         # Restrict store manager to their assigned stores
-    #         manager_stores = Store.objects.filter(store_manager=user)
-    #         print("*",manager_stores)
-    #         if not manager_stores.exists():
-    #             return Response({"detail": "No stores assigned to this manager."}, status=403)
+            # --- Audit Log Entry ---
+            AuditLog.objects.create(
+                user=user if user.is_authenticated else None,
+                action_type="STORE_FINANCE_VIEWED",
+                description=f"Viewed finance records from {manager_stores.count()} store(s).",
+                metadata={
+                    "store_ids": list(manager_stores.values_list('id', flat=True)),
+                    "filters": dict(request.query_params),
+                    "total_records": filtered_qs.count(),
+                    "timestamp": str(timezone.now()),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
 
-    #         # Base queryset
-    #         queryset = FinancePlan.objects.select_related(
-    #             "credit_application__customer",
-    #             "device",
-    #             "store",
-    #             "store__region"
-    #         ).prefetch_related(
-    #             Prefetch("emi_schedule", queryset=EMISchedule.objects.order_by("due_date"))
-    #         )
+            return filtered_qs
 
-    #         # Restrict by assigned stores
-    #         queryset = queryset.filter(store__in=manager_stores)
+        except DatabaseError as e:
+            logger.exception(f"Database error while fetching store finance data for user {user.id}: {e}")
+            AuditLog.objects.create(
+                user=user if user.is_authenticated else None,
+                action_type="STORE_FINANCE_DB_ERROR",
+                description=str(e),
+                metadata={"timestamp": str(timezone.now())},
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+            return Response(
+                {"detail": "Database error occurred while fetching finance data."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-    #         # Optional filters
-    #         if store_id:
-    #             queryset = queryset.filter(store_id=store_id, store__in=manager_stores)
-    #         if device_id:
-    #             queryset = queryset.filter(device_id=device_id)
-    #         if status_filter:
-    #             queryset = queryset.filter(emi_schedule__status=status_filter.upper())
-    #         if date_from:
-    #             queryset = queryset.filter(emi_schedule__due_date__gte=date_from)
-    #         if date_to:
-    #             queryset = queryset.filter(emi_schedule__due_date__lte=date_to)
-
-    #         queryset = queryset.distinct()
-
-    #         # Pagination
-    #         paginated_data = pagination.paginate_queryset(queryset, request)
-    #         serializer = FinancePlanSerializer(paginated_data, many=True)
-    #         return pagination.get_paginated_response(serializer.data)
-
-    #     except Exception as e:
-    #         return Response(
-    #             {"detail": f"Error fetching store manager finance data: {str(e)}"},
-    #             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-    #         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# class FinanceCompleteDetailsStoreManagerAPIView(FinanceCompleteDetailsAdminAPIView):
-#     """
-#     Finance details restricted to the Store_Manger's assigned store.
-#     Automatically injects store_id from authenticated user.
-#     """
-#     permission_classes = [CanViewStoreManagerFinance] 
-
-#     @swagger_auto_schema(
-#         operation_summary="Get Finance Details (Store Manager)",
-#         operation_description="""
-#         Returns full finance details automatically filtered based on the logged-in Store_Manger's assigned store.
-
-#         **Filters (optional):**
-#         - customer_id
-#         - store_id
-#         - device_id
-#         - status (PAID, PENDING, OVERDUE)
-#         - date_from (YYYY-MM-DD)
-#         - date_to (YYYY-MM-DD)
-#         """,
-#         manual_parameters=[
-#             openapi.Parameter('customer_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
-#             openapi.Parameter('store_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
-#             openapi.Parameter('device_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, required=False),
-#             openapi.Parameter('status', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
-#             openapi.Parameter('date_from', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
-#             openapi.Parameter('date_to', openapi.IN_QUERY, type=openapi.TYPE_STRING, required=False),
-#         ],
-#         tags=["Finance"]
-#     )
- 
-#     def get(self, request):
-#         try:
-#             user = request.user
-#             user_store = getattr(user, "store", None)
-
-#             if not user_store:
-#                 return Response(
-#                     {"detail": "Store not assigned to this Store Manager."},
-#                     status=status.HTTP_403_FORBIDDEN
-#                 )
-
-#             # Inject store_id into request query params
-#             request_store_id = user_store.id
-#             mutable_params = request.query_params.copy()
-#             mutable_params["store_id"] = request_store_id
-#             request._request.GET = mutable_params  # override original GET params
-#             logger.info(
-#                 f"Finance data requested by Store Manager ID={user.id}, Store={request_store_id}"
-#             )
-
-#             # Call parent view
-#             response = super().get(request)
-
-#             # ---- Extract summary counts from final response ----
-#             data = response.data
-#             total_plans = len(data.get("finance_plans", [])) if isinstance(data, dict) else 0
-
-#             # Extract filters from request
-#             filters = {
-#                 "customer_id": request.query_params.get("customer_id"),
-#                 "store_id": request.query_params.get("store_id"),
-#                 "device_id": request.query_params.get("device_id"),
-#                 "status": request.query_params.get("status"),
-#                 "date_from": request.query_params.get("date_from"),
-#                 "date_to": request.query_params.get("date_to"),
-#                 "store_id": request_store_id,
-#             }
-
-#             # --- Create Audit Log ---
-#             AuditLog.objects.create(
-#                 user=user if user.is_authenticated else None,
-#                 action_type="COMPLETE_FINANCE_VIEWED",
-#                 description=(
-#                     f"Viewed {total_plans} finance records "
-#                     f"(Role=sales_advisor, Region={request_store_id})"
-#                 ),
-#                 metadata={
-#                     "filters": filters,
-#                     "total_records": total_plans,
-#                     "timestamp": str(timezone.now()),
-#                 },
-#                 ip_address=request.META.get("REMOTE_ADDR"),
-#             )
-
-#             return response
-
-#         except Exception as e:
-#             logger.error(
-#                 f"Error in SalesAdvisorFinanceDetailsAPIView for user {request.user.id}: {str(e)}",
-#                 exc_info=True
-#             )
-
-#             # Audit the error also
-#             AuditLog.objects.create(
-#                 user=request.user if request.user.is_authenticated else None,
-#                 action_type="FINANCE_VIEW_ERROR",
-#                 description=f"Error occurred: {str(e)}",
-#                 metadata={
-#                     "filters": dict(request.query_params),
-#                     "timestamp": str(timezone.now()),
-#                 },
-#                 ip_address=request.META.get("REMOTE_ADDR"),
-#             )
-
-#             return Response(
-#                 {"detail": f"Failed to process request: {str(e)}"},
-#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-#             )   
+        except Exception as e:
+            logger.exception(f"Unexpected error for StoreManager {user.id}: {e}")
+            AuditLog.objects.create(
+                user=user if user.is_authenticated else None,
+                action_type="STORE_FINANCE_ERROR",
+                description=str(e),
+                metadata={"timestamp": str(timezone.now())},
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+            return Response(
+                {"detail": f"Unexpected error occurred: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
