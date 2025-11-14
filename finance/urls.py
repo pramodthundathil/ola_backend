@@ -1,5 +1,6 @@
 from django.urls import path
 from .import views
+from .import yappy_dummy_api_views
 
 urlpatterns = [  
     #Finance PLan
@@ -36,5 +37,9 @@ urlpatterns = [
     path('full-details/admin/',views.FinanceCompleteDetailsAdminAPIView.as_view(),name='finance-full-details'),
     path('full-details/sales-advisor/',views.FinanceCompleteDetailsSalesAdvisorAPIView.as_view(),name='finance-full-details-sales-manager'),
     path('full-details/store-manager/',views.FinanceCompleteDetailsStoreManagerAPIView.as_view(),name='finance-full-details-store-manager'),
+    
+    # YAPPY PAYMENT
+    path("yappy/create-order/", views.YappyCreateOrderView.as_view(), name="yappy-create-order"),
+    path("yappy/ipn/", views.YappyIPNView.as_view(), name="yappy-ipn"),
 
 ]

@@ -7,6 +7,10 @@ from decimal import Decimal
 from datetime import timedelta, datetime
 from collections import defaultdict
 from decimal import Decimal
+import base64, hmac, hashlib
+import time
+import requests
+
 
 # swagger settup
 from drf_yasg.utils import swagger_auto_schema
@@ -3122,3 +3126,341 @@ class FinanceCompleteDetailsStoreManagerAPIView(FinanceCompleteDetailsAdminAPIVi
                 {"detail": f"Unexpected error occurred: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+
+
+# ================================================================================
+#  YAPPY ONLINE PAYMENT VIEW
+# ================================================================================
+
+
+class YappyCreateOrderView(APIView):
+    permission_classes=[]
+
+    @swagger_auto_schema(
+        tags=["yappy"],
+
+        operation_summary="Create Yappy Payment Order",
+        operation_description="""
+                        Starts a Yappy payment by:
+
+                        1. Validating merchant with Yappy  
+                        2. Creating a payment order  
+                        3. Returning token + transactionId + documentName to frontend  
+
+                        Frontend must send the EMI ID of the installment the user wants to pay.
+                        """,
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["emi_id"],
+            properties={
+                "emi_id": openapi.Schema(
+                    type=openapi.TYPE_INTEGER,
+                    description="ID of the EMI installment to pay"
+                )
+            },
+        ),
+        responses={
+            200: openapi.Response(
+                description="Yappy order created successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "status": openapi.Schema(type=openapi.TYPE_STRING),
+                        "message": openapi.Schema(type=openapi.TYPE_STRING),
+                        "data": openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                "transactionId": openapi.Schema(type=openapi.TYPE_STRING),
+                                "token": openapi.Schema(type=openapi.TYPE_STRING),
+                                "documentName": openapi.Schema(type=openapi.TYPE_STRING),
+                            }
+                        )
+                    }
+                )
+            ),
+            400: "Invalid input",
+            500: "Yappy API error",
+        }
+    )
+    def post(self, request):
+        """ 
+        1. call validate API
+        2. call payment-wc API
+        3. return transactionId, token, documentName 
+        """
+
+        # -----------------------------------------
+        #  CALL YAPPY VALIDATE API
+        # -----------------------------------------
+        urlDomain=settings.urlDomain
+
+        # url = "https://apipagosbg.bgeneral.cloud/payments/validate/merchant"
+        url="http://127.0.0.1:8000/v2/finance/mock-yappy/payments/validate/merchant/"
+        payload = {
+            "merchantId": settings.YAPPY_MERCHANT_ID,
+            "urlDomain": urlDomain
+        }
+        headers = {
+            "Content-Type": "application/json"
+        }
+        try:
+            yappy_response = requests.post(url, json=payload, headers=headers, timeout=10)
+            yappy_response.raise_for_status()
+            data = yappy_response.json()
+
+        except requests.exceptions.Timeout:
+            return Response({
+                "status": "error",
+                "message": "Yappy validate API timeout"
+            }, status=504)  
+        
+        except requests.exceptions.HTTPError:
+            return Response({
+                "status": "error",
+                "message": "Yappy validate API returned error",
+                "yappy_response": yappy_response.text
+            }, status=502)  
+        
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": "Unexpected error calling Yappy validate API",
+                "error": str(e)
+            }, status=500)
+        
+        # extract auth token
+        auth_token = data["body"]["token"]
+
+        # ----------------------------------------------------------
+        #  CREATE ORDER (transactionId, token, documentName)
+        # ----------------------------------------------------------
+
+        # payment_url = "https://apipagosbg.bgeneral.cloud/payments/payment-wc"
+        payment_url="http://127.0.0.1:8000//v2/finance/mock-yappy/payments/payment-wc/"
+
+        try:
+            emi_Schedule=EMISchedule.objects.get(id=request.data.get("emi_id"))
+        except EMISchedule.DoesNotExist:
+            return Response({
+                "status": "error",
+                "message": "Invalid emi_id. EMI schedule not found."
+            }, status=404)    
+        
+        oreder_id=emi_Schedule.id
+        emi_amount = str(emi_Schedule.balance_remaining)
+
+        try:
+            customer_fullphone_number=emi_Schedule.finance_plan.credit_application.customer.phone_number
+            customer_phone_number = customer_fullphone_number.replace("+507", "").replace(" ", "")
+        except Exception:
+            return Response({
+                "status": "error",
+                "message": "Customer phone number not found."
+            }, status=400)
+        
+        # ipnUrl="http://127.0.0.1:8000//v2/finance/yappy/ipn/" 
+
+        order_payload = {
+            "merchantId": settings.YAPPY_MERCHANT_ID,
+            "orderId": oreder_id,
+            "domain": urlDomain,
+            "paymentDate": int(time.time()),
+            "aliasYappy": customer_phone_number,   
+            "ipnUrl":settings.YAPPY_IPN_URL,
+            "discount": "0.00",
+            "taxes": "0.00",
+            "subtotal": emi_amount,
+            "total": emi_amount
+        }
+        order_headers = {
+            "Authorization": auth_token,
+            "Content-Type": "application/json"
+        }
+
+        try:
+            payment_response  = requests.post(
+                payment_url, 
+                json=order_payload, 
+                headers=order_headers,
+                timeout=10
+                )
+            payment_response.raise_for_status()
+            order_res = payment_response.json()
+        except requests.exceptions.Timeout:
+            return Response({
+                "status": "error",
+                "message": "Yappy payment API timeout"
+            }, status=504) 
+        except requests.exceptions.HTTPError:
+            return Response({
+                "status": "error",
+                "message": "Yappy payment API returned error",
+                "yappy_response": payment_response.text
+            }, status=502)   
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": "Unexpected error calling Yappy payment API",
+                "error": str(e)
+            }, status=500)
+
+        # extract values to send to frontend
+        transactionId  = order_res["body"]["transactionId"]
+        token          = order_res["body"]["token"]
+        documentName   = order_res["body"]["documentName"]
+
+        # return these 3 to frontend
+        return Response({
+            "status": "success",
+            "message": "Yappy order created successfully.",
+            "data": {
+                "transactionId": transactionId,
+                "token": token,
+                "documentName": documentName
+            }
+        }, status=status.HTTP_200_OK)
+
+
+# ================================================================================
+#  YAPPY ONLINE PAYMENT IPN VIEW
+# ================================================================================
+
+class YappyIPNView(APIView):
+    permission_classes=[]
+
+    @swagger_auto_schema(
+            tags=["yappy"],
+        operation_summary="Yappy IPN Webhook",
+        operation_description="""
+            Yappy sends payment status to this endpoint.
+
+            Yappy will send:
+            - orderId: EMI installment ID  
+            - status: E (Executed), R (Rejected), C (Cancelled), X (Expired)  
+            - hash: Security hash to validate authenticity  
+            - domain: Registered domain  
+
+            Flow:
+            1. Validate hash using Secret Key  
+            2. Update EMI status in DB  
+            3. Return success response
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                "orderId", openapi.IN_QUERY,
+                type=openapi.TYPE_STRING,
+                description="Order/EMI ID sent by Yappy"
+            ),
+            openapi.Parameter(
+                "status", openapi.IN_QUERY,
+                type=openapi.TYPE_STRING,
+                description="Yappy payment status: E, R, C, X"
+            ),
+            openapi.Parameter(
+                "hash", openapi.IN_QUERY,
+                type=openapi.TYPE_STRING,
+                description="Hash from Yappy"
+            ),
+            openapi.Parameter(
+                "domain", openapi.IN_QUERY,
+                type=openapi.TYPE_STRING,
+                description="Domain registered for Yappy"
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                description="IPN processed successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "success": openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        "message": openapi.Schema(type=openapi.TYPE_STRING),
+                    }
+                )
+            ),
+            400: "Invalid hash",
+            404: "EMI not found",
+        }
+    )
+    def get(self, request):
+
+        # ------------------------------------------
+        # 1. Get data from Yappy
+        # ------------------------------------------
+        orderId = request.GET.get("orderId")
+        status_value = request.GET.get("status")
+        hash_received = request.GET.get("hash") 
+        domain = request.GET.get("domain")
+        # ------------------------------------------
+        # 2. Decode secret key
+        # ------------------------------------------
+        decoded = base64.b64decode(settings.YAPPY_SECRET_KEY).decode("utf-8")
+        secret_key = decoded.split(".")[0]
+        # secret_key = settings.YAPPY_SECRET_KEY
+
+        # ------------------------------------------
+        # 3. Create expected hash
+        # ------------------------------------------
+        data = f"{orderId}{status_value}{domain}"
+        expected_hash = hmac.new(
+            secret_key.encode(),
+            data.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        # ------------------------------------------
+        # 4. Compare both hashes
+        # ------------------------------------------
+        if expected_hash != hash_received:
+            return Response({"success": False, "message": "Invalid hash"}, status=400)
+        # ------------------------------------------
+        # 5. Hash valid → update EMI status
+        # ------------------------------------------
+
+        try:
+            emi = EMISchedule.objects.get(id=orderId)
+        except EMISchedule.DoesNotExist:
+            return Response({"success": False, "message": "EMI not found"}, status=404)
+        
+        # Yappy status codes:
+        # E = Executed (Paid)
+        # R = Rejected
+        # C = Cancelled
+        # X = Expired
+
+        today = timezone.now().date()
+                
+        if status_value == "E":
+            emi.status = "PAID"
+            emi.amount_paid = emi.installment_amount
+            emi.balance_remaining = 0
+            emi.paid_date = timezone.now().date()
+
+            if today > emi.due_date:
+                emi.days_overdue = (today - emi.due_date).days
+
+        elif status_value in ["R", "C", "X"]:
+            # Do NOTHING: EMI remains unpaid
+            pass
+
+        emi.save()
+
+        PaymentRecord.objects.create(
+            finance_plan = emi.finance_plan,
+            emi_schedule = emi,
+            payment_type = "EMI",
+            payment_method = "YAPPY",
+            payment_amount = emi.installment_amount,
+            payment_date = timezone.now(),
+            payment_status = "COMPLETED",
+            transaction_reference = request.GET.get("transactionId", None),
+            notes = f"Yappy payment for EMI #{emi.installment_number}",
+            metadata = request.GET.dict()
+        )
+
+        return Response({"success": True})
+
+
+
