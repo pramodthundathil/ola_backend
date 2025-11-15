@@ -165,7 +165,7 @@ class CustomerManagementView(APIView):
                 customer = (
                     queryset
                     .prefetch_related(
-                        "credit_applications__finance_plan__device__credithistory"
+                        "credit_applications__finance_plan__device"
                     )
                     .filter(id=customer_id)
                     .first()
@@ -197,7 +197,7 @@ class CustomerManagementView(APIView):
                 )
 
             queryset = queryset.prefetch_related(
-                "credit_applications__finance_plan__device__credithistory"
+                "credit_applications__finance_plan__device"
             )
 
             paginator = self.pagination_class()
