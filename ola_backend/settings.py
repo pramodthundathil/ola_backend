@@ -40,6 +40,13 @@ SMS_API_URL = 'https://api.labsmobile.com/json/send'
 WESTERN_USER = os.getenv("WESTERN_USER")
 WESTERN_PASS = os.getenv("WESTERN_PASS")
 
+# yappy
+YAPPY_MERCHANT_ID = os.getenv("YAPPY_MERCHANT_ID")
+YAPPY_SECRET_KEY = os.getenv("YAPPY_SECRET_KEY")
+YAPPY_IPN_URL = os.getenv("YAPPY_IPN_URL")
+urlDomain = os.getenv("urlDomain")
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
