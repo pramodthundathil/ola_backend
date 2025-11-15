@@ -1,6 +1,5 @@
 from django.urls import path
 from .import views
-from .import yappy_dummy_api_views
 
 urlpatterns = [  
     #Finance PLan
@@ -41,5 +40,8 @@ urlpatterns = [
     # YAPPY PAYMENT
     path("yappy/create-order/", views.YappyCreateOrderView.as_view(), name="yappy-create-order"),
     path("yappy/ipn/", views.YappyIPNView.as_view(), name="yappy-ipn"),
+
+
+
 
 ]
