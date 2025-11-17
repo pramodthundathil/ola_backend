@@ -359,7 +359,13 @@ class FinancePlanAPIView(APIView):
     )
 
     def post(self, request):
-        try:            
+        
+        try:    
+            if request.user.role not in ["salesperson", "store_manager"]:
+                return Response({
+                    "status": "error",
+                    "message": "only salesperson and store_manager create finance plans."
+                }, status=status.HTTP_403_FORBIDDEN)        
             # --------------------------------------------------------
             # Validate input
             # --------------------------------------------------------
@@ -630,9 +636,10 @@ class FinancePlanAPIView(APIView):
                     credit_application__customer__created_by__store=user.store
                 )
             elif user_role == "sales_advisor":
-                finance_qs = finance_qs.filter(
-                    credit_application__customer__created_by__store__region=user.store.region
-                )
+                # finance_qs = finance_qs.filter(
+                #     credit_application__customer__created_by__store__region=user.store.region
+                # )
+                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__sales_advisor=request.user)
             elif user_role == "salesperson":
                 finance_qs = finance_qs.filter(
                     credit_application__customer__created_by=user
@@ -742,7 +749,9 @@ class FinancePlanDetailAPIView(APIView):
             elif user_role == "store_manager":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
             elif user_role == "sales_advisor":
-                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
+                # finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
+                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__sales_advisor=request.user)
+
             elif user_role == "salesperson":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
             else:
