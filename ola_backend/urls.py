@@ -72,7 +72,8 @@ urlpatterns = [
     path('v1/customer/', include('customer.urls')),
     path('v2/store/', include('store.urls')),
     path('v2/finance/', include('finance.urls')),
-    path("device/enrolment/",include('customer_device.urls'))
+    path("device/enrolment/",include('customer_device.urls')),
+    path('v3/analytics/', include('analytics.urls')),
     # path('api/v1/reports/', include('reports.urls')),
 ]
 
