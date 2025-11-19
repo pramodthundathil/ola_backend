@@ -147,7 +147,7 @@ class GeographicAnalytics(models.Model):
         db_table = 'geographic_analytics'
         ordering = ['-date', '-sales_count']
 
-        
+
 class FPDAnalytics(models.Model):
     """
     First Payment Default (FPD) Analytics
@@ -244,7 +244,7 @@ class ClerkPerformanceAnalytics(models.Model):
     """
     date = models.DateField(db_index=True)
     salesperson = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='clerk_performance')
-    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='clerk_performance')
+    store = models.ForeignKey(Store, on_delete=models.SET_NULL, related_name='clerk_performance', null = True,blank = True )
     
     # Sales Metrics
     total_sales = models.IntegerField(default=0)
