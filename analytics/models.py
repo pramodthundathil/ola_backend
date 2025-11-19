@@ -154,10 +154,15 @@ class FPDAnalytics(models.Model):
     date = models.DateField(db_index=True)
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='fpd_analytics')
     
-    # FPD Metrics
+    # FPD Metrics - Rates
     fpd_3_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
     fpd_7_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
     fpd_15_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    
+    # FPD Metrics - Counts (NEW FIELDS)
+    fpd_3_count = models.IntegerField(default=0, help_text="Number of contracts in FPD-3")
+    fpd_7_count = models.IntegerField(default=0, help_text="Number of contracts in FPD-7")
+    fpd_15_count = models.IntegerField(default=0, help_text="Number of contracts in FPD-15")
     
     # Early Inactive
     early_inactive_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
@@ -176,7 +181,7 @@ class FPDAnalytics(models.Model):
         ordering = ['-date']
         unique_together = ['date', 'store']
 
-
+        
 class FinancialMetrics(models.Model):
     """
     Financial performance metrics
