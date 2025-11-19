@@ -72,7 +72,7 @@ class CustomerPagination(PageNumberPagination):
     max_page_size = 100
 
 
-
+from .utils import CustomerFilter
 class CustomerManagementView(APIView):
         
         permission_classes=[IsAuthenticatedUser]
@@ -88,6 +88,7 @@ class CustomerManagementView(APIView):
             GET /api/customers/manage/ → Retrieve all customers (paginated)
             GET /api/customers/manage/?search=<query> → Search by first name, last name, email, or document number (paginated)
             GET /api/customers/manage/?id=<id> → Retrieve single customer by ID
+            
             """,
             tags=["customer"],
             manual_parameters=[
@@ -110,6 +111,37 @@ class CustomerManagementView(APIView):
                     'page_size', openapi.IN_QUERY,
                     description='Number of results per page',
                     type=openapi.TYPE_INTEGER
+                ),
+                openapi.Parameter(
+                    'status',
+                    openapi.IN_QUERY,
+                    description='Customer status',
+                    type=openapi.TYPE_STRING,
+                    enum=["ACTIVE", "INACTIVE", "BLOCKED"]
+                ),
+                openapi.Parameter(
+                    'document_type',
+                    openapi.IN_QUERY,
+                    description='Filter by document type',
+                    type=openapi.TYPE_STRING,
+                    enum=['PANAMA_ID', 'PASSPORT', 'FOREIGNER_ID'],
+                ),
+
+                openapi.Parameter('created_by', openapi.IN_QUERY, description='Created by user ID', type=openapi.TYPE_INTEGER),
+
+                openapi.Parameter('created_from', openapi.IN_QUERY, description='Created from (YYYY-MM-DD)', type=openapi.TYPE_STRING),
+                openapi.Parameter('created_to', openapi.IN_QUERY, description='Created to (YYYY-MM-DD)', type=openapi.TYPE_STRING),
+
+                openapi.Parameter('region_id', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+                openapi.Parameter('province_id', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+                openapi.Parameter('district_id', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+                openapi.Parameter('corregimiento_id', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+
+                openapi.Parameter(
+                    'has_application',
+                    openapi.IN_QUERY,
+                    description='Filter customers having credit applications (1 or 0)',
+                    type=openapi.TYPE_STRING
                 ),
             ],
             responses={
@@ -153,29 +185,33 @@ class CustomerManagementView(APIView):
             - GET /api/customers/ → list (paginated)
             - GET /api/customers/?search=John → search by name/email/document
             - GET /api/customers/?id=<id> → get individual customer
+            - GET customers using all filters
             """
+
             customer_id = request.query_params.get('id')
             search_query = request.query_params.get('search', '').strip()
 
-            # Base queryset
-            queryset = Customer.objects.all().order_by('-created_at')
+            # ------------ 3D FETCHING (optimized) ------------
 
-            # ---- SINGLE CUSTOMER ----
-            if customer_id:
-                customer = (
-                    queryset
-                    .prefetch_related(
-                        "credit_applications__finance_plan__device"
-                    )
-                    .filter(id=customer_id)
-                    .first()
+            queryset = (
+                Customer.objects
+                .select_related("created_by")                    
+                .prefetch_related(                              
+                    "credit_applications__finance_plan__store",
+                    "credit_applications__finance_plan__device"
                 )
+                .order_by("-created_at")
+            )
+
+            # ------------ SINGLE CUSTOMER ------------
+
+            if customer_id:
+                customer = queryset.filter(id=customer_id).first()
 
                 if not customer:
                     return Response({
                         "status": "error",
                         "message": "Customer not found",
-                        "data": None
                     }, status=status.HTTP_404_NOT_FOUND)
 
                 serializer = CustomerSerializer(customer)
@@ -183,10 +219,13 @@ class CustomerManagementView(APIView):
                     "status": "success",
                     "message": "Data fetched successfully.",
                     "data": serializer.data
-                }, status=status.HTTP_200_OK)
+                })
 
+            # ---- APPLY FILTERS ----
+            queryset = CustomerFilter.apply_filters(queryset, request.query_params)
 
-            # ---- LIST / SEARCH ----
+            # ------------ SEARCH ------------
+
             if search_query:
                 queryset = queryset.filter(
                     Q(first_name__icontains=search_query) |
@@ -195,10 +234,8 @@ class CustomerManagementView(APIView):
                     Q(document_number__icontains=search_query) |
                     Q(phone_number__icontains=search_query)
                 )
-
-            queryset = queryset.prefetch_related(
-                "credit_applications__finance_plan__device"
-            )
+            
+            # ------------ PAGINATION ------------
 
             paginator = self.pagination_class()
             paginated_qs = paginator.paginate_queryset(queryset, request)
@@ -212,6 +249,7 @@ class CustomerManagementView(APIView):
                 "message": "Customer list fetched successfully.",
                 "data": paginated_data
             }, status=status.HTTP_200_OK)
+        
         
         # ---------POST METHOD-----------------
 
