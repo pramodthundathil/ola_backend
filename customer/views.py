@@ -1322,7 +1322,33 @@ class CustomerIncomeFileView(APIView):
         df.to_sql('income_data', conn, index=False, if_exists='replace')
         conn.close()
 
+   # -----------GET METHOD-------------
+
+    @swagger_auto_schema(
+        operation_summary="Retrieve uploaded income Excel file",
+        tags=["customer-income"],
+    )
+    def get(self, request):
+        existing_file = CustomerIncomeFile.objects.first()
+
+        if not existing_file:
+            return Response({
+                "status": "error",
+                "message": "No income sheet found.",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CustomerIncomeFileSerializer(existing_file)
+
+        return Response({
+            "status": "success",
+            "message": "Income sheet retrieved successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
     # ---------- POST METHOD ------------
+    
 
     @swagger_auto_schema(
         operation_summary="Upload customer income Excel file",
