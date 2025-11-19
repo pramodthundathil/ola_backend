@@ -14,7 +14,17 @@ from .views import (
     FinancialMetricsViewSet,
     ClerkPerformanceViewSet,
     HourlyAnalyticsViewSet,
-    DashboardOverviewViewSet
+    DashboardOverviewViewSet,
+
+    DailyFinanceMetricsViewSet,
+    BrandPerformanceMetricsViewSet,
+    ProductPerformanceMetricsViewSet,
+    SalespersonPerformanceViewSet,
+    PaymentCollectionMetricsViewSet,
+    RiskAnalysisMetricsViewSet,
+    GeographicPerformanceMetricsViewSet,
+    DeviceLockPerformanceMetricsViewSet,
+    DashboardViewSet
 )
 
 router = DefaultRouter()
@@ -29,7 +39,19 @@ router.register(r'fpd', FPDAnalyticsViewSet, basename='fpd-analytics')
 router.register(r'financial', FinancialMetricsViewSet, basename='financial-analytics')
 router.register(r'performance', ClerkPerformanceViewSet, basename='performance-analytics')
 router.register(r'hourly', HourlyAnalyticsViewSet, basename='hourly-analytics')
-router.register(r'dashboard', DashboardOverviewViewSet, basename='dashboard-overview')
+router.register(r'dashboard-overview', DashboardOverviewViewSet, basename='dashboard-overview')
+
+
+router.register(r'charts/daily-metrics', DailyFinanceMetricsViewSet, basename='daily-metrics')
+router.register(r'charts/brand-performance', BrandPerformanceMetricsViewSet, basename='brand-performance')
+router.register(r'charts/product-performance', ProductPerformanceMetricsViewSet, basename='product-performance')
+router.register(r'charts/salesperson-performance', SalespersonPerformanceViewSet, basename='salesperson-performance')
+router.register(r'charts/payment-collection', PaymentCollectionMetricsViewSet, basename='payment-collection')
+router.register(r'charts/risk-analysis', RiskAnalysisMetricsViewSet, basename='risk-analysis')
+router.register(r'charts/geographic-performance', GeographicPerformanceMetricsViewSet, basename='geographic-performance')
+router.register(r'charts/device-lock-performance', DeviceLockPerformanceMetricsViewSet, basename='device-lock-performance')
+router.register(r'charts/dashboard', DashboardViewSet, basename='dashboard')
+
 
 urlpatterns = [
     path('', include(router.urls)),

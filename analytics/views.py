@@ -652,3 +652,633 @@ class DashboardOverviewViewSet(viewsets.ViewSet):
         elif user.role == 'salesperson':
             return queryset.filter(salesperson=user)
         return queryset.none()
+    
+
+# chart analytics 
+
+
+"""
+Django REST Framework Views for Analytics Dashboard
+File: analytics/views.py
+
+Role-Based Access Control:
+- Admin/Global Manager/Financial Manager: All data across country
+- Sales Advisor: Data for their assigned region
+- Store Manager: Data for their store only
+- Salesperson: Only their own sales data
+"""
+
+from rest_framework import viewsets, status, filters
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Sum, Avg, Count, Q, F
+from django.utils import timezone
+from datetime import timedelta, datetime
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+
+from .models import (
+    DailyFinanceMetrics,
+    BrandPerformanceMetrics,
+    ProductPerformanceMetrics,
+    SalespersonPerformance,
+    PaymentCollectionMetrics,
+    RiskAnalysisMetrics,
+    GeographicPerformanceMetrics,
+    DeviceLockPerformanceMetrics,
+    MetricsAggregator
+)
+from .serializers import (
+    DailyFinanceMetricsSerializer,
+    BrandPerformanceMetricsSerializer,
+    ProductPerformanceMetricsSerializer,
+    SalespersonPerformanceSerializer,
+    PaymentCollectionMetricsSerializer,
+    RiskAnalysisMetricsSerializer,
+    GeographicPerformanceMetricsSerializer,
+    DeviceLockPerformanceMetricsSerializer,
+    DashboardSummarySerializer,
+    AnalyticsFilterSerializer
+)
+from finance.models import FinancePlan, PaymentRecord, EMISchedule
+from customer.models import Customer, CreditApplication
+from store.models import Store
+
+
+# ========================================
+# BASE ANALYTICS VIEWSET WITH RBAC
+# ========================================
+
+class BaseAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Base viewset with role-based access control
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.OrderingFilter]
+    
+    def get_queryset(self):
+        """
+        Filter queryset based on user role
+        """
+        user = self.request.user
+        queryset = super().get_queryset()
+        
+        # Admin, Global Manager, Financial Manager: See all data
+        if user.role in ['admin', 'global_manager', 'financial_manager']:
+            return queryset
+        
+        # Sales Advisor: See region data
+        elif user.role == 'sales_advisor':
+            # Get stores assigned to this sales advisor
+            advised_stores = Store.objects.filter(sales_advisor=user)
+            return queryset.filter(
+                Q(store__in=advised_stores) | Q(region__stores__in=advised_stores)
+            ).distinct()
+        
+        # Store Manager: See their store data only
+        elif user.role == 'store_manager':
+            return queryset.filter(store=user.store)
+        
+        # Salesperson: See only their own data
+        elif user.role == 'salesperson':
+            return queryset.filter(created_by=user)
+        
+        # Default: No access
+        return queryset.none()
+    
+    def apply_date_filters(self, queryset):
+        """
+        Apply date range filters from query params
+        """
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
+        if start_date:
+            queryset = queryset.filter(date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(date__lte=end_date)
+        
+        return queryset
+
+
+# ========================================
+# DAILY FINANCE METRICS VIEWSET
+# ========================================
+
+class DailyFinanceMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for daily finance metrics
+    
+    Provides aggregated daily financial data with filtering and time-series analysis
+    """
+    queryset = DailyFinanceMetrics.objects.all()
+    serializer_class = DailyFinanceMetricsSerializer
+    ordering_fields = ['date', 'total_sales_value', 'approval_rate']
+    
+    @swagger_auto_schema(
+        operation_description="Get daily finance metrics with date range filtering",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
+            openapi.Parameter('store_id', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='uuid'),
+            openapi.Parameter('region_id', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='uuid'),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        # Additional filters
+        store_id = request.query_params.get('store_id')
+        region_id = request.query_params.get('region_id')
+        
+        if store_id:
+            queryset = queryset.filter(store_id=store_id)
+        if region_id:
+            queryset = queryset.filter(region_id=region_id)
+        
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @swagger_auto_schema(
+        operation_description="Get time-series trend data for charts",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, required=True, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, required=True, type=openapi.TYPE_STRING),
+            openapi.Parameter('granularity', openapi.IN_QUERY, type=openapi.TYPE_STRING, 
+                            enum=['day', 'week', 'month'], default='day'),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def trend(self, request):
+        """
+        Get trend data for time-series charts
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        granularity = request.query_params.get('granularity', 'day')
+        
+        # Aggregate based on granularity
+        if granularity == 'week':
+            # Group by week
+            trend_data = queryset.extra(
+                select={'week': 'EXTRACT(WEEK FROM date)'}
+            ).values('week').annotate(
+                total_sales=Sum('total_sales_value'),
+                total_applications=Sum('total_applications'),
+                avg_approval_rate=Avg('approval_rate')
+            ).order_by('week')
+        elif granularity == 'month':
+            # Group by month
+            trend_data = queryset.extra(
+                select={'month': 'EXTRACT(MONTH FROM date)'}
+            ).values('month').annotate(
+                total_sales=Sum('total_sales_value'),
+                total_applications=Sum('total_applications'),
+                avg_approval_rate=Avg('approval_rate')
+            ).order_by('month')
+        else:
+            # Daily
+            trend_data = queryset.values('date').annotate(
+                total_sales=Sum('total_sales_value'),
+                total_applications=Sum('total_applications'),
+                avg_approval_rate=Avg('approval_rate')
+            ).order_by('date')
+        
+        return Response(list(trend_data))
+    
+    @swagger_auto_schema(
+        operation_description="Get summary KPIs for dashboard",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, required=True, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, required=True, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """
+        Get aggregated summary KPIs
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        summary = queryset.aggregate(
+            total_applications=Sum('total_applications'),
+            total_approved=Sum('approved_applications'),
+            total_sales=Sum('total_sales_value'),
+            total_financed=Sum('total_financed_amount'),
+            avg_ticket_size=Avg('average_ticket_size'),
+            avg_approval_rate=Avg('approval_rate'),
+            unique_customers=Sum('unique_customers'),
+            tier_a=Sum('tier_a_count'),
+            tier_b=Sum('tier_b_count'),
+            tier_c=Sum('tier_c_count'),
+            tier_d=Sum('tier_d_count'),
+        )
+        
+        return Response(summary)
+
+
+# ========================================
+# BRAND PERFORMANCE VIEWSET
+# ========================================
+
+class BrandPerformanceMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for brand performance metrics
+    """
+    queryset = BrandPerformanceMetrics.objects.select_related('brand', 'store', 'region')
+    serializer_class = BrandPerformanceMetricsSerializer
+    ordering_fields = ['date', 'total_revenue', 'total_units_sold']
+    
+    @swagger_auto_schema(
+        operation_description="Get top performing brands",
+        manual_parameters=[
+            openapi.Parameter('limit', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, default=10),
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def top_brands(self, request):
+        """
+        Get top performing brands by revenue
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        limit = int(request.query_params.get('limit', 10))
+        
+        top_brands = queryset.values('brand__name').annotate(
+            total_revenue=Sum('total_revenue'),
+            total_units=Sum('total_units_sold')
+        ).order_by('-total_revenue')[:limit]
+        
+        return Response(list(top_brands))
+
+
+# ========================================
+# PRODUCT PERFORMANCE VIEWSET
+# ========================================
+
+class ProductPerformanceMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for product performance metrics
+    """
+    queryset = ProductPerformanceMetrics.objects.select_related('product', 'store', 'region')
+    serializer_class = ProductPerformanceMetricsSerializer
+    ordering_fields = ['date', 'revenue', 'units_sold']
+    
+    @swagger_auto_schema(
+        operation_description="Get top selling products",
+        manual_parameters=[
+            openapi.Parameter('limit', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, default=10),
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def top_products(self, request):
+        """
+        Get top selling products by units sold
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        limit = int(request.query_params.get('limit', 10))
+        
+        top_products = queryset.values(
+            'product__ola_code',
+            'product__model_name',
+            'product__brand__name'
+        ).annotate(
+            total_units=Sum('units_sold'),
+            total_revenue=Sum('revenue')
+        ).order_by('-total_units')[:limit]
+        
+        return Response(list(top_products))
+
+
+# ========================================
+# SALESPERSON PERFORMANCE VIEWSET
+# ========================================
+
+class SalespersonPerformanceViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for salesperson performance metrics
+    """
+    queryset = SalespersonPerformance.objects.select_related('salesperson', 'store')
+    serializer_class = SalespersonPerformanceSerializer
+    ordering_fields = ['date', 'total_sales', 'approval_rate']
+    
+    @swagger_auto_schema(
+        operation_description="Get salesperson leaderboard",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('metric', openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                            enum=['sales', 'applications', 'approval_rate'], default='sales'),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def leaderboard(self, request):
+        """
+        Get salesperson leaderboard
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        metric = request.query_params.get('metric', 'sales')
+        
+        if metric == 'applications':
+            order_by = '-applications_created'
+            aggregate_field = 'applications_created'
+        elif metric == 'approval_rate':
+            order_by = '-approval_rate'
+            aggregate_field = 'approval_rate'
+        else:
+            order_by = '-total_sales'
+            aggregate_field = 'total_sales'
+        
+        leaderboard = queryset.values(
+            'salesperson__first_name',
+            'salesperson__last_name',
+            'salesperson__email',
+            'store__name'
+        ).annotate(
+            total_metric=Sum(aggregate_field) if metric != 'approval_rate' else Avg(aggregate_field)
+        ).order_by(order_by)[:20]
+        
+        return Response(list(leaderboard))
+
+
+# ========================================
+# PAYMENT COLLECTION VIEWSET
+# ========================================
+
+class PaymentCollectionMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for payment collection metrics
+    """
+    queryset = PaymentCollectionMetrics.objects.all()
+    serializer_class = PaymentCollectionMetricsSerializer
+    ordering_fields = ['date', 'collection_rate', 'total_collected']
+    
+    @swagger_auto_schema(
+        operation_description="Get payment method distribution",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def payment_methods(self, request):
+        """
+        Get distribution of payment methods
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        payment_methods = queryset.aggregate(
+            cash=Sum('cash_collected'),
+            yappy=Sum('yappy_collected'),
+            punto_pago=Sum('punto_pago_collected'),
+            western_union=Sum('western_union_collected'),
+            bank_transfer=Sum('bank_transfer_collected'),
+        )
+        
+        return Response(payment_methods)
+    
+    @swagger_auto_schema(
+        operation_description="Get delinquency analysis",
+    )
+    @action(detail=False, methods=['get'])
+    def delinquency(self, request):
+        """
+        Get delinquency aging analysis
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        delinquency = queryset.aggregate(
+            current_overdue=Sum('accounts_overdue'),
+            days_30=Sum('accounts_30_days_overdue'),
+            days_60=Sum('accounts_60_days_overdue'),
+            days_90_plus=Sum('accounts_90_days_plus_overdue'),
+            total_overdue_amount=Sum('total_overdue'),
+        )
+        
+        return Response(delinquency)
+
+
+# ========================================
+# RISK ANALYSIS VIEWSET
+# ========================================
+
+class RiskAnalysisMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for risk analysis metrics
+    """
+    queryset = RiskAnalysisMetrics.objects.all()
+    serializer_class = RiskAnalysisMetricsSerializer
+    ordering_fields = ['date', 'default_rate', 'total_portfolio_value']
+    
+    @swagger_auto_schema(
+        operation_description="Get risk tier distribution",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def tier_distribution(self, request):
+        """
+        Get distribution across risk tiers
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        distribution = queryset.values('risk_tier').annotate(
+            total_accounts=Sum('total_accounts'),
+            total_value=Sum('total_portfolio_value'),
+            avg_default_rate=Avg('default_rate')
+        ).order_by('risk_tier')
+        
+        return Response(list(distribution))
+
+
+# ========================================
+# GEOGRAPHIC PERFORMANCE VIEWSET
+# ========================================
+
+class GeographicPerformanceMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for geographic performance metrics
+    """
+    queryset = GeographicPerformanceMetrics.objects.select_related('region', 'province', 'district')
+    serializer_class = GeographicPerformanceMetricsSerializer
+    ordering_fields = ['date', 'total_sales', 'approval_rate']
+    
+    @swagger_auto_schema(
+        operation_description="Get regional performance comparison",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def regional_comparison(self, request):
+        """
+        Compare performance across regions
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        comparison = queryset.values('region__name').annotate(
+            total_sales=Sum('total_sales'),
+            total_applications=Sum('total_applications'),
+            avg_approval_rate=Avg('approval_rate'),
+            active_stores=Sum('active_stores')
+        ).order_by('-total_sales')
+        
+        return Response(list(comparison))
+
+
+# ========================================
+# DEVICE LOCK PERFORMANCE VIEWSET
+# ========================================
+
+class DeviceLockPerformanceMetricsViewSet(BaseAnalyticsViewSet):
+    """
+    ViewSet for device lock performance metrics
+    """
+    queryset = DeviceLockPerformanceMetrics.objects.all()
+    serializer_class = DeviceLockPerformanceMetricsSerializer
+    ordering_fields = ['date', 'devices_enrolled', 'enrollment_success_rate']
+    
+    @swagger_auto_schema(
+        operation_description="Get lock system comparison",
+    )
+    @action(detail=False, methods=['get'])
+    def system_comparison(self, request):
+        """
+        Compare performance across lock systems
+        """
+        queryset = self.get_queryset()
+        queryset = self.apply_date_filters(queryset)
+        
+        comparison = queryset.values('lock_system').annotate(
+            total_enrolled=Sum('devices_enrolled'),
+            total_locked=Sum('devices_locked'),
+            avg_success_rate=Avg('enrollment_success_rate')
+        ).order_by('lock_system')
+        
+        return Response(list(comparison))
+
+
+# ========================================
+# COMPREHENSIVE DASHBOARD VIEWSET
+# ========================================
+
+class DashboardViewSet(viewsets.ViewSet):
+    """
+    Comprehensive dashboard with all metrics combined
+    """
+    permission_classes = [IsAuthenticated]
+    
+    @swagger_auto_schema(
+        operation_description="Get complete dashboard with all metrics",
+        manual_parameters=[
+            openapi.Parameter('start_date', openapi.IN_QUERY, required=True, type=openapi.TYPE_STRING),
+            openapi.Parameter('end_date', openapi.IN_QUERY, required=True, type=openapi.TYPE_STRING),
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def overview(self, request):
+        """
+        Get complete dashboard overview
+        """
+        user = request.user
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        
+        if not start_date or not end_date:
+            return Response({
+                'error': 'start_date and end_date are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Build base filters based on user role
+        base_filters = {'created_at__date__gte': start_date, 'created_at__date__lte': end_date}
+        
+        if user.role == 'salesperson':
+            base_filters['created_by'] = user
+        elif user.role == 'store_manager':
+            base_filters['store'] = user.store
+        elif user.role == 'sales_advisor':
+            advised_stores = Store.objects.filter(sales_advisor=user)
+            base_filters['store__in'] = advised_stores
+        
+        # Aggregate metrics
+        finance_plans = FinancePlan.objects.filter(**base_filters)
+        
+        dashboard_data = {
+            'date_range': {'start': start_date, 'end': end_date},
+            'summary': {
+                'total_applications': finance_plans.count(),
+                'total_sales': finance_plans.aggregate(Sum('device_price'))['device_price__sum'] or 0,
+                'total_financed': finance_plans.aggregate(Sum('amount_to_finance'))['amount_to_finance__sum'] or 0,
+                'avg_ticket_size': finance_plans.aggregate(Avg('device_price'))['device_price__avg'] or 0,
+                'approval_rate': self._calculate_approval_rate(finance_plans),
+            },
+            'risk_distribution': self._get_risk_distribution(finance_plans),
+            'sales_trend': self._get_sales_trend(finance_plans, start_date, end_date),
+            'top_brands': self._get_top_brands(finance_plans),
+            'top_products': self._get_top_products(finance_plans),
+        }
+        
+        return Response(dashboard_data)
+    
+    def _calculate_approval_rate(self, queryset):
+        total = queryset.count()
+        approved = queryset.filter(conditions_met=True).count()
+        return (approved / total * 100) if total > 0 else 0
+    
+    def _get_risk_distribution(self, queryset):
+        return {
+            'tier_a': queryset.filter(risk_tier='TIER_A').count(),
+            'tier_b': queryset.filter(risk_tier='TIER_B').count(),
+            'tier_c': queryset.filter(risk_tier='TIER_C').count(),
+            'tier_d': queryset.filter(risk_tier='TIER_D').count(),
+        }
+    
+    def _get_sales_trend(self, queryset, start_date, end_date):
+        return list(queryset.extra(
+            select={'date': 'DATE(created_at)'}
+        ).values('date').annotate(
+            sales=Sum('device_price'),
+            count=Count('id')
+        ).order_by('date'))
+    
+    def _get_top_brands(self, queryset):
+        return list(queryset.values(
+            'device__brand__name'
+        ).annotate(
+            units=Count('id'),
+            revenue=Sum('device_price')
+        ).order_by('-revenue')[:10])
+    
+    def _get_top_products(self, queryset):
+        return list(queryset.values(
+            'device__ola_code',
+            'device__model_name'
+        ).annotate(
+            units=Count('id'),
+            revenue=Sum('device_price')
+        ).order_by('-units')[:10])
