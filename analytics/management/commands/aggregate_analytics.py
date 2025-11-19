@@ -336,7 +336,7 @@ class Command(BaseCommand):
                 count += 1
         
         self.stdout.write(f"    ✓ Created/updated {count} device records")
-        
+
     # ========================================
     # BRAND ANALYTICS
     # ========================================
@@ -405,7 +405,7 @@ class Command(BaseCommand):
         ).annotate(
             sales_count=Count('id'),
             total_amount=Sum('device_price'),
-            avg_amount=Avg('device_price')
+            avg_amount=Avg('device_price')  # Calculate average
         )
         
         count = 0
@@ -419,13 +419,12 @@ class Command(BaseCommand):
                     defaults={
                         'sales_count': geo_data['sales_count'],
                         'total_amount': geo_data['total_amount'] or Decimal('0.00'),
-                        'avg_amount': geo_data['avg_amount'] or Decimal('0.00')
+                        'avg_amount': geo_data['avg_amount'] or Decimal('0.00')  # Now included
                     }
                 )
                 count += 1
         
         self.stdout.write(f"    ✓ Created/updated {count} geographic records")
-    
     # ========================================
     # FPD ANALYTICS
     # ========================================

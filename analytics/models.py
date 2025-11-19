@@ -138,6 +138,7 @@ class GeographicAnalytics(models.Model):
     
     sales_count = models.IntegerField(default=0)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    avg_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))  # ADD THIS
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -146,7 +147,7 @@ class GeographicAnalytics(models.Model):
         db_table = 'geographic_analytics'
         ordering = ['-date', '-sales_count']
 
-
+        
 class FPDAnalytics(models.Model):
     """
     First Payment Default (FPD) Analytics
