@@ -293,6 +293,7 @@ class Command(BaseCommand):
     # DEVICE ANALYTICS
     # ========================================
     
+   
     def aggregate_device_analytics(self, date, force=False):
         """Aggregate device enrollment by lock type"""
         self.stdout.write("  📱 Aggregating device analytics...")
@@ -307,11 +308,13 @@ class Command(BaseCommand):
             )
             
             if devices.exists():
-                # Count by lock system
+                # Count by lock system - MATCH THE MODEL FIELDS
                 base_android = devices.filter(locking_system='NUOVOPAY').count()
-                base_android_frp = devices.filter(locking_system='BASEANDROID_FRP').count()
-                knox = devices.filter(locking_system='KNOX').count()
+                android_dlc = devices.filter(locking_system='ANDROID_DLC').count()
+                kpe = devices.filter(locking_system='KPE').count()
                 kg = devices.filter(locking_system='KG').count()
+                knox = devices.filter(locking_system='KNOX').count()
+                base_android_frp = devices.filter(locking_system='BASEANDROID_FRP').count()
                 access = devices.filter(locking_system='ACCESS').count()
                 
                 total = devices.count()
@@ -321,9 +324,11 @@ class Command(BaseCommand):
                     store=store,
                     defaults={
                         'lock_base_android': base_android,
-                        'lock_base_android_frp': base_android_frp,
-                        'lock_knox': knox,
+                        'lock_android_dlc': android_dlc,
+                        'lock_kpe': kpe,
                         'lock_kg': kg,
+                        'lock_knox': knox,  # Now this field exists
+                        'lock_base_android_frp': base_android_frp,
                         'lock_access': access,
                         'total_devices_enrolled': total
                     }
@@ -331,7 +336,7 @@ class Command(BaseCommand):
                 count += 1
         
         self.stdout.write(f"    ✓ Created/updated {count} device records")
-    
+        
     # ========================================
     # BRAND ANALYTICS
     # ========================================
@@ -1324,7 +1329,6 @@ class Command(BaseCommand):
                 count += 1
         
         self.stdout.write(f"    ✓ Created/updated {count} device lock performance records")
-
 
 # ========================================
 # HELPER COMMAND FOR TESTING

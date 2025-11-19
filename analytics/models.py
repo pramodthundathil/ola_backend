@@ -85,6 +85,7 @@ class DeviceEnrollmentAnalytics(models.Model):
     lock_android_dlc = models.IntegerField(default=0)
     lock_kpe = models.IntegerField(default=0)
     lock_kg = models.IntegerField(default=0)
+    lock_knox = models.IntegerField(default=0)  # ADD THIS FIELD
     lock_base_android_frp = models.IntegerField(default=0)
     lock_access = models.IntegerField(default=0)
     
@@ -98,7 +99,6 @@ class DeviceEnrollmentAnalytics(models.Model):
         db_table = 'device_enrollment_analytics'
         ordering = ['-date']
         unique_together = ['date', 'store']
-
 
 class BrandModelAnalytics(models.Model):
     """
