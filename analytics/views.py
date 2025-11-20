@@ -347,13 +347,19 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             )
             
             # Get models for this brand
-            models = brand_queryset.values('model_name').annotate(
+            models = brand_queryset.values(
+                'device_id', 
+                'device__name',
+                'model_name'
+            ).annotate(
                 sales_count=Sum('sales_count'),
                 total_amount=Sum('total_amount')
             ).order_by('-sales_count')
             
             models_list = [
                 {
+                    "device_id": model['device_id'],
+                    "device_name": model['device__name'],
                     "model_name": model['model_name'],
                     "units_sold": model['sales_count'],
                     "sales_amount": float(model['total_amount'])
@@ -362,6 +368,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             ]
             
             response_data.append({
+                'brand_id': brand_id,
                 'brand': brand_name,
                 'summary': {
                     'total_units_sold': totals['total_sales_count'] or 0,
@@ -496,7 +503,9 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         
         # Device-wise breakdown
         device_breakdown = queryset.values(
-            'device_id', 'model_name'
+            'device_id', 
+            'device__name',
+            'model_name'
         ).annotate(
             sales_count=Sum('sales_count'),
             total_amount=Sum('total_amount')
@@ -538,6 +547,8 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         # Format models list
         models_list = [
             {
+                "device_id": device['device_id'],
+                "device_name": device['device__name'],
                 "model_name": device['model_name'],
                 "units_sold": device['sales_count'],
                 "sales_amount": float(device['total_amount'])
@@ -887,9 +898,8 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             else:
                 model['avg_amount'] = Decimal('0.00')
         
-        return Response(top_models_list)
-    
-    
+        return Response(top_models_list)   
+
 class GeographicAnalyticsViewSet(BaseAnalyticsViewSet):
     """
     API endpoints for geographic sales analytics
