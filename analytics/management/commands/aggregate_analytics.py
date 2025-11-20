@@ -341,7 +341,7 @@ class Command(BaseCommand):
     # BRAND ANALYTICS
     # ========================================
     
-    # Updated aggregation function
+# Updated aggregation function
     def aggregate_brand_analytics(self, date, force=False):
         """Aggregate sales by brand and model"""
         self.stdout.write("  🏷️  Aggregating brand/model analytics...")
@@ -383,7 +383,7 @@ class Command(BaseCommand):
                     )
                     count += 1
         
-            self.stdout.write(f"    ✓ Created/updated {count} brand/model records")
+        self.stdout.write(f"    ✓ Created/updated {count} brand/model records")
     # ========================================
     # GEOGRAPHIC ANALYTICS
     # ========================================

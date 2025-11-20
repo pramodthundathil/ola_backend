@@ -433,19 +433,31 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         totals = queryset.aggregate(
             total_sales_count=Sum('sales_count'),
             total_revenue=Sum('total_amount'),
-            avg_sale_amount=Avg('total_amount'),
             total_stores=Count('store', distinct=True),
             total_devices=Count('device', distinct=True)
         )
+        
+        # Calculate average manually
+        if totals['total_sales_count'] and totals['total_sales_count'] > 0:
+            totals['avg_sale_amount'] = totals['total_revenue'] / totals['total_sales_count']
+        else:
+            totals['avg_sale_amount'] = Decimal('0.00')
         
         # Device-wise breakdown
         device_breakdown = queryset.values(
             'device_id', 'model_name'
         ).annotate(
             sales_count=Sum('sales_count'),
-            total_amount=Sum('total_amount'),
-            avg_amount=Avg('total_amount')
+            total_amount=Sum('total_amount')
         ).order_by('-sales_count')
+        
+        # Add average calculation to each device
+        device_breakdown_list = list(device_breakdown)
+        for device in device_breakdown_list:
+            if device['sales_count'] > 0:
+                device['avg_amount'] = device['total_amount'] / device['sales_count']
+            else:
+                device['avg_amount'] = Decimal('0.00')
         
         # Store-wise breakdown
         store_breakdown = queryset.values(
@@ -472,7 +484,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         return Response({
             'brand_id': brand_id,
             'totals': totals,
-            'device_breakdown': list(device_breakdown),
+            'device_breakdown': device_breakdown_list,
             'store_breakdown': list(store_breakdown),
             'chart_data': {
                 'time_series': list(time_series),
@@ -601,18 +613,30 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         totals = queryset.aggregate(
             total_sales_count=Sum('sales_count'),
             total_revenue=Sum('total_amount'),
-            avg_sale_amount=Avg('total_amount'),
             total_stores=Count('store', distinct=True)
         )
+        
+        # Calculate average manually
+        if totals['total_sales_count'] and totals['total_sales_count'] > 0:
+            totals['avg_sale_amount'] = totals['total_revenue'] / totals['total_sales_count']
+        else:
+            totals['avg_sale_amount'] = Decimal('0.00')
         
         # Store-wise breakdown
         store_breakdown = queryset.values(
             'store_id', 'store__name'
         ).annotate(
             sales_count=Sum('sales_count'),
-            total_amount=Sum('total_amount'),
-            avg_amount=Avg('total_amount')
+            total_amount=Sum('total_amount')
         ).order_by('-sales_count')
+        
+        # Add average calculation to each store
+        store_breakdown_list = list(store_breakdown)
+        for store in store_breakdown_list:
+            if store['sales_count'] > 0:
+                store['avg_amount'] = store['total_amount'] / store['sales_count']
+            else:
+                store['avg_amount'] = Decimal('0.00')
         
         # Time series data for charts (daily)
         time_series = queryset.values('date').annotate(
@@ -631,7 +655,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         return Response({
             'device_id': device_id,
             'totals': totals,
-            'store_breakdown': list(store_breakdown),
+            'store_breakdown': store_breakdown_list,
             'chart_data': {
                 'time_series': list(time_series),
                 'store_time_series': list(store_time_series)
@@ -704,11 +728,18 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         
         top_brands = queryset.values('brand_id', 'brand_name').annotate(
             total_sales=Sum('sales_count'),
-            total_amount=Sum('total_amount'),
-            avg_amount=Avg('total_amount')
+            total_amount=Sum('total_amount')
         ).order_by('-total_sales')[:limit]
         
-        return Response(list(top_brands))
+        # Add average calculation
+        top_brands_list = list(top_brands)
+        for brand in top_brands_list:
+            if brand['total_sales'] > 0:
+                brand['avg_amount'] = brand['total_amount'] / brand['total_sales']
+            else:
+                brand['avg_amount'] = Decimal('0.00')
+        
+        return Response(top_brands_list)
     
     @swagger_auto_schema(
         operation_summary="Get top performing device models",
@@ -782,13 +813,20 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             'device_id', 'brand_id', 'brand_name', 'model_name'
         ).annotate(
             total_sales=Sum('sales_count'),
-            total_amount=Sum('total_amount'),
-            avg_amount=Avg('total_amount')
+            total_amount=Sum('total_amount')
         ).order_by('-total_sales')[:limit]
         
-        return Response(list(top_models))
-
-
+        # Add average calculation
+        top_models_list = list(top_models)
+        for model in top_models_list:
+            if model['total_sales'] > 0:
+                model['avg_amount'] = model['total_amount'] / model['total_sales']
+            else:
+                model['avg_amount'] = Decimal('0.00')
+        
+        return Response(top_models_list)
+    
+    
 class GeographicAnalyticsViewSet(BaseAnalyticsViewSet):
     """
     API endpoints for geographic sales analytics
