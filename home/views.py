@@ -8,6 +8,8 @@ from django.core.mail import send_mail, EmailMessage  # Sending emails
 from django.template.loader import render_to_string  # Rendering templates to string
 from django.contrib.sites.shortcuts import get_current_site  # Getting current site info
 from django.contrib.auth import get_user_model  # Getting the user model
+from django.db.models import Q
+
 
 # Third-party imports
 from rest_framework.decorators import api_view, permission_classes, action  # DRF view decorators
@@ -22,6 +24,8 @@ from rest_framework.views import APIView  # DRF APIView base class
 from rest_framework.exceptions import PermissionDenied  # DRF exception for permission denied
 
 from social_django.utils import load_strategy  # Social auth strategy loader
+
+from customer.views import CustomerPagination as UserPagination
 
 # Standard library imports
 import json  # JSON encoding and decoding
@@ -763,19 +767,95 @@ def change_password(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+
 # ==================== ADMIN USER MANAGEMENT ====================
 class ListAllUsers(ListAPIView):
     """
     Admin can view list of all registered users.
     """
     permission_classes = [IsAdminUser]
-    queryset = User.objects.all()
     serializer_class = UserSerializer
+    pagination_class = UserPagination
+
+    def get_queryset(self):
+        queryset = User.objects.all()
+        # ---- Manual Filters ----
+        role = self.request.query_params.get('role')
+        store = self.request.query_params.get('store')
+        is_active = self.request.query_params.get('is_active')
+        is_verified = self.request.query_params.get('is_verified')
+        commission_rate = self.request.query_params.get('commission_rate')
+        search = self.request.query_params.get('search')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+
+        if role:
+            queryset = queryset.filter(role=role)
+
+        if store:
+            queryset = queryset.filter(store_id=store)
+
+        if is_active in ['true', 'false']:
+            queryset = queryset.filter(is_active=(is_active == 'true'))
+
+        if is_verified in ['true', 'false']:
+            queryset = queryset.filter(is_verified=(is_verified == 'true'))
+
+        if commission_rate:
+            queryset = queryset.filter(commission_rate=commission_rate)
+
+        if date_from and date_to:
+            queryset = queryset.filter(date_joined__date__range=[date_from, date_to])
+        elif date_from:
+            queryset = queryset.filter(date_joined__date__gte=date_from)
+        elif date_to:
+            queryset = queryset.filter(date_joined__date__lte=date_to)      
+
+        # ---- Manual Search ----
+        if search:
+            queryset = queryset.filter(
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(username__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(employee_id__icontains=search)
+            )
+
+     
+        return queryset
     
     @swagger_auto_schema(
         operation_summary="List All Users (Admin)",
         operation_description="Retrieves a list of all users. Admin only.",
         responses={200: UserSerializer(many=True)},
+        manual_parameters=[
+            openapi.Parameter(
+                'role',
+                openapi.IN_QUERY,
+                description="Filter by user role",
+                type=openapi.TYPE_STRING,
+                enum=[
+                    'salesperson',
+                    'store_manager',
+                    'global_manager',
+                    'financial_manager',
+                    'sales_advisor',
+                    'admin'
+                ]
+            ),
+            openapi.Parameter('store', openapi.IN_QUERY, description="Filter by store ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('is_active', openapi.IN_QUERY, description="Filter by active users (true/false)", type=openapi.TYPE_BOOLEAN),
+            openapi.Parameter('is_verified', openapi.IN_QUERY, description="Filter by verified users (true/false)", type=openapi.TYPE_BOOLEAN),
+            openapi.Parameter('commission_rate', openapi.IN_QUERY, description="Filter by commission rate", type=openapi.TYPE_NUMBER),
+            openapi.Parameter('search', openapi.IN_QUERY, description="Search in name, email, username, phone, employee_id", type=openapi.TYPE_STRING),
+            # JOINED DATE RANGE
+            openapi.Parameter('date_joined_from', openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                            format=openapi.FORMAT_DATE),
+            openapi.Parameter('date_joined_to', openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                            format=openapi.FORMAT_DATE),
+            ],
+
         tags=['User Management']
     )
     def get(self, request, *args, **kwargs):
