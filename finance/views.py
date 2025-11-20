@@ -536,6 +536,8 @@ class FinancePlanAPIView(APIView):
 
 
     manual_parameters=[
+        openapi.Parameter("page", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("page_size", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
 
         # ---------------- BASIC FILTERS ----------------
         openapi.Parameter("emi_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
@@ -779,8 +781,9 @@ class FinancePlanAPIView(APIView):
                 metadata={"filters": request.query_params.dict(), "role": user_role},
                 ip_address=request.META.get("REMOTE_ADDR")
             )
-            cache.set(cache_key, response_data, timeout=60)
-            return paginator.get_paginated_response(response_data)
+            paginated_response = paginator.get_paginated_response(response_data)
+            cache.set(cache_key, paginated_response.data, timeout=60)
+            return paginated_response
 
         except Exception as e:
             logger.exception("[FinancePlanAPIView] Error retrieving Finance Plans.")
