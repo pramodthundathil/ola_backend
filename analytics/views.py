@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from home.models import CustomUser
 
 from .models import (
     SalesAnalytics, ApplicationFunnelAnalytics, DeviceEnrollmentAnalytics,
@@ -1029,52 +1030,364 @@ class FinancialMetricsViewSet(BaseAnalyticsViewSet):
         return Response(summary)
 
 
-class ClerkPerformanceViewSet(BaseAnalyticsViewSet):
+
+class ClerkPerformanceViewSet(viewsets.ReadOnlyModelViewSet):
     """
     API endpoints for salesperson performance analytics
     """
     queryset = ClerkPerformanceAnalytics.objects.all()
     serializer_class = ClerkPerformanceSerializer
     
+    def get_date_range(self, request):
+        """Helper to get date range from request"""
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        
+        if not end_date:
+            end_date = timezone.now().date()
+        else:
+            end_date = timezone.datetime.strptime(end_date, '%Y-%m-%d').date()
+        
+        if not start_date:
+            start_date = end_date - timedelta(days=30)
+        else:
+            start_date = timezone.datetime.strptime(start_date, '%Y-%m-%d').date()
+        
+        return start_date, end_date
+    
     def get_queryset(self):
-        queryset = super().get_queryset()
+        """
+        Filter queryset based on user role
+        """
+        queryset = ClerkPerformanceAnalytics.objects.select_related(
+            'salesperson', 'store'
+        )
         user = self.request.user
         
+        # Role-based filtering
         if user.role == 'salesperson':
-            # Salesperson can only see their own performance
             queryset = queryset.filter(salesperson=user)
-        else:
-            queryset = self.filter_by_role(queryset, user)
+        elif user.role == 'store_manager':
+            if user.store:
+                queryset = queryset.filter(store=user.store)
+        elif user.role == 'sales_advisor':
+            if user.advised_stores.exists():
+                queryset = queryset.filter(store__in=user.advised_stores.all())
+        # Global managers, financial managers, and admins see all
         
+        # Date range filtering
         start_date, end_date = self.get_date_range(self.request)
         queryset = queryset.filter(date__range=[start_date, end_date])
         
-        return queryset.order_by('-total_sales')
+        # Additional filters from query params
+        salesperson_id = self.request.query_params.get('salesperson_id')
+        store_id = self.request.query_params.get('store_id')
+        
+        if salesperson_id:
+            queryset = queryset.filter(salesperson_id=salesperson_id)
+        
+        if store_id:
+            queryset = queryset.filter(store_id=store_id)
+        
+        return queryset.order_by('-date', '-total_sales')
+    
+    def list(self, request, *args, **kwargs):
+        """
+        Override list to return aggregated data with salesperson details
+        """
+        queryset = self.get_queryset()
+        
+        # Group by salesperson
+        salesperson_data = {}
+        
+        for record in queryset:
+            sp_id = str(record.salesperson.id)
+            
+            if sp_id not in salesperson_data:
+                salesperson_data[sp_id] = {
+                    'salesperson_id': sp_id,
+                    'salesperson_name': record.salesperson.get_full_name(),
+                    'salesperson_email': record.salesperson.email,
+                    'salesperson_phone': record.salesperson.phone or record.salesperson.phone_number,
+                    'store_id': str(record.store.id) if record.store else None,
+                    'store_name': record.store.name if record.store else None,
+                    'store_code': record.store.code if record.store else None,
+                    'total_sales': 0,
+                    'total_sales_amount': Decimal('0.00'),
+                    'total_applications_created': 0,
+                    'total_applications_approved': 0,
+                    'average_approval_rate': Decimal('0.00'),
+                    'records_count': 0,
+                    'daily_records': []
+                }
+            
+            # Aggregate totals
+            salesperson_data[sp_id]['total_sales'] += record.total_sales
+            salesperson_data[sp_id]['total_sales_amount'] += record.total_sales_amount
+            salesperson_data[sp_id]['total_applications_created'] += record.applications_created
+            salesperson_data[sp_id]['total_applications_approved'] += record.applications_approved
+            salesperson_data[sp_id]['records_count'] += 1
+            
+            # Add daily record
+            salesperson_data[sp_id]['daily_records'].append({
+                'date': record.date,
+                'sales': record.total_sales,
+                'sales_amount': record.total_sales_amount,
+                'applications_created': record.applications_created,
+                'applications_approved': record.applications_approved,
+                'approval_rate': record.approval_rate,
+                'rank_in_store': record.rank_in_store,
+                'rank_overall': record.rank_overall
+            })
+        
+        # Calculate average approval rates
+        for sp_id, data in salesperson_data.items():
+            if data['records_count'] > 0:
+                # Get average approval rate from daily records
+                total_approval_rate = sum(
+                    record['approval_rate'] 
+                    for record in data['daily_records']
+                )
+                data['average_approval_rate'] = round(
+                    total_approval_rate / data['records_count'], 2
+                )
+        
+        # Convert to list and sort by total sales
+        result = list(salesperson_data.values())
+        result.sort(key=lambda x: x['total_sales'], reverse=True)
+        
+        # Add overall ranking
+        for idx, item in enumerate(result, 1):
+            item['overall_rank'] = idx
+        
+        return Response({
+            'count': len(result),
+            'results': result
+        })
+    
+    @action(detail=False, methods=['get'], url_path='by-salesperson/(?P<salesperson_id>[^/.]+)')
+    def by_salesperson(self, request, salesperson_id=None):
+        """
+        Get detailed performance for a specific salesperson
+        URL: /api/analytics/performance/by-salesperson/{salesperson_id}/
+        """
+        try:
+            salesperson = CustomUser.objects.get(id=salesperson_id, role='salesperson')
+        except CustomUser.DoesNotExist:
+            return Response(
+                {'error': 'Salesperson not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check permissions
+        user = request.user
+        if user.role == 'salesperson' and user.id != salesperson.id:
+            return Response(
+                {'error': 'You do not have permission to view this data'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if user.role == 'store_manager' and salesperson.store != user.store:
+            return Response(
+                {'error': 'You do not have permission to view this data'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Get date range
+        start_date, end_date = self.get_date_range(request)
+        
+        # Get analytics records
+        records = ClerkPerformanceAnalytics.objects.filter(
+            salesperson=salesperson,
+            date__range=[start_date, end_date]
+        ).order_by('-date')
+        
+        # Aggregate data
+        total_records = records.count()
+        aggregated_data = records.aggregate(
+            total_sales=Sum('total_sales'),
+            total_sales_amount=Sum('total_sales_amount'),
+            total_applications_created=Sum('applications_created'),
+            total_applications_approved=Sum('applications_approved'),
+            avg_approval_rate=Avg('approval_rate')
+        )
+        
+        # Daily breakdown
+        daily_records = [
+            {
+                'date': record.date,
+                'sales': record.total_sales,
+                'sales_amount': record.total_sales_amount,
+                'applications_created': record.applications_created,
+                'applications_approved': record.applications_approved,
+                'approval_rate': record.approval_rate,
+                'rank_in_store': record.rank_in_store,
+                'rank_overall': record.rank_overall
+            }
+            for record in records
+        ]
+        
+        return Response({
+            'salesperson': {
+                'id': str(salesperson.id),
+                'name': salesperson.get_full_name(),
+                'email': salesperson.email,
+                'phone': salesperson.phone or salesperson.phone_number,
+                'employee_id': salesperson.employee_id,
+                'commission_rate': salesperson.commission_rate,
+            },
+            'store': {
+                'id': str(salesperson.store.id) if salesperson.store else None,
+                'name': salesperson.store.name if salesperson.store else None,
+                'code': salesperson.store.code if salesperson.store else None,
+            } if salesperson.store else None,
+            'period': {
+                'start_date': start_date,
+                'end_date': end_date,
+                'days': total_records
+            },
+            'summary': {
+                'total_sales': aggregated_data['total_sales'] or 0,
+                'total_sales_amount': aggregated_data['total_sales_amount'] or Decimal('0.00'),
+                'total_applications_created': aggregated_data['total_applications_created'] or 0,
+                'total_applications_approved': aggregated_data['total_applications_approved'] or 0,
+                'average_approval_rate': aggregated_data['avg_approval_rate'] or Decimal('0.00'),
+                'average_daily_sales': round(
+                    (aggregated_data['total_sales'] or 0) / total_records, 2
+                ) if total_records > 0 else 0,
+                'average_daily_amount': round(
+                    (aggregated_data['total_sales_amount'] or Decimal('0.00')) / total_records, 2
+                ) if total_records > 0 else Decimal('0.00')
+            },
+            'daily_records': daily_records
+        })
     
     @action(detail=False, methods=['get'])
     def leaderboard(self, request):
         """
         Get salesperson leaderboard
+        URL: /api/analytics/performance/leaderboard/
         """
         limit = int(request.query_params.get('limit', 20))
-        queryset = self.get_queryset()
+        start_date, end_date = self.get_date_range(request)
         
+        # Apply role-based filtering
+        queryset = ClerkPerformanceAnalytics.objects.filter(
+            date__range=[start_date, end_date]
+        )
+        
+        user = request.user
+        if user.role == 'store_manager':
+            if user.store:
+                queryset = queryset.filter(store=user.store)
+        elif user.role == 'sales_advisor':
+            if user.advised_stores.exists():
+                queryset = queryset.filter(store__in=user.advised_stores.all())
+        
+        # Group by salesperson
         leaderboard = queryset.values(
+            'salesperson__id',
             'salesperson__first_name',
             'salesperson__last_name',
-            'store__name'
+            'salesperson__email',
+            'salesperson__phone',
+            'store__id',
+            'store__name',
+            'store__code'
         ).annotate(
             total_sales=Sum('total_sales'),
             total_amount=Sum('total_sales_amount'),
+            total_applications=Sum('applications_created'),
+            total_approved=Sum('applications_approved'),
             avg_approval_rate=Avg('approval_rate')
         ).order_by('-total_sales')[:limit]
         
-        # Add rank
+        # Format response with IDs for navigation
+        result = []
         for idx, item in enumerate(leaderboard, 1):
-            item['rank'] = idx
+            result.append({
+                'rank': idx,
+                'salesperson_id': str(item['salesperson__id']),
+                'salesperson_name': f"{item['salesperson__first_name']} {item['salesperson__last_name']}".strip(),
+                'salesperson_email': item['salesperson__email'],
+                'salesperson_phone': item['salesperson__phone'],
+                'store_id': str(item['store__id']) if item['store__id'] else None,
+                'store_name': item['store__name'],
+                'store_code': item['store__code'],
+                'total_sales': item['total_sales'],
+                'total_amount': item['total_amount'],
+                'total_applications': item['total_applications'],
+                'total_approved': item['total_approved'],
+                'average_approval_rate': round(item['avg_approval_rate'] or 0, 2)
+            })
         
-        return Response(leaderboard)
-
+        return Response({
+            'period': {
+                'start_date': start_date,
+                'end_date': end_date
+            },
+            'count': len(result),
+            'leaderboard': result
+        })
+    
+    @action(detail=False, methods=['get'])
+    def by_store(self, request):
+        """
+        Get performance grouped by store
+        URL: /api/analytics/performance/by-store/
+        """
+        store_id = request.query_params.get('store_id')
+        start_date, end_date = self.get_date_range(request)
+        
+        queryset = ClerkPerformanceAnalytics.objects.filter(
+            date__range=[start_date, end_date]
+        )
+        
+        if store_id:
+            queryset = queryset.filter(store_id=store_id)
+        
+        # Apply role-based filtering
+        user = request.user
+        if user.role == 'store_manager':
+            if user.store:
+                queryset = queryset.filter(store=user.store)
+        elif user.role == 'sales_advisor':
+            if user.advised_stores.exists():
+                queryset = queryset.filter(store__in=user.advised_stores.all())
+        
+        # Group by store
+        store_data = queryset.values(
+            'store__id',
+            'store__name',
+            'store__code'
+        ).annotate(
+            total_salespersons=Count('salesperson', distinct=True),
+            total_sales=Sum('total_sales'),
+            total_amount=Sum('total_sales_amount'),
+            avg_approval_rate=Avg('approval_rate')
+        ).order_by('-total_sales')
+        
+        # Format response
+        result = []
+        for item in store_data:
+            result.append({
+                'store_id': str(item['store__id']),
+                'store_name': item['store__name'],
+                'store_code': item['store__code'],
+                'total_salespersons': item['total_salespersons'],
+                'total_sales': item['total_sales'],
+                'total_amount': item['total_amount'],
+                'average_approval_rate': round(item['avg_approval_rate'] or 0, 2)
+            })
+        
+        return Response({
+            'period': {
+                'start_date': start_date,
+                'end_date': end_date
+            },
+            'count': len(result),
+            'stores': result
+        })
 
 class HourlyAnalyticsViewSet(BaseAnalyticsViewSet):
     """

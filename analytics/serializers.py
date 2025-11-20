@@ -9,6 +9,7 @@ from .models import (
     FinancialMetrics, StoreRetentionAnalytics, ClerkPerformanceAnalytics,
     HourlyAnalytics
 )
+from store.models import Store
 
 
 class SalesAnalyticsSerializer(serializers.ModelSerializer):
@@ -143,16 +144,106 @@ class StoreRetentionSerializer(serializers.ModelSerializer):
 
 
 class ClerkPerformanceSerializer(serializers.ModelSerializer):
+    # Salesperson details
+    salesperson_id = serializers.UUIDField(source='salesperson.id', read_only=True)
     salesperson_name = serializers.CharField(source='salesperson.get_full_name', read_only=True)
+    salesperson_email = serializers.EmailField(source='salesperson.email', read_only=True)
+    salesperson_phone = serializers.SerializerMethodField()
+    
+    # Store details
+    store_id = serializers.UUIDField(source='store.id', read_only=True)
     store_name = serializers.CharField(source='store.name', read_only=True)
+    store_code = serializers.CharField(source='store.code', read_only=True)
     
     class Meta:
         model = ClerkPerformanceAnalytics
         fields = [
-            'id', 'date', 'salesperson', 'salesperson_name', 'store', 'store_name',
-            'total_sales', 'total_sales_amount', 'applications_created',
-            'applications_approved', 'approval_rate',
-            'rank_in_store', 'rank_overall', 'created_at', 'updated_at'
+            # Don't expose internal ID, use salesperson_id instead
+            'date',
+            
+            # Salesperson info (for navigation)
+            'salesperson_id',
+            'salesperson_name',
+            'salesperson_email',
+            'salesperson_phone',
+            
+            # Store info (for navigation)
+            'store_id',
+            'store_name',
+            'store_code',
+            
+            # Performance metrics
+            'total_sales',
+            'total_sales_amount',
+            'applications_created',
+            'applications_approved',
+            'approval_rate',
+            
+            # Rankings
+            'rank_in_store',
+            'rank_overall',
+            
+            # Timestamps
+            'created_at',
+            'updated_at'
+        ]
+    
+    def get_salesperson_phone(self, obj):
+        """Get phone number, preferring 'phone' over 'phone_number'"""
+        if obj.salesperson:
+            return obj.salesperson.phone or obj.salesperson.phone_number
+        return None
+
+
+from home .models import CustomUser
+
+class SalespersonDetailSerializer(serializers.ModelSerializer):
+    """Detailed serializer for salesperson info"""
+    store_id = serializers.UUIDField(source='store.id', read_only=True)
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    store_code = serializers.CharField(source='store.code', read_only=True)
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+    phone = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = CustomUser
+        fields = [
+            'id',
+            'email',
+            'full_name',
+            'first_name',
+            'last_name',
+            'phone',
+            'employee_id',
+            'commission_rate',
+            'store_id',
+            'store_name',
+            'store_code',
+            'is_active',
+            'date_joined'
+        ]
+    
+    def get_phone(self, obj):
+        return obj.phone or obj.phone_number
+
+
+class StorePerformanceSummarySerializer(serializers.ModelSerializer):
+    """Store summary with performance metrics"""
+    total_salespersons = serializers.IntegerField(read_only=True)
+    total_sales = serializers.IntegerField(read_only=True)
+    total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    average_approval_rate = serializers.DecimalField(max_digits=5, decimal_places=2, read_only=True)
+    
+    class Meta:
+        model = Store
+        fields = [
+            'id',
+            'name',
+            'code',
+            'total_salespersons',
+            'total_sales',
+            'total_amount',
+            'average_approval_rate'
         ]
 
 
