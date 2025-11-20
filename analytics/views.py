@@ -322,6 +322,57 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         
         return queryset
     
+    def list(self, request, *args, **kwargs):
+        """
+        Override list to return all brands with their models in the desired format
+        """
+        queryset = self.get_queryset()
+        
+        # Get all unique brands
+        brands = queryset.values('brand_id', 'brand_name').distinct()
+        
+        response_data = []
+        
+        for brand in brands:
+            brand_id = brand['brand_id']
+            brand_name = brand['brand_name']
+            
+            # Filter data for this brand
+            brand_queryset = queryset.filter(brand_id=brand_id)
+            
+            # Get totals
+            totals = brand_queryset.aggregate(
+                total_sales_count=Sum('sales_count'),
+                total_revenue=Sum('total_amount')
+            )
+            
+            # Get models for this brand
+            models = brand_queryset.values('model_name').annotate(
+                sales_count=Sum('sales_count'),
+                total_amount=Sum('total_amount')
+            ).order_by('-sales_count')
+            
+            models_list = [
+                {
+                    "model_name": model['model_name'],
+                    "units_sold": model['sales_count'],
+                    "sales_amount": float(model['total_amount'])
+                }
+                for model in models
+            ]
+            
+            response_data.append({
+                'brand': brand_name,
+                'summary': {
+                    'total_units_sold': totals['total_sales_count'] or 0,
+                    'total_sales_amount': float(totals['total_revenue'] or 0),
+                    'total_models_sold': len(models_list)
+                },
+                'models': models_list
+            })
+        
+        return Response(response_data)
+    
     @swagger_auto_schema(
         operation_summary="Get sales data for a specific brand",
         operation_description="""
@@ -481,15 +532,27 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             total_amount=Sum('total_amount')
         ).order_by('date', '-sales_count')
         
-        return Response({
-            'brand_id': brand_id,
-            'totals': totals,
-            'device_breakdown': device_breakdown_list,
-            'store_breakdown': list(store_breakdown),
-            'chart_data': {
-                'time_series': list(time_series),
-                'device_time_series': list(device_time_series)
+        # Get brand name
+        brand_name = queryset.first().brand_name if queryset.exists() else "Unknown"
+        
+        # Format models list
+        models_list = [
+            {
+                "model_name": device['model_name'],
+                "units_sold": device['sales_count'],
+                "sales_amount": float(device['total_amount'])
             }
+            for device in device_breakdown_list
+        ]
+        
+        return Response({
+            'brand': brand_name,
+            'summary': {
+                'total_units_sold': totals['total_sales_count'] or 0,
+                'total_sales_amount': float(totals['total_revenue'] or 0),
+                'total_models_sold': len(device_breakdown_list)
+            },
+            'models': models_list
         })
     
     @swagger_auto_schema(
