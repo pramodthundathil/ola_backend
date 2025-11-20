@@ -349,7 +349,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             # Get models for this brand
             models = brand_queryset.values(
                 'device_id', 
-                'device__name',
+                'device__model_name',
                 'model_name'
             ).annotate(
                 sales_count=Sum('sales_count'),
@@ -359,7 +359,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             models_list = [
                 {
                     "device_id": model['device_id'],
-                    "device_name": model['device__name'],
+                    "device_name": model['device__model_name'],
                     "model_name": model['model_name'],
                     "units_sold": model['sales_count'],
                     "sales_amount": float(model['total_amount'])
@@ -546,6 +546,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         models_list = [
             {
                 "model_name": device['model_name'],
+                "model_id": device['id'],
                 "units_sold": device['sales_count'],
                 "sales_amount": float(device['total_amount'])
             }
