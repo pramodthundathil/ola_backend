@@ -503,9 +503,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         
         # Device-wise breakdown
         device_breakdown = queryset.values(
-            'device_id', 
-            'device__name',
-            'model_name'
+            'device_id', 'model_name'
         ).annotate(
             sales_count=Sum('sales_count'),
             total_amount=Sum('total_amount')
@@ -547,8 +545,6 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         # Format models list
         models_list = [
             {
-                "device_id": device['device_id'],
-                "device_name": device['device__name'],
                 "model_name": device['model_name'],
                 "units_sold": device['sales_count'],
                 "sales_amount": float(device['total_amount'])
@@ -898,7 +894,7 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
             else:
                 model['avg_amount'] = Decimal('0.00')
         
-        return Response(top_models_list)   
+        return Response(top_models_list)
 
 class GeographicAnalyticsViewSet(BaseAnalyticsViewSet):
     """
