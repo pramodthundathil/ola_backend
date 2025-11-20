@@ -88,7 +88,9 @@ INSTALLED_APPS = [
 
     'customer_device',
 
-    'analytics'
+    'analytics',
+
+    'utils',
     
 ]
 

@@ -107,7 +107,11 @@ class BrandModelAnalytics(models.Model):
     date = models.DateField(db_index=True)
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='brand_analytics')
     
-    # Brand name
+    # Foreign keys for better filtering
+    brand = models.ForeignKey('products.Brand', on_delete=models.CASCADE, null=True, blank=True)
+    device = models.ForeignKey('products.ProductModel', on_delete=models.CASCADE, null=True, blank=True)
+    
+    # Keep text fields for compatibility
     brand_name = models.CharField(max_length=100)
     model_name = models.CharField(max_length=200, null=True, blank=True)
     
@@ -124,6 +128,8 @@ class BrandModelAnalytics(models.Model):
         indexes = [
             models.Index(fields=['date', 'brand_name']),
             models.Index(fields=['date', 'store']),
+            models.Index(fields=['date', 'brand']),
+            models.Index(fields=['date', 'device']),
         ]
 
 

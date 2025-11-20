@@ -10,6 +10,8 @@ from django.db.models import Sum, Avg, Count, Q
 from django.utils import timezone
 from datetime import datetime, timedelta
 from decimal import Decimal
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
 from .models import (
     SalesAnalytics, ApplicationFunnelAnalytics, DeviceEnrollmentAnalytics,
@@ -313,12 +315,385 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         start_date, end_date = self.get_date_range(self.request)
         queryset = queryset.filter(date__range=[start_date, end_date])
         
+        # Filter by brand text search
         brand = self.request.query_params.get('brand')
         if brand:
             queryset = queryset.filter(brand_name__icontains=brand)
         
-        return queryset.order_by('-sales_count')
+        return queryset
     
+    @swagger_auto_schema(
+        operation_summary="Get sales data for a specific brand",
+        operation_description="""
+        Returns comprehensive sales analytics for a brand including:
+        - Total sales metrics (count, revenue, averages)
+        - Device-wise breakdown
+        - Store-wise breakdown
+        - Time series data for charts
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'brand_id',
+                openapi.IN_QUERY,
+                description="Brand ID (required)",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'start_date',
+                openapi.IN_QUERY,
+                description="Start date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+            openapi.Parameter(
+                'end_date',
+                openapi.IN_QUERY,
+                description="End date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                description="Successful response",
+                examples={
+                    "application/json": {
+                        "brand_id": "5",
+                        "totals": {
+                            "total_sales_count": 150,
+                            "total_revenue": "450000.00",
+                            "avg_sale_amount": "3000.00",
+                            "total_stores": 5,
+                            "total_devices": 8
+                        },
+                        "device_breakdown": [
+                            {
+                                "device_id": 10,
+                                "model_name": "iPhone 15 Pro",
+                                "sales_count": 50,
+                                "total_amount": "150000.00",
+                                "avg_amount": "3000.00"
+                            }
+                        ],
+                        "store_breakdown": [
+                            {
+                                "store_id": 1,
+                                "store__name": "Downtown Store",
+                                "sales_count": 30,
+                                "total_amount": "90000.00"
+                            }
+                        ],
+                        "chart_data": {
+                            "time_series": [
+                                {
+                                    "date": "2024-01-01",
+                                    "sales_count": 10,
+                                    "total_amount": "30000.00"
+                                }
+                            ],
+                            "device_time_series": [
+                                {
+                                    "date": "2024-01-01",
+                                    "device_id": 10,
+                                    "model_name": "iPhone 15 Pro",
+                                    "sales_count": 5,
+                                    "total_amount": "15000.00"
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+            400: openapi.Response(
+                description="Bad request - brand_id missing",
+                examples={
+                    "application/json": {
+                        "error": "brand_id is required"
+                    }
+                }
+            )
+        }
+    )
+    @action(detail=False, methods=['get'])
+    def brand_sales(self, request):
+        """
+        Get sales data for a specific brand with device breakdown
+        Query params: brand_id (required), start_date, end_date
+        """
+        brand_id = request.query_params.get('brand_id')
+        if not brand_id:
+            return Response({'error': 'brand_id is required'}, status=400)
+        
+        queryset = self.get_queryset().filter(brand_id=brand_id)
+        
+        # Total aggregations
+        totals = queryset.aggregate(
+            total_sales_count=Sum('sales_count'),
+            total_revenue=Sum('total_amount'),
+            avg_sale_amount=Avg('total_amount'),
+            total_stores=Count('store', distinct=True),
+            total_devices=Count('device', distinct=True)
+        )
+        
+        # Device-wise breakdown
+        device_breakdown = queryset.values(
+            'device_id', 'model_name'
+        ).annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount'),
+            avg_amount=Avg('total_amount')
+        ).order_by('-sales_count')
+        
+        # Store-wise breakdown
+        store_breakdown = queryset.values(
+            'store_id', 'store__name'
+        ).annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount')
+        ).order_by('-sales_count')
+        
+        # Time series data for charts (daily)
+        time_series = queryset.values('date').annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount')
+        ).order_by('date')
+        
+        # Device sales trend (for stacked chart)
+        device_time_series = queryset.values(
+            'date', 'device_id', 'model_name'
+        ).annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount')
+        ).order_by('date', '-sales_count')
+        
+        return Response({
+            'brand_id': brand_id,
+            'totals': totals,
+            'device_breakdown': list(device_breakdown),
+            'store_breakdown': list(store_breakdown),
+            'chart_data': {
+                'time_series': list(time_series),
+                'device_time_series': list(device_time_series)
+            }
+        })
+    
+    @swagger_auto_schema(
+        operation_summary="Get sales data for a specific device/model",
+        operation_description="""
+        Returns comprehensive sales analytics for a specific device model including:
+        - Total sales metrics (count, revenue, averages)
+        - Store-wise breakdown
+        - Time series data for charts
+        - Store performance trends over time
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'device_id',
+                openapi.IN_QUERY,
+                description="Device ID (required)",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'start_date',
+                openapi.IN_QUERY,
+                description="Start date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+            openapi.Parameter(
+                'end_date',
+                openapi.IN_QUERY,
+                description="End date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                description="Successful response",
+                examples={
+                    "application/json": {
+                        "device_id": "10",
+                        "totals": {
+                            "total_sales_count": 75,
+                            "total_revenue": "225000.00",
+                            "avg_sale_amount": "3000.00",
+                            "total_stores": 3
+                        },
+                        "store_breakdown": [
+                            {
+                                "store_id": 1,
+                                "store__name": "Downtown Store",
+                                "sales_count": 30,
+                                "total_amount": "90000.00",
+                                "avg_amount": "3000.00"
+                            },
+                            {
+                                "store_id": 2,
+                                "store__name": "Mall Store",
+                                "sales_count": 25,
+                                "total_amount": "75000.00",
+                                "avg_amount": "3000.00"
+                            }
+                        ],
+                        "chart_data": {
+                            "time_series": [
+                                {
+                                    "date": "2024-01-01",
+                                    "sales_count": 5,
+                                    "total_amount": "15000.00"
+                                },
+                                {
+                                    "date": "2024-01-02",
+                                    "sales_count": 8,
+                                    "total_amount": "24000.00"
+                                }
+                            ],
+                            "store_time_series": [
+                                {
+                                    "date": "2024-01-01",
+                                    "store_id": 1,
+                                    "store__name": "Downtown Store",
+                                    "sales_count": 3,
+                                    "total_amount": "9000.00"
+                                },
+                                {
+                                    "date": "2024-01-01",
+                                    "store_id": 2,
+                                    "store__name": "Mall Store",
+                                    "sales_count": 2,
+                                    "total_amount": "6000.00"
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+            400: openapi.Response(
+                description="Bad request - device_id missing",
+                examples={
+                    "application/json": {
+                        "error": "device_id is required"
+                    }
+                }
+            )
+        }
+    )
+    @action(detail=False, methods=['get'])
+    def device_sales(self, request):
+        """
+        Get sales data for a specific device/model
+        Query params: device_id (required), start_date, end_date
+        """
+        device_id = request.query_params.get('device_id')
+        if not device_id:
+            return Response({'error': 'device_id is required'}, status=400)
+        
+        queryset = self.get_queryset().filter(device_id=device_id)
+        
+        # Total aggregations
+        totals = queryset.aggregate(
+            total_sales_count=Sum('sales_count'),
+            total_revenue=Sum('total_amount'),
+            avg_sale_amount=Avg('total_amount'),
+            total_stores=Count('store', distinct=True)
+        )
+        
+        # Store-wise breakdown
+        store_breakdown = queryset.values(
+            'store_id', 'store__name'
+        ).annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount'),
+            avg_amount=Avg('total_amount')
+        ).order_by('-sales_count')
+        
+        # Time series data for charts (daily)
+        time_series = queryset.values('date').annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount')
+        ).order_by('date')
+        
+        # Store performance over time (for multi-line chart)
+        store_time_series = queryset.values(
+            'date', 'store_id', 'store__name'
+        ).annotate(
+            sales_count=Sum('sales_count'),
+            total_amount=Sum('total_amount')
+        ).order_by('date', '-sales_count')
+        
+        return Response({
+            'device_id': device_id,
+            'totals': totals,
+            'store_breakdown': list(store_breakdown),
+            'chart_data': {
+                'time_series': list(time_series),
+                'store_time_series': list(store_time_series)
+            }
+        })
+    
+    @swagger_auto_schema(
+        operation_summary="Get top performing brands",
+        operation_description="""
+        Returns a list of top performing brands ranked by total sales count.
+        Includes sales count, total revenue, and average sale amount.
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description="Number of top brands to return (default: 10)",
+                type=openapi.TYPE_INTEGER,
+                required=False,
+                default=10
+            ),
+            openapi.Parameter(
+                'start_date',
+                openapi.IN_QUERY,
+                description="Start date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+            openapi.Parameter(
+                'end_date',
+                openapi.IN_QUERY,
+                description="End date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                description="List of top performing brands",
+                examples={
+                    "application/json": [
+                        {
+                            "brand_id": 5,
+                            "brand_name": "Apple",
+                            "total_sales": 150,
+                            "total_amount": "450000.00",
+                            "avg_amount": "3000.00"
+                        },
+                        {
+                            "brand_id": 3,
+                            "brand_name": "Samsung",
+                            "total_sales": 120,
+                            "total_amount": "360000.00",
+                            "avg_amount": "3000.00"
+                        }
+                    ]
+                }
+            )
+        }
+    )
     @action(detail=False, methods=['get'])
     def top_brands(self, request):
         """
@@ -327,13 +702,74 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         limit = int(request.query_params.get('limit', 10))
         queryset = self.get_queryset()
         
-        top_brands = queryset.values('brand_name').annotate(
+        top_brands = queryset.values('brand_id', 'brand_name').annotate(
             total_sales=Sum('sales_count'),
-            total_amount=Sum('total_amount')
+            total_amount=Sum('total_amount'),
+            avg_amount=Avg('total_amount')
         ).order_by('-total_sales')[:limit]
         
-        return Response(top_brands)
+        return Response(list(top_brands))
     
+    @swagger_auto_schema(
+        operation_summary="Get top performing device models",
+        operation_description="""
+        Returns a list of top performing device models ranked by total sales count.
+        Includes brand information, sales count, total revenue, and average sale amount.
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description="Number of top models to return (default: 10)",
+                type=openapi.TYPE_INTEGER,
+                required=False,
+                default=10
+            ),
+            openapi.Parameter(
+                'start_date',
+                openapi.IN_QUERY,
+                description="Start date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+            openapi.Parameter(
+                'end_date',
+                openapi.IN_QUERY,
+                description="End date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                description="List of top performing device models",
+                examples={
+                    "application/json": [
+                        {
+                            "device_id": 10,
+                            "brand_id": 5,
+                            "brand_name": "Apple",
+                            "model_name": "iPhone 15 Pro",
+                            "total_sales": 75,
+                            "total_amount": "225000.00",
+                            "avg_amount": "3000.00"
+                        },
+                        {
+                            "device_id": 8,
+                            "brand_id": 3,
+                            "brand_name": "Samsung",
+                            "model_name": "Galaxy S24 Ultra",
+                            "total_sales": 60,
+                            "total_amount": "180000.00",
+                            "avg_amount": "3000.00"
+                        }
+                    ]
+                }
+            )
+        }
+    )
     @action(detail=False, methods=['get'])
     def top_models(self, request):
         """
@@ -342,12 +778,15 @@ class BrandModelAnalyticsViewSet(BaseAnalyticsViewSet):
         limit = int(request.query_params.get('limit', 10))
         queryset = self.get_queryset()
         
-        top_models = queryset.values('brand_name', 'model_name').annotate(
+        top_models = queryset.values(
+            'device_id', 'brand_id', 'brand_name', 'model_name'
+        ).annotate(
             total_sales=Sum('sales_count'),
-            total_amount=Sum('total_amount')
+            total_amount=Sum('total_amount'),
+            avg_amount=Avg('total_amount')
         ).order_by('-total_sales')[:limit]
         
-        return Response(top_models)
+        return Response(list(top_models))
 
 
 class GeographicAnalyticsViewSet(BaseAnalyticsViewSet):
@@ -922,6 +1361,7 @@ class BrandPerformanceMetricsViewSet(BaseAnalyticsViewSet):
         ).order_by('-total_revenue')[:limit]
         
         return Response(list(top_brands))
+
 
 
 # ========================================

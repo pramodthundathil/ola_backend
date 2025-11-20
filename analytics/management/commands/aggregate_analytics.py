@@ -341,6 +341,7 @@ class Command(BaseCommand):
     # BRAND ANALYTICS
     # ========================================
     
+    # Updated aggregation function
     def aggregate_brand_analytics(self, date, force=False):
         """Aggregate sales by brand and model"""
         self.stdout.write("  🏷️  Aggregating brand/model analytics...")
@@ -356,9 +357,11 @@ class Command(BaseCommand):
             )
             
             if finance_plans.exists():
-                # Group by brand and model
+                # Group by brand and device
                 brands = finance_plans.values(
+                    'device__brand',
                     'device__brand__name',
+                    'device',
                     'device__model_name'
                 ).annotate(
                     sales_count=Count('id'),
@@ -369,17 +372,18 @@ class Command(BaseCommand):
                     BrandModelAnalytics.objects.update_or_create(
                         date=date,
                         store=store,
-                        brand_name=brand_data['device__brand__name'] or 'Unknown',
-                        model_name=brand_data['device__model_name'] or 'Unknown',
+                        brand_id=brand_data['device__brand'],
+                        device_id=brand_data['device'],
                         defaults={
+                            'brand_name': brand_data['device__brand__name'] or 'Unknown',
+                            'model_name': brand_data['device__model_name'] or 'Unknown',
                             'sales_count': brand_data['sales_count'],
                             'total_amount': brand_data['total_amount'] or Decimal('0.00')
                         }
                     )
                     count += 1
         
-        self.stdout.write(f"    ✓ Created/updated {count} brand/model records")
-    
+            self.stdout.write(f"    ✓ Created/updated {count} brand/model records")
     # ========================================
     # GEOGRAPHIC ANALYTICS
     # ========================================

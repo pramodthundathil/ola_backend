@@ -82,10 +82,9 @@ class BrandModelAnalyticsSerializer(serializers.ModelSerializer):
     class Meta:
         model = BrandModelAnalytics
         fields = [
-            'id', 'date', 'store', 'store_name', 'brand_name', 'model_name',
-            'sales_count', 'total_amount', 'created_at', 'updated_at'
+            'date', 'store', 'store_name', 'brand', 'brand_name', 
+            'device', 'model_name', 'sales_count', 'total_amount'
         ]
-
 
 class GeographicAnalyticsSerializer(serializers.ModelSerializer):
     region_name = serializers.CharField(source='region.name', read_only=True)
