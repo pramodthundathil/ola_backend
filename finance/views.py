@@ -48,6 +48,7 @@ from drf_yasg.utils import swagger_auto_schema
 from .models import FinancePlan, PaymentRecord, EMISchedule, AutoFinancePlan, AuditLog,FinanceMultiple
 from store.models import Region, Store
 from .utils.utils import get_device_price_with_cache
+from .finance_filter import FinancePlanFilter
 from home.permissions import CanViewAdminFinanceDetails, CanViewSalesAdvisorFinance, CanViewStoreManagerFinance
 from customer.models import Customer, CreditApplication, CreditScore
 from .serializers import (
@@ -532,15 +533,106 @@ class FinancePlanAPIView(APIView):
     - `updated_start_date`: Filter by last updated date (start range, format YYYY-MM-DD)  
     - `updated_end_date`: Filter by last updated date (end range, format YYYY-MM-DD)
     """,
+
+
     manual_parameters=[
-        openapi.Parameter("customer_id", openapi.IN_QUERY, description="Filter by Customer ID", type=openapi.TYPE_INTEGER),
-        openapi.Parameter("product_id", openapi.IN_QUERY, description="Filter by Product ID", type=openapi.TYPE_INTEGER),
-        openapi.Parameter("emi_id", openapi.IN_QUERY, description="Filter by EMI ID", type=openapi.TYPE_INTEGER),
-        openapi.Parameter("apc_score", openapi.IN_QUERY, description="Filter by APC Score", type=openapi.TYPE_INTEGER),
-        openapi.Parameter("start_date", openapi.IN_QUERY, description="Filter by creation date (start range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
-        openapi.Parameter("end_date", openapi.IN_QUERY, description="Filter by creation date (end range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
-        openapi.Parameter("updated_start_date", openapi.IN_QUERY, description="Filter by last updated date (start range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
-        openapi.Parameter("updated_end_date", openapi.IN_QUERY, description="Filter by last updated date (end range, format YYYY-MM-DD)", type=openapi.TYPE_STRING, format="date"),
+
+        # ---------------- BASIC FILTERS ----------------
+        openapi.Parameter("emi_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("customer_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("product_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("apc_score", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+
+        openapi.Parameter("start_date", openapi.IN_QUERY, type=openapi.TYPE_STRING, format="date"),
+        openapi.Parameter("end_date", openapi.IN_QUERY, type=openapi.TYPE_STRING, format="date"),
+        openapi.Parameter("updated_start_date", openapi.IN_QUERY, type=openapi.TYPE_STRING, format="date"),
+        openapi.Parameter("updated_end_date", openapi.IN_QUERY, type=openapi.TYPE_STRING, format="date"),
+
+        # ---------------- FINANCEPLAN FILTERS ----------------
+        openapi.Parameter(
+            "status", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["ACTIVE", "CLOSED"]
+        ),
+        openapi.Parameter(
+            "risk_tier", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["TIER_A", "TIER_B", "TIER_C", "TIER_D"]
+        ),
+        openapi.Parameter(
+            "is_active", openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN,
+            enum=["true", "false"]
+        ),
+        openapi.Parameter("selected_term", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("installment_frequency_days", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+
+        openapi.Parameter(
+            "is_high_end_device", openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN,
+            enum=["true", "false"]
+        ),
+        openapi.Parameter(
+            "payment_capacity_passed", openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN,
+            enum=["true", "false"]
+        ),
+        openapi.Parameter(
+            "score_status", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["APPROVED", "CONDITIONAL", "REJECTED"]
+        ),
+        openapi.Parameter(
+            "conditions_met", openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN,
+            enum=["true", "false"]
+        ),
+        openapi.Parameter(
+            "requires_adjustment", openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN,
+            enum=["true", "false"]
+        ),
+
+        openapi.Parameter("min_amount_to_finance", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+        openapi.Parameter("max_amount_to_finance", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+
+        openapi.Parameter("min_monthly_installment", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+        openapi.Parameter("max_monthly_installment", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+
+        openapi.Parameter("min_device_price", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+        openapi.Parameter("max_device_price", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+
+        # ---------------- CUSTOMER FILTERS ----------------
+        openapi.Parameter("customer_document_number", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("customer_phone", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("customer_email", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter(
+            "customer_status", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["ACTIVE", "INACTIVE", "BLOCKED"]
+        ),
+        openapi.Parameter("customer_created_by", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+
+        # ---------------- STORE FILTERS ----------------
+        openapi.Parameter("store_id", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("region_id", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("province_id", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("district_id", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("corregimiento_id", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter(
+            "store_channel", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["retail", "wholesale", "franchise", "corporate", "online"]
+        ),
+
+        # ---------------- PRODUCT FILTERS ----------------
+        openapi.Parameter("brand_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("category_id", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        openapi.Parameter("model_name", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("ram", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("storage", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("processor", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter(
+            "condition", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["NEW", "REFURBISHED", "LIKE_NEW", "USED"]
+        ),
+        openapi.Parameter("color", openapi.IN_QUERY, type=openapi.TYPE_STRING),
+        openapi.Parameter("release_year", openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+
+        openapi.Parameter("device_min_price", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+        openapi.Parameter("device_max_price", openapi.IN_QUERY, type=openapi.TYPE_NUMBER),
+    # ]
+
     ],
     responses={200: "Finance Plan List"},
     tags=["Finance"]
@@ -575,6 +667,10 @@ class FinancePlanAPIView(APIView):
             end_date = request.query_params.get("end_date")
             updated_start_date = request.query_params.get("updated_start_date")
             updated_end_date = request.query_params.get("updated_end_date")
+
+            # --------- APPLY FILTERS ----------
+
+            finance_qs = FinancePlanFilter.apply_filters(finance_qs, request.query_params)
 
             if emi_id:
                 finance_qs = finance_qs.filter(emi_schedule__id=emi_id)
@@ -656,18 +752,10 @@ class FinancePlanAPIView(APIView):
                 )
 
             # --------------------Caching ---------------------
-            cache_key = (
-                f"financeplans_{user_role}_"
-                f"{emi_id or 'any'}_"
-                f"{customer_id or 'any'}_"
-                f"{product_id or 'any'}_"
-                f"{apc_score or 'any'}_"
-                f"{start_date or 'any'}_"
-                f"{end_date or 'any'}_"
-                f"{updated_start_date or 'any'}_"
-                f"{updated_end_date or 'any'}"
-            )
+            all_params = "_".join(f"{k}:{v}" for k, v in sorted(request.query_params.items()))
+            cache_key = f"financeplans_{user_role}_{all_params}"
             cached_data = cache.get(cache_key)
+
             if cached_data:
                 return Response(cached_data, status=status.HTTP_200_OK)
 

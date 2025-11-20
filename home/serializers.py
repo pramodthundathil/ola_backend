@@ -343,23 +343,29 @@ class SalespersonSerializerCreate(serializers.ModelSerializer):
         """
         password = validated_data.pop('password')
         request = self.context.get('request')
-        
+
         # Get the store from the requesting user (store manager)
         if not request or not request.user.store:
             raise serializers.ValidationError(
                 "Store manager must be assigned to a store."
             )
-        
-        # Create the salesperson
+
+        store = request.user.store  
+        is_active = validated_data.pop('is_active', True)
+
+        # Create the salesperson (store not passed here)
         salesperson = CustomUser.objects.create_user(
             password=password,
             role=CustomUser.SALESPERSON,
             is_staff=False,
-            is_active=validated_data.get('is_active', True),
-            store=request.user.store,  # Automatically assign store
+            is_active=is_active,
             **validated_data
         )
-        
+
+        # Assign store explicitly
+        salesperson.store = store   
+        salesperson.save()
+
         return salesperson
 
 

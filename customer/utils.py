@@ -5,6 +5,8 @@ from django.utils import timezone
 from datetime import timedelta
 import logging
 import random
+from django.db.models import Q
+
 
 logger = logging.getLogger(__name__)
 
@@ -230,13 +232,77 @@ def get_customer_monthly_income(document_id):
         return None
 
 
+# ================================================
+#    CUSTOMER FILTER HELPER CLASS
+# ================================================
 
+class CustomerFilter:
 
+    @staticmethod
+    def apply_filters(queryset, params):
+        """Apply all customer filters in clean, maintainable form"""
 
+        # ---------------- BASIC FILTERS ----------------
+        status_filter = params.get("status")
+        document_type = params.get("document_type")
+        # phone = params.get("phone")
+        created_by = params.get("created_by")
 
+        created_from = params.get("created_from")
+        created_to = params.get("created_to")
 
+        # ---------------- LOCATION FILTERS (3D) ----------------
+        region_id = params.get("region_id")
+        province_id = params.get("province_id")
+        district_id = params.get("district_id")
+        corregimiento_id = params.get("corregimiento_id")
 
+        # ---------------- CREDIT APPLICATION FILTER ----------------
+        has_application = params.get("has_application")  # 1 or 0
 
+        # ------ APPLY FILTERS ----------
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
 
+        if document_type:
+            queryset = queryset.filter(document_type=document_type)
 
+        if created_by:
+            queryset = queryset.filter(created_by_id=created_by)
 
+        # Date ranges
+        if created_from:
+            queryset = queryset.filter(created_at__date__gte=created_from)
+
+        if created_to:
+            queryset = queryset.filter(created_at__date__lte=created_to)
+
+        # ------------- 3D FETCHING FILTERS -------------
+        if region_id:
+            queryset = queryset.filter(
+                credit_applications__finance_plan__store__region_id=region_id
+            )
+
+        if province_id:
+            queryset = queryset.filter(
+                credit_applications__finance_plan__store__province_id=province_id
+            )
+
+        if district_id:
+            queryset = queryset.filter(
+                credit_applications__finance_plan__store__district_id=district_id
+            )
+
+        if corregimiento_id:
+            queryset = queryset.filter(
+                credit_applications__finance_plan__store__corregimiento_id=corregimiento_id
+            )
+
+        # Has credit application?
+        if has_application == "1":
+            queryset = queryset.filter(credit_applications__isnull=False)
+
+        if has_application == "0":
+            queryset = queryset.filter(credit_applications__isnull=True)
+
+        return queryset.distinct()
