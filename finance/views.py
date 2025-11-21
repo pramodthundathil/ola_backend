@@ -198,20 +198,39 @@ class AutoFinancePlanView(APIView):
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            auto_plan, created = AutoFinancePlan.objects.get_or_create(
+            # auto_plan, created = AutoFinancePlan.objects.get_or_create(
+            #     credit_application=credit_app,
+            #     defaults={
+            #         "customer": customer,
+            #         "credit_score": credit_score,
+            #         "apc_score": apc_score,
+            #         "risk_tier": "",
+            #         "customer_monthly_income": monthly_income,
+            #         "payment_capacity_factor": Decimal("0.00"),
+            #         "maximum_allowed_installment": Decimal("0.00"),
+            #         "minimum_down_payment_percentage": Decimal("0.00"),
+            #         "has_finance_plan": False,
+            #     }
+            # )
+            auto_plan = AutoFinancePlan.objects.filter(
                 credit_application=credit_app,
-                defaults={
-                    "customer": customer,
-                    "credit_score": credit_score,
-                    "apc_score": apc_score,
-                    "risk_tier": "",
-                    "customer_monthly_income": monthly_income,
-                    "payment_capacity_factor": Decimal("0.00"),
-                    "maximum_allowed_installment": Decimal("0.00"),
-                    "minimum_down_payment_percentage": Decimal("0.00"),
-                    "has_finance_plan": False,
-                }
-            )
+                has_finance_plan=False
+            ).order_by('-id').first()
+
+            if auto_plan is None:
+                auto_plan = AutoFinancePlan.objects.create(
+                    credit_application=credit_app,
+                    customer=customer,
+                    credit_score=credit_score,
+                    apc_score=apc_score,
+                    risk_tier="",
+                    customer_monthly_income=monthly_income,
+                    payment_capacity_factor=Decimal("0.00"),
+                    maximum_allowed_installment=Decimal("0.00"),
+                    minimum_down_payment_percentage=Decimal("0.00"),
+                    has_finance_plan=False,
+                )
+
 
             # If finance plan already exists for this auto plan
             if auto_plan.has_finance_plan:
@@ -240,6 +259,8 @@ class AutoFinancePlanView(APIView):
             # engine = AutoDecisionEngine(auto_plan)
             # engine_out=engine.run()
             # 8️⃣ Run decision engine
+            
+
             try:
                 engine = AutoDecisionEngine(auto_plan)
                 engine_out = engine.run()
