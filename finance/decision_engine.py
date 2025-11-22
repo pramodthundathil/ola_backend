@@ -35,7 +35,8 @@ class AutoDecisionEngine:
             tier_c_min_score = credit_config.tier_c_min_score
             self.plan.determine_risk_tier(tier_a_min_score,tier_b_min_score , tier_c_min_score)
         except:
-            self.plan.determine_risk_tier()
+            # self.plan.determine_risk_tier()
+            raise ValidationError("Credit configuration not found. Contact admin.")
 
         rules = self.plan.get_tier_rules() or {}
 
@@ -110,7 +111,8 @@ class DecisionEngine:
             tier_c_min_score = credit_config.tier_c_min_score
             self.plan.determine_risk_tier(tier_a_min_score,tier_b_min_score , tier_c_min_score)
         except:
-            self.plan.determine_risk_tier()
+            # self.plan.determine_risk_tier()
+            raise ValidationError("Credit configuration not found. Contact admin.")
 
         # 2️ Check if device is high-end
         self.plan.is_high_end_device = self.plan.device_price > Decimal('300.00')

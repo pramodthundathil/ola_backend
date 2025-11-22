@@ -368,7 +368,7 @@ class FinancePlan(models.Model):
         return f"Finance Plan for App {self.credit_application.id} - {self.risk_tier}"
     
     def determine_risk_tier(self, tier_a_min_score = 600,tier_b_min_score = 550, tier_c_min_score = 500):
-        """Determine risk tier based on APC score"""
+        """Determine risk tier based on APC score"""        
         if self.apc_score >= tier_a_min_score:
             self.risk_tier = 'TIER_A'
         elif self.apc_score >= tier_b_min_score:
@@ -377,6 +377,7 @@ class FinancePlan(models.Model):
             self.risk_tier = 'TIER_C'
         else:
             self.risk_tier = 'TIER_D'
+            
         return self.risk_tier
     
     def get_tier_rules(self):
@@ -598,8 +599,8 @@ class FinancePlan(models.Model):
         if self.device and not self.device_price:
             self.calculate_device_price()
 
-        if self.apc_score:
-            self.determine_risk_tier()
+        # if self.apc_score:
+        #     self.determine_risk_tier()
         
         if self.device_price:
             self.is_high_end_device = self.device_price > Decimal('300.00')
@@ -910,7 +911,7 @@ class AutoFinancePlan(models.Model):
     on_delete=models.CASCADE,
     related_name='auto_finance_plans'
     )
-    credit_application = models.OneToOneField(
+    credit_application = models.ForeignKey(
         CreditApplication,
         on_delete=models.CASCADE,
         related_name='auto_finance_plan'
@@ -958,18 +959,19 @@ class AutoFinancePlan(models.Model):
 
     def __str__(self):
         return f"AutoFinancePlan - {self.customer.document_number if self.customer else 'N/A'}"
-
-    def determine_risk_tier(self):
+    
+    def determine_risk_tier(self, tier_a_min_score = 600,tier_b_min_score = 550, tier_c_min_score = 500):
         """Determine risk tier based on APC score"""
-        if self.apc_score >= 600:
+        if self.apc_score >= tier_a_min_score:
             self.risk_tier = 'TIER_A'
-        elif self.apc_score >= 550:
+        elif self.apc_score >= tier_b_min_score:
             self.risk_tier = 'TIER_B'
-        elif self.apc_score >= 500:
+        elif self.apc_score >= tier_c_min_score:
             self.risk_tier = 'TIER_C'
         else:
             self.risk_tier = 'TIER_D'
         return self.risk_tier
+
     
     def get_tier_rules(self):
         """Get financing rules based on risk tier"""
