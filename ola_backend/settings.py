@@ -46,6 +46,10 @@ YAPPY_SECRET_KEY = os.getenv("YAPPY_SECRET_KEY")
 YAPPY_IPN_URL = os.getenv("YAPPY_IPN_URL")
 urlDomain = os.getenv("urlDomain")
 
+# VERIFF
+# VERIFF_API_KEY = os.getenv("VERIFF_API_KEY")
+VERIFF_SHARED_SECRET = os.getenv("VERIFF_SHARED_SECRET")
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
