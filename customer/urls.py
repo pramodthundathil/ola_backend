@@ -27,7 +27,7 @@ urlpatterns = [
     # veriff
     # path('veriff/start/', views.StartVerificationAPIView.as_view(), name='veriff-start'),
     path('veriff/webhook/', views.VeriffWebhookAPIView.as_view(), name='veriff-webhook'),
-    path("customer/<int:customer_id>/verification-status/", views.VerificationStatusAPIView.as_view()),
+    path("<int:customer_id>/verification-status/", views.VerificationStatusAPIView.as_view()),
 
 
 ]
