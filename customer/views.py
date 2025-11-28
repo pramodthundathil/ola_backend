@@ -30,10 +30,10 @@ from .sms_utils import send_sms
 # Standard Library Imports
 import logging
 import random
-
-
-# External Library Imports
 import requests
+import hmac
+import hashlib
+import json
 
 # Logger Setup
 logger = logging.getLogger(__name__)
@@ -1772,3 +1772,260 @@ class CustomerDashboardAPIView(APIView):
             "message": "Customer dashboard fetched successfully.",
             "data": response_data
         }, status=status.HTTP_200_OK)
+
+
+
+
+
+
+
+# class StartVerificationAPIView(APIView):
+#     permission_classes=[IsAuthenticatedUser]
+    
+#     def post(self, request):
+
+#         customer_id=request.data.get('customer_id')
+#         if not customer_id:
+#             logger.warning("StartVerification: customer_id missing in request.")
+#             return Response({
+#                 "status": "error",
+#                 "message": "customer_id is required.",
+#                 "data": None
+#             }, status=status.HTTP_400_BAD_REQUEST)
+#         logger.info("StartVerification: Creating session for customer_id=%s", customer_id)
+        
+#         veriff_url = "https://api.veriff.com/v1/sessions"
+
+#         payload = {
+#             "verification": {
+#                 "vendorData": str(customer_id),
+#                 "callback":{
+#                     "redirectUrl":"https://ola-credits-ui.vercel.app/sellerPortal/creditScore"
+#                 }
+#             }
+#         }
+
+#         headers = {
+#             "Content-Type": "application/json",
+#             "X-AUTH-CLIENT":settings.VERIFF_API_KEY,
+#         }
+
+#         try:
+#             veriff_res = requests.post(veriff_url, json=payload, headers=headers,timeout=10)
+
+#             if veriff_res.status_code != 200:
+#                 logger.error("StartVerification: Veriff error %s - %s",veriff_res.status_code, veriff_res.text)
+#                 return Response({
+#                     "status": "error",
+#                     "message": "Failed to create Veriff session.",
+#                     "data": veriff_res.json()
+#                 }, status=veriff_res.status_code)
+#             logger.info("StartVerification: Veriff session created successfully for customer_id=%s", customer_id)
+
+#             veriff_data = veriff_res.json()
+
+#             return Response({
+#                 "status": "success",
+#                 "message": "Verification session created successfully.",
+#                 "data": veriff_data
+#             }, status=status.HTTP_200_OK)
+        
+#         except requests.Timeout:
+#             logger.error("StartVerification: Request to Veriff timed out.")
+#             return Response({
+#                 "status": "error",
+#                 "message": "Veriff request timed out.",
+#                 "data": None
+#             }, status=status.HTTP_504_GATEWAY_TIMEOUT)
+        
+#         except requests.ConnectionError:
+#             logger.error("StartVerification: Failed to connect to Veriff.")
+#             return Response({
+#                 "status": "error",
+#                 "message": "Failed to connect to Veriff.",
+#                 "data": None
+#             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+#         except Exception as e:
+#             logger.exception("StartVerification: Unexpected error occurred.")
+#             return Response({
+#                 "status": "error",
+#                 "message": str(e),
+#                 "data": None
+#             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ========================================================
+#     VIEW FOR VERIFF FOR STORE FINAL RESPONSE
+# ========================================================
+
+class VeriffWebhookAPIView(APIView):
+    """
+    Veriff Webhook Receiver.
+    - Veriff sends verification updates (submitted, approved, declined).
+    - This endpoint MUST return only HTTP status codes .
+    - Used internally (not accessed by frontend).
+    - store final response status
+    """
+    authentication_classes = []   
+    permission_classes = []       
+
+    def post(self, request):
+        try:
+            logger.info("Received Veriff webhook: %s", request.body.decode())
+
+            # ======VALIDATE SIGNATURE========#
+            raw_body = request.body
+            hmac_signature = request.headers.get("x-hmac-signature")
+            shared_secret = settings.VERIFF_SHARED_SECRET   
+
+            calculated_sig = hmac.new(
+                shared_secret.encode(),
+                raw_body,
+                hashlib.sha256
+            ).hexdigest()
+
+            if calculated_sig != hmac_signature:
+                logger.warning("Invalid HMAC signature from Veriff.")
+                return Response(status=401) 
+
+            # ======= PARSE PAYLOAD =======#
+            data = request.data
+            verif = data.get("verification", {})
+
+            vendor_data = verif.get("vendorData")  
+            status = verif.get("status") 
+
+            if vendor_data is None or status is None:
+                logger.warning("Invalid payload structure: %s", data)
+                return Response(status=400)   
+
+            try:
+                vendor_data = int(vendor_data)
+            except:
+                logger.warning("Invalid vendorData (not int): %s", vendor_data)
+                return Response(status=400)        
+
+            # ============ UPDATE DATABASE ===============#
+
+            try:
+                customer = Customer.objects.get(id=vendor_data)
+            except Customer.DoesNotExist:
+                logger.error("Customer not found: %s", vendor_data)
+                return Response(status=404)   
+            
+            if not hasattr(customer, "identity_verification"):
+                logger.error("IdentityVerification missing for customer: %s", vendor_data)
+                return Response(status=404)    
+                    
+            identity = customer.identity_verification
+
+            if status == "approved":
+                identity.overall_status = "VERIFIED"
+            elif status == "declined":
+                identity.overall_status = "REJECTED"
+            elif status == "submitted" or status == "started":
+                identity.overall_status = "IN_PROGRESS"
+            elif status == "expired":
+                identity.overall_status = "EXPIRED"
+            else:
+                identity.overall_status = "PENDING"
+            identity.save()
+            logger.info("Updated verification status for customer %s to %s", vendor_data, status)
+
+            #==========SUCCESS RESPONSE===========
+            return Response(status=200)
+        
+        except Exception as e:
+            logger.exception("Unexpected error in Veriff webhook.")
+            return Response(status=500)
+
+        
+# ===========================================================
+#    VERIFF FINAL RESPONSE GET VIEW
+# ===========================================================
+
+
+class VerificationStatusAPIView(APIView):
+    """
+    Fetch the current Veriff verification status for a customer.
+    Called by frontend (polling).
+    """
+    permission_classes=[IsAuthenticatedUser]
+
+
+    @swagger_auto_schema(
+        operation_summary="Get customer's verification status",
+        operation_description="""
+        Frontend polls this API to check updated ID verification status.
+
+        Status values:
+        - PENDING
+        - IN_PROGRESS
+        - VERIFIED
+        - REJECTED
+        - EXPIRED
+        """,
+        tags=["Identity-verification"],
+        manual_parameters=[
+            openapi.Parameter(
+                "customer_id",
+                openapi.IN_PATH,
+                description="Customer ID",
+                type=openapi.TYPE_INTEGER
+            )
+        ],
+        responses={
+            200: openapi.Response("Success"),
+            404: "Customer / IdentityVerification not found",
+            500: "Server error"
+        }
+    )
+
+    def get(self, request, customer_id):
+        try:
+            logger.info("VerificationStatus: Fetching status for customer_id=%s", customer_id)
+
+            # -------- Fetch customer --------
+            try:
+                customer = Customer.objects.get(id=customer_id)
+            except Customer.DoesNotExist:
+                logger.warning("VerificationStatus: Customer %s not found", customer_id)
+                return Response({
+                    "status": "error",
+                    "message": "Customer not found.",
+                    "data": None
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # -------- Check IdentityVerification --------
+            identity = getattr(customer, "identity_verification", None)
+            if identity is None:
+                logger.warning("VerificationStatus: IdentityVerification missing for customer %s", customer_id)
+                return Response({
+                    "status": "error",
+                    "message": "IdentityVerification record not found for this customer.",
+                    "data": None
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # -------- SUCCESS --------
+            logger.info(
+                "VerificationStatus: Status fetched for customer %s => %s",
+                customer_id,
+                identity.overall_status
+            )
+
+            return Response({
+                "status": "success",
+                "message": "Verification status fetched successfully.",
+                "data": {
+                    "overall_status": identity.overall_status
+                }
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("VerificationStatus: Unexpected error")
+            return Response({
+                "status": "error",
+                "message": str(e),
+                "data": None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

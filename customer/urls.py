@@ -24,6 +24,12 @@ urlpatterns = [
     # customer dashboard
     path('<int:customer_id>/dashboard/', views.CustomerDashboardAPIView.as_view(), name='customer-dashboard'),
 
+    # veriff
+    # path('veriff/start/', views.StartVerificationAPIView.as_view(), name='veriff-start'),
+    path('veriff/webhook/', views.VeriffWebhookAPIView.as_view(), name='veriff-webhook'),
+    path("<int:customer_id>/verification-status/", views.VerificationStatusAPIView.as_view()),
+
+
 ]
 
 
