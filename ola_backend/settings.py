@@ -48,7 +48,8 @@ urlDomain = os.getenv("urlDomain")
 
 # VERIFF
 # VERIFF_API_KEY = os.getenv("VERIFF_API_KEY")
-VERIFF_SHARED_SECRET = os.getenv("VERIFF_SHARED_SECRET")
+# VERIFF_SHARED_SECRET = os.getenv("VERIFF_SHARED_SECRET")
+VERIFF_SHARED_SECRET = "dd456250-1c75-433e-9cf8-3d41fdfffa49"
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
