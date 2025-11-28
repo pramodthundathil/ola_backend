@@ -15,6 +15,7 @@ from rest_framework import status
 from .models import ( Customer,CreditScore,
                      CreditConfig,PersonalReference,
                      CustomerIncomeFile,CustomerIncome,
+                     IdentityVerification
                      )
 from .serializers import (
      CustomerSerializer,
@@ -1872,6 +1873,7 @@ class VeriffWebhookAPIView(APIView):
 
     def post(self, request):
         try:
+            logger.info("veriff webhook started")
             logger.info("Received Veriff webhook: %s", request.body.decode())
 
             # ======VALIDATE SIGNATURE========#
@@ -1912,13 +1914,13 @@ class VeriffWebhookAPIView(APIView):
                 customer = Customer.objects.get(id=vendor_data)
             except Customer.DoesNotExist:
                 logger.error("Customer not found: %s", vendor_data)
-                return Response(status=404)   
+                return Response(status=404) 
+
+            identity = getattr(customer, "identity_verification", None)
+
+            if identity is None:
+                identity = IdentityVerification.objects.create(customer=customer)  
             
-            if not hasattr(customer, "identity_verification"):
-                logger.error("IdentityVerification missing for customer: %s", vendor_data)
-                return Response(status=404)    
-                    
-            identity = customer.identity_verification
 
             if status == "approved":
                 identity.overall_status = "VERIFIED"
@@ -1931,10 +1933,12 @@ class VeriffWebhookAPIView(APIView):
             else:
                 identity.overall_status = "PENDING"
             identity.save()
+            logger.info("Webhook completed")
             logger.info("Updated verification status for customer %s to %s", vendor_data, status)
 
             #==========SUCCESS RESPONSE===========
             return Response(status=200)
+        
         
         except Exception as e:
             logger.exception("Unexpected error in Veriff webhook.")
