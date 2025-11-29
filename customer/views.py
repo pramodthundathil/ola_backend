@@ -1871,7 +1871,7 @@ class VeriffWebhookAPIView(APIView):
     authentication_classes = []   
     permission_classes = []       
 
-    def post(self, request):
+    def get(self, request):
         try:
             logger.info("veriff webhook started")
             logger.info("Received Veriff webhook: %s", request.body.decode())
