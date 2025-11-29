@@ -1872,6 +1872,8 @@ class VeriffWebhookAPIView(APIView):
     permission_classes = []       
 
     def get(self, request):
+        logger.info("get method is working")
+
         try:
             logger.info("veriff webhook started")
             logger.info("Received Veriff webhook: %s", request.body.decode())
@@ -1944,7 +1946,81 @@ class VeriffWebhookAPIView(APIView):
             logger.exception("Unexpected error in Veriff webhook.")
             return Response(status=500)
 
+        # ==============================================
+
+    def post(self, request):
+        logger.info("post method is working")
+        try:
+            logger.info("veriff webhook started")
+            logger.info("Received Veriff webhook: %s", request.body.decode())
+
+            # ======VALIDATE SIGNATURE========#
+            raw_body = request.body
+            hmac_signature = request.headers.get("x-hmac-signature")
+            shared_secret = settings.VERIFF_SHARED_SECRET   
+
+            calculated_sig = hmac.new(
+                shared_secret.encode(),
+                raw_body,
+                hashlib.sha256
+            ).hexdigest()
+
+            if calculated_sig != hmac_signature:
+                logger.warning("Invalid HMAC signature from Veriff.")
+                return Response(status=401) 
+
+            # ======= PARSE PAYLOAD =======#
+            data = request.data
+            verif = data.get("verification", {})
+
+            vendor_data = verif.get("vendorData")  
+            status = verif.get("status") 
+
+            if vendor_data is None or status is None:
+                logger.warning("Invalid payload structure: %s", data)
+                return Response(status=400)   
+
+            try:
+                vendor_data = int(vendor_data)
+            except:
+                logger.warning("Invalid vendorData (not int): %s", vendor_data)
+                return Response(status=400)        
+
+            # ============ UPDATE DATABASE ===============#
+
+            try:
+                customer = Customer.objects.get(id=vendor_data)
+            except Customer.DoesNotExist:
+                logger.error("Customer not found: %s", vendor_data)
+                return Response(status=404) 
+
+            identity = getattr(customer, "identity_verification", None)
+
+            if identity is None:
+                identity = IdentityVerification.objects.create(customer=customer)  
+            
+
+            if status == "approved":
+                identity.overall_status = "VERIFIED"
+            elif status == "declined":
+                identity.overall_status = "REJECTED"
+            elif status == "submitted" or status == "started":
+                identity.overall_status = "IN_PROGRESS"
+            elif status == "expired":
+                identity.overall_status = "EXPIRED"
+            else:
+                identity.overall_status = "PENDING"
+            identity.save()
+            logger.info("Webhook completed")
+            logger.info("Updated verification status for customer %s to %s", vendor_data, status)
+
+            #==========SUCCESS RESPONSE===========
+            return Response(status=200)
         
+        
+        except Exception as e:
+            logger.exception("Unexpected error in Veriff webhook.")
+            return Response(status=500)        
 # ===========================================================
 #    VERIFF FINAL RESPONSE GET VIEW
 # ===========================================================
