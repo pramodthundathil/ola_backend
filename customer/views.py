@@ -1873,7 +1873,6 @@ class VeriffWebhookAPIView(APIView):
 
     def get(self, request):
         logger.info("get method is working")
-
         try:
             logger.info("veriff webhook started")
             logger.info("Received Veriff webhook: %s", request.body.decode())
@@ -1895,10 +1894,10 @@ class VeriffWebhookAPIView(APIView):
 
             # ======= PARSE PAYLOAD =======#
             data = request.data
-            verif = data.get("verification", {})
+            verif = data.get("verification") or data
 
             vendor_data = verif.get("vendorData")  
-            status = verif.get("status") 
+            status = verif.get("status") or verif.get("action")
 
             if vendor_data is None or status is None:
                 logger.warning("Invalid payload structure: %s", data)
@@ -1944,7 +1943,7 @@ class VeriffWebhookAPIView(APIView):
         
         except Exception as e:
             logger.exception("Unexpected error in Veriff webhook.")
-            return Response(status=500)
+            return Response(status=500)    
 
         # ==============================================
 
@@ -1971,10 +1970,10 @@ class VeriffWebhookAPIView(APIView):
 
             # ======= PARSE PAYLOAD =======#
             data = request.data
-            verif = data.get("verification", {})
+            verif = data.get("verification") or data
 
             vendor_data = verif.get("vendorData")  
-            status = verif.get("status") 
+            status = verif.get("status") or verif.get("action")
 
             if vendor_data is None or status is None:
                 logger.warning("Invalid payload structure: %s", data)
