@@ -1894,28 +1894,47 @@ class VeriffWebhookAPIView(APIView):
 
             # ======= PARSE PAYLOAD =======#
             data = request.data
-            verif = data.get("verification") or data
+            # verif = data.get("verification") or data
+            # decision webhook → has "verification"
+            if "verification" in data:
+                verif = data["verification"]
+                status = verif.get("status")
 
-            vendor_data = verif.get("vendorData")  
-            status = verif.get("status") or verif.get("action")
+            # event webhook → has "action"
+            else:
+                verif = data
+                status = verif.get("action")
 
-            if vendor_data is None or status is None:
-                logger.warning("Invalid payload structure: %s", data)
-                return Response(status=400)   
+
+            # vendor_data = verif.get("vendorData")  
+            # vendor_raw = (verif.get("vendorData") or "").strip()
+
+            vendor_raw = (verif.get("vendorData") or "").strip()
+            # status = verif.get("status") or verif.get("action")
+            if not vendor_raw:
+                logger.warning("Ignoring webhook with empty vendorData")
+                return Response(status=200)
+
+            # if vendor_data is None or status is None:
+            #     logger.warning("Invalid payload structure: %s", data)
+            #     return Response(status=400)   
 
             try:
-                vendor_data = int(vendor_data)
+                # vendor_data = int(vendor_data)
+                vendor_id = int(vendor_raw)
             except:
-                logger.warning("Invalid vendorData (not int): %s", vendor_data)
-                return Response(status=400)        
+                logger.warning("Invalid vendorData (not int): %s", vendor_raw)
+                # return Response(status=400) 
+                return Response(status=200)
 
             # ============ UPDATE DATABASE ===============#
 
             try:
-                customer = Customer.objects.get(id=vendor_data)
+                customer = Customer.objects.get(id=vendor_id)
             except Customer.DoesNotExist:
-                logger.error("Customer not found: %s", vendor_data)
-                return Response(status=404) 
+                logger.error("Customer not found: %s", vendor_id)
+                # return Response(status=404) 
+                return Response(status=200)
 
             identity = getattr(customer, "identity_verification", None)
 
@@ -1935,7 +1954,7 @@ class VeriffWebhookAPIView(APIView):
                 identity.overall_status = "PENDING"
             identity.save()
             logger.info("Webhook completed")
-            logger.info("Updated verification status for customer %s to %s", vendor_data, status)
+            logger.info("Updated verification status for customer %s to %s", vendor_id, status)
 
             #==========SUCCESS RESPONSE===========
             return Response(status=200)
@@ -1943,7 +1962,7 @@ class VeriffWebhookAPIView(APIView):
         
         except Exception as e:
             logger.exception("Unexpected error in Veriff webhook.")
-            return Response(status=500)    
+            return Response(status=200)     
 
         # ==============================================
 
@@ -1970,28 +1989,47 @@ class VeriffWebhookAPIView(APIView):
 
             # ======= PARSE PAYLOAD =======#
             data = request.data
-            verif = data.get("verification") or data
+            # verif = data.get("verification") or data
+            # decision webhook → has "verification"
+            if "verification" in data:
+                verif = data["verification"]
+                status = verif.get("status")
 
-            vendor_data = verif.get("vendorData")  
-            status = verif.get("status") or verif.get("action")
+            # event webhook → has "action"
+            else:
+                verif = data
+                status = verif.get("action")
 
-            if vendor_data is None or status is None:
-                logger.warning("Invalid payload structure: %s", data)
-                return Response(status=400)   
+
+            # vendor_data = verif.get("vendorData")  
+            # vendor_raw = (verif.get("vendorData") or "").strip()
+
+            vendor_raw = (verif.get("vendorData") or "").strip()
+            # status = verif.get("status") or verif.get("action")
+            if not vendor_raw:
+                logger.warning("Ignoring webhook with empty vendorData")
+                return Response(status=200)
+
+            # if vendor_data is None or status is None:
+            #     logger.warning("Invalid payload structure: %s", data)
+            #     return Response(status=400)   
 
             try:
-                vendor_data = int(vendor_data)
+                # vendor_data = int(vendor_data)
+                vendor_id = int(vendor_raw)
             except:
-                logger.warning("Invalid vendorData (not int): %s", vendor_data)
-                return Response(status=400)        
+                logger.warning("Invalid vendorData (not int): %s", vendor_raw)
+                # return Response(status=400) 
+                return Response(status=200)
 
             # ============ UPDATE DATABASE ===============#
 
             try:
-                customer = Customer.objects.get(id=vendor_data)
+                customer = Customer.objects.get(id=vendor_id)
             except Customer.DoesNotExist:
-                logger.error("Customer not found: %s", vendor_data)
-                return Response(status=404) 
+                logger.error("Customer not found: %s", vendor_id)
+                # return Response(status=404) 
+                return Response(status=200)
 
             identity = getattr(customer, "identity_verification", None)
 
@@ -2011,7 +2049,7 @@ class VeriffWebhookAPIView(APIView):
                 identity.overall_status = "PENDING"
             identity.save()
             logger.info("Webhook completed")
-            logger.info("Updated verification status for customer %s to %s", vendor_data, status)
+            logger.info("Updated verification status for customer %s to %s", vendor_id, status)
 
             #==========SUCCESS RESPONSE===========
             return Response(status=200)
@@ -2019,7 +2057,7 @@ class VeriffWebhookAPIView(APIView):
         
         except Exception as e:
             logger.exception("Unexpected error in Veriff webhook.")
-            return Response(status=500)        
+            return Response(status=200)        
 # ===========================================================
 #    VERIFF FINAL RESPONSE GET VIEW
 # ===========================================================
