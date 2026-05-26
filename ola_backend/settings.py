@@ -235,29 +235,29 @@ WSGI_APPLICATION = 'ola_backend.wsgi.application'
 # }
 
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'ola_credit',
-#         'USER': 'olauser',
-#         'PASSWORD': '1234@qwer',
-#         'HOST': 'localhost',
-#         'PORT': '5432',
-#     }
-# }
-
-
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv("DB_NAME", "ola_credit"),
-        'USER': os.getenv("DB_USER", "postgres"),
-        'PASSWORD': os.getenv("DB_PASSWORD", ""),
-        'HOST': os.getenv("DB_HOST", "localhost"),
-        'PORT': os.getenv("DB_PORT", "5432"),
+        'NAME': 'ola_credit',
+        'USER': 'olauser',
+        'PASSWORD': '1234@qwer',
+        'HOST': 'localhost',
+        'PORT': '5432',
     }
 }
+
+
+
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': os.getenv("DB_NAME", "ola_credit"),
+#         'USER': os.getenv("DB_USER", "postgres"),
+#         'PASSWORD': os.getenv("DB_PASSWORD", ""),
+#         'HOST': os.getenv("DB_HOST", "localhost"),
+#         'PORT': os.getenv("DB_PORT", "5432"),
+#     }
+# }
 
 
 # Password validation
