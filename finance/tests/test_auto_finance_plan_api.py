@@ -26,7 +26,7 @@ class TestAutoFinancePlanView:
     # SUCCESS TEST
     # ------------------------------------------------------------------
     @patch("finance.views.AuditLog.objects.create")
-    @patch("finance.views.CustomerIncome.get_income_by_document", return_value=Decimal("1000.00"))
+    @patch("finance.views.get_customer_monthly_income", return_value=Decimal("1000.00"))
     @patch("finance.views.AutoDecisionEngine")
     def test_create_auto_finance_plan_success(self, mock_engine, mock_income, mock_audit, setup_data):
         """Test successful auto finance plan generation"""
@@ -151,7 +151,7 @@ class TestAutoFinancePlanView:
     # NEGATIVE TEST: Internal Server Error
     # ------------------------------------------------------------------
     @patch("finance.views.AuditLog.objects.create")
-    @patch("finance.views.CustomerIncome.get_income_by_document", side_effect=Exception("Income API failed"))
+    @patch("finance.views.get_customer_monthly_income", side_effect=Exception("Income API failed"))
     def test_create_auto_finance_plan_internal_error(self, mock_income, mock_audit, setup_data):
         client = APIClient()
         client.force_authenticate(user=setup_data["user"])

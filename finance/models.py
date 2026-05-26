@@ -467,6 +467,8 @@ class FinancePlan(models.Model):
 
         
         if self.risk_tier == 'TIER_D':
+            self.maximum_allowed_installment = Decimal('0.00')
+            self.installment_to_income_ratio = Decimal('0.00')
             self.payment_capacity_passed = False
             return False
         

@@ -69,6 +69,7 @@ from .serializers import (
     FinanceMultipleSerializer,
     EMIPaymentRequestSerializer,
     VerifyCustomerSerializer,
+    WesternUnionPaymentSerializer,
     FinanceFullDetailsSerializer,
 )
 from .permissions import IsAdminOrGlobalManager
@@ -2510,8 +2511,19 @@ class FinanceMultipleDetailView(APIView):
 # WESTERN UNION (CASH PAYMENT) API
 # ===================================
 
+def parse_importe(importe_val):
+    s = str(importe_val).strip()
+    if not s.isdigit():
+        return Decimal("0.00")
+    if len(s) < 3:
+        return Decimal(s)
+    integer_part = s[:-2]
+    decimal_part = s[-2:]
+    return Decimal(f"{integer_part}.{decimal_part}")
+
+
 class VerifyCustomerAPIView(APIView):
-    permission_classes=[AllowAny]
+    permission_classes = [AllowAny]
     """
     Step 1: Customer enters ID/account number to check EMI details.
     Endpoint: /verify-customer/
@@ -2527,18 +2539,26 @@ class VerifyCustomerAPIView(APIView):
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=[
-                "customer_id", "operation_type", "utility",
-                "terminal_id", "date", "time", "operation_code",
-                "user", "password"
+                "tipo_operacion", "campos_busqueda", "utility",
+                "terminal", "fecha", "hora", "cod_operacion"
             ],
             properties={
-                "customer_id": openapi.Schema(type=openapi.TYPE_STRING, example="123456"),
-                "operation_type": openapi.Schema(type=openapi.TYPE_STRING, example="CashIn"),
+                "tipo_operacion": openapi.Schema(type=openapi.TYPE_STRING, example="CashIn"),
+                "campos_busqueda": openapi.Schema(
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            "campo1": openapi.Schema(type=openapi.TYPE_STRING, example="12345678"),
+                            "campo2": openapi.Schema(type=openapi.TYPE_STRING, example="996884"),
+                        }
+                    )
+                ),
                 "utility": openapi.Schema(type=openapi.TYPE_STRING, example="90061234"),
-                "terminal_id": openapi.Schema(type=openapi.TYPE_STRING, example="D00561"),
-                "date": openapi.Schema(type=openapi.TYPE_STRING, example="20251107"),
-                "time": openapi.Schema(type=openapi.TYPE_STRING, example="101940"),
-                "operation_code": openapi.Schema(type=openapi.TYPE_STRING, example="C"),
+                "terminal": openapi.Schema(type=openapi.TYPE_STRING, example="D00561"),
+                "fecha": openapi.Schema(type=openapi.TYPE_STRING, example="20190106"),
+                "hora": openapi.Schema(type=openapi.TYPE_STRING, example="101940"),
+                "cod_operacion": openapi.Schema(type=openapi.TYPE_STRING, example="C"),
                 "user": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
                 "password": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
             },
@@ -2548,103 +2568,181 @@ class VerifyCustomerAPIView(APIView):
                 description="Customer and EMI details found successfully",
                 examples={
                     "application/json": {
-                        "operation_type": "CashIn",
-                        "customer_id": "123456",
-                        "customer_name": "Rahul Sharma",
+                        "tipo_operacion": "CashIn",
+                        "cod_cliente": "77893",
+                        "nom_cliente": "Manuel Belgrano",
+                        "cod_severidad": "0",
                         "utility": "90061234",
                         "terminal": "D00561",
-                        "date": "20251107",
-                        "time": "101940",
-                        "operation_code": "C",
-                        "response_code": "0",
-                        "response_message": "Query successful",
+                        "fecha": "20190106",
+                        "hora": "101940",
+                        "cod_operacion": "C",
+                        "cod_respuesta": "0",
+                        "msg_respuesta": "Consulta exitosa",
                         "items": [
                             {
-                                "id_item": "LOAN123",
-                                "amount": "10000",
-                                "description": "Loan installment - Due 2025-11-15",
-                                "due_date": "20251115"
+                                "id_item": "123456",
+                                "cod_barra": "90061234000232500005656500",
+                                "importe": "75000",
+                                "monto_abierto": False,
+                                "texto_mostrar": "Factura 1",
+                                "prioriza_deuda": "",
+                                "orden": 0,
+                                "fecha_vencimiento": "20190201"
                             }
                         ]
                     }
                 },
             ),
-            404: openapi.Response(
-                description="Customer not found",
-                examples={"application/json": {"response_code": "7", "response_message": "Customer not found"}}
-            ),
-            200: openapi.Response(
-                description="No pending payments found",
-                examples={"application/json": {"response_code": "6", "response_message": "No pending payments found"}}
-            ),
         },
     )
     def post(self, request):
-
         serializer = VerifyCustomerSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        # Validate credentials
+        if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "cod_cliente": "",
+                "nom_cliente": "",
+                "cod_severidad": "0",
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_respuesta": "9",
+                "msg_respuesta": "Invalid credentials",
+                "items": []
+            }, status=status.HTTP_401_UNAUTHORIZED)
 
-        #  Validate credentials
-        if data.get("user") != settings.WESTERN_USER  or data.get("password") != settings.WESTERN_PASS:
-            return Response(
-                {"response_code": "9", "response_message": "Invalid credentials"},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+        campos = data.get("campos_busqueda", [])
+        if not campos or not isinstance(campos, list):
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "cod_cliente": "",
+                "nom_cliente": "",
+                "cod_severidad": "0",
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_respuesta": "8",
+                "msg_respuesta": "Error de validación del campo de búsqueda",
+                "items": []
+            }, status=status.HTTP_200_OK)
 
-        customer_id = data.get("customer_id")
+        campo1 = campos[0].get("campo1", "").strip()
+        if not campo1:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "cod_cliente": "",
+                "nom_cliente": "",
+                "cod_severidad": "0",
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_respuesta": "8",
+                "msg_respuesta": "Error de validación del campo de búsqueda",
+                "items": []
+            }, status=status.HTTP_200_OK)
 
-        try:
-            customer = Customer.objects.get(id=customer_id)
-        except Customer.DoesNotExist:
-            return Response(
-                {"response_code": "7", "response_message": "Customer not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Search customer by document_number or ID
+        customer = Customer.objects.filter(document_number=campo1).first()
+        if not customer and campo1.isdigit():
+            customer = Customer.objects.filter(id=int(campo1)).first()
 
-        # Fetch pending EMI
-        pending_emi = EMISchedule.objects.filter(
+        if not customer:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "cod_cliente": "",
+                "nom_cliente": "",
+                "cod_severidad": "0",
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_respuesta": "7",
+                "msg_respuesta": "Cliente no existe",
+                "items": []
+            }, status=status.HTTP_200_OK)
+
+        # Fetch pending EMIs
+        pending_emis = EMISchedule.objects.filter(
             finance_plan__credit_application__customer=customer,
-            status__in=["DUE", "OVERDUE","PARTIALLY_PAID"]
-        ).first()
+            status__in=["DUE", "OVERDUE", "PARTIALLY_PAID"]
+        ).order_by("due_date")
 
-        if not pending_emi:
-            return Response(
-                {"response_code": "6", "response_message": "No pending payments found"},
-                status=status.HTTP_200_OK
-            )
+        if not pending_emis.exists():
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "cod_cliente": str(customer.id),
+                "nom_cliente": f"{customer.first_name} {customer.last_name}",
+                "cod_severidad": "0",
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_respuesta": "6",
+                "msg_respuesta": "No existe registro",
+                "items": []
+            }, status=status.HTTP_200_OK)
+
+        items = []
+        for emi in pending_emis:
+            # Format: Utility (8) + Id_item (21) + Monto abierto (1) + Importe (11) + Vencimiento (5) + Filler (13)
+            utility_str = data.get("utility", "").zfill(8)[:8]
+            id_item_str = str(emi.id).zfill(21)[:21]
+            monto_abierto_str = "0"
+            cents = int(round(emi.balance_remaining * 100))
+            importe_str = str(cents).zfill(11)[:11]
+            
+            # Julian date AAJJJ
+            due_date = emi.due_date
+            aa = due_date.strftime("%y")
+            jjj = f"{due_date.timetuple().tm_yday:03d}"
+            julian_str = f"{aa}{jjj}"
+            filler_str = "0" * 13
+
+            cod_barra = f"{utility_str}{id_item_str}{monto_abierto_str}{importe_str}{julian_str}{filler_str}"
+
+            items.append({
+                "id_item": str(emi.id),
+                "cod_barra": cod_barra,
+                "importe": str(cents),
+                "monto_abierto": False,
+                "texto_mostrar": f"Factura EMI {emi.installment_number} - Vence {due_date.strftime('%Y-%m-%d')}",
+                "prioriza_deuda": "",
+                "orden": 0,
+                "fecha_vencimiento": due_date.strftime("%Y%m%d")
+            })
 
         response = {
-            "operation_type": "CashIn",
-            "customer_id": str(customer.id),
-            "customer_name": f"{customer.first_name} {customer.last_name}",
+            "tipo_operacion": data.get("tipo_operacion"),
+            "cod_cliente": str(customer.id),
+            "nom_cliente": f"{customer.first_name} {customer.last_name}",
+            "cod_severidad": "0",
             "utility": data.get("utility"),
-            "terminal": data.get("terminal_id"),
-            "date": data.get("date"),
-            "time": data.get("time"),
-            "operation_code": data.get("operation_code"),
-            "response_code": "0",
-            "response_message": "Query successful",
-            "items": [
-                {
-                    "id_item": str(pending_emi.id),
-                    "amount": str(pending_emi.balance_remaining),
-                    "description": f"Loan installment - Due {pending_emi.due_date}",
-                    "due_date": pending_emi.due_date.strftime("%Y%m%d"),
-                }
-            ]
+            "terminal": data.get("terminal"),
+            "fecha": data.get("fecha"),
+            "hora": data.get("hora"),
+            "cod_operacion": data.get("cod_operacion"),
+            "cod_respuesta": "0",
+            "msg_respuesta": "Consulta exitosa",
+            "items": items
         }
         return Response(response, status=status.HTTP_200_OK)
 
 
-# ==============================================
-# WESTERN UNION (CASH PAYMENT) SUCESS/FAIL VIEW
-# =============================================
-
-
 class WesternUnionPaymentAPIView(APIView):
-    permission_classes=[]
+    permission_classes = [AllowAny]
     """
     Step 2: Western Union calls this API after customer pays cash.
     Endpoint: /directa/
@@ -2659,25 +2757,24 @@ class WesternUnionPaymentAPIView(APIView):
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=[
-                "operation_type", "customer_id", "id_item", "terminal",
-                "date", "time", "sequence", "transaction_code",
-                "operation_code", "barcode", "utility", "amount",
-                "payment_method", "user", "password"
+                "tipo_operacion", "cod_cliente", "cod_operacion", "id_item", "terminal",
+                "fecha", "hora", "secuencia", "cod_trx", "cod_barra", "utility", "importe",
+                "medio_pago", "user", "password"
             ],
             properties={
-                "operation_type": openapi.Schema(type=openapi.TYPE_STRING, example="CashIn"),
-                "customer_id": openapi.Schema(type=openapi.TYPE_STRING, example="123456"),
-                "id_item": openapi.Schema(type=openapi.TYPE_STRING, example="LOAN123"),
+                "tipo_operacion": openapi.Schema(type=openapi.TYPE_STRING, example="CashIn"),
+                "cod_cliente": openapi.Schema(type=openapi.TYPE_STRING, example="77893"),
+                "cod_operacion": openapi.Schema(type=openapi.TYPE_STRING, example="D"),
+                "id_item": openapi.Schema(type=openapi.TYPE_STRING, example="123456"),
                 "terminal": openapi.Schema(type=openapi.TYPE_STRING, example="D00561"),
-                "date": openapi.Schema(type=openapi.TYPE_STRING, example="20251107"),
-                "time": openapi.Schema(type=openapi.TYPE_STRING, example="102000"),
-                "sequence": openapi.Schema(type=openapi.TYPE_STRING, example="1125"),
-                "transaction_code": openapi.Schema(type=openapi.TYPE_STRING, example="D00561202511071020001125"),
-                "operation_code": openapi.Schema(type=openapi.TYPE_STRING, example="D"),
-                "barcode": openapi.Schema(type=openapi.TYPE_STRING, example="90061234000232500005656500"),
+                "fecha": openapi.Schema(type=openapi.TYPE_STRING, example="20190106"),
+                "hora": openapi.Schema(type=openapi.TYPE_STRING, example="102000"),
+                "secuencia": openapi.Schema(type=openapi.TYPE_STRING, example="1125"),
+                "cod_trx": openapi.Schema(type=openapi.TYPE_STRING, example="D00561201901061020001125"),
+                "cod_barra": openapi.Schema(type=openapi.TYPE_STRING, example="90061234000232500005656500"),
                 "utility": openapi.Schema(type=openapi.TYPE_STRING, example="90061234"),
-                "amount": openapi.Schema(type=openapi.TYPE_STRING, example="10000"),
-                "payment_method": openapi.Schema(type=openapi.TYPE_STRING, example="E01 (Cash)"),
+                "importe": openapi.Schema(type=openapi.TYPE_STRING, example="75000"),
+                "medio_pago": openapi.Schema(type=openapi.TYPE_STRING, example="E01"),
                 "user": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
                 "password": openapi.Schema(type=openapi.TYPE_STRING, example="pagofacil"),
             }
@@ -2687,119 +2784,114 @@ class WesternUnionPaymentAPIView(APIView):
                 description="Payment Successful",
                 examples={
                     "application/json": {
-                        "operation_type": "CashIn",
+                        "tipo_operacion": "CashIn",
                         "utility": "90061234",
                         "terminal": "D00561",
-                        "date": "20251107",
-                        "time": "102000",
-                        "sequence": "1125",
-                        "transaction_code": "D00561202511071020001125",
-                        "operation_code": "D",
-                        "response_code": "0",
-                        "response_message": "Payment successful",
-                        "ticket_text": "Thank you! Your payment of ₹10000 was received successfully."
-                    }
-                },
-            ),
-            400: openapi.Response(
-                description="Overpayment or Invalid Input",
-                examples={
-                    "application/json": {
-                        "response_code": "5",
-                        "response_message": "Payment exceeds pending EMI amount",
-                        "ticket_text": "Payment rejected. Pending amount is ₹9500.00. Please retry with the exact amount."
-                    }
-                },
-            ),
-            404: openapi.Response(
-                description="EMI Record Not Found",
-                examples={
-                    "application/json": {
-                        "response_code": "4",
-                        "response_message": "EMI record not found",
-                        "ticket_text": "Payment could not be processed."
+                        "fecha": "20190106",
+                        "hora": "102000",
+                        "secuencia": "1125",
+                        "cod_trx": "D00561201901061020001125",
+                        "cod_operacion": "D",
+                        "cod_severidad": "0",
+                        "cod_respuesta": "0",
+                        "msg_respuesta": "Cobranza exitosa",
+                        "texto_ticket": "Mensaje propio de la entidad"
                     }
                 },
             ),
         },
         tags=["Western Union Payments"]
     )
-
     def post(self, request):
-        data = request.data
+        serializer = WesternUnionPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
 
-        if data.get("user") != settings.WESTERN_USER  or data.get("password") != settings.WESTERN_PASS:
-            return Response(
-                {"response_code": "9", "response_message": "Invalid credentials"},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-
-        try:
-            emi = EMISchedule.objects.get(id=data.get("id_item"))
-        except EMISchedule.DoesNotExist:
+        if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
             return Response({
-                "operation_type": data.get("operation_type"),
+                "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),
                 "terminal": data.get("terminal"),
-                "date": data.get("date"),
-                "time": data.get("time"),
-                "sequence": data.get("sequence"),
-                "transaction_code": data.get("transaction_code"),
-                "operation_code": data.get("operation_code"),
-                "response_code": "4",
-                "response_message": "EMI record not found",
-                "ticket_text": "Payment could not be processed."
-            }, status=status.HTTP_404_NOT_FOUND)
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "9",
+                "msg_respuesta": "Invalid credentials"
+            }, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Update EMI status and record payment
+        id_item = data.get("id_item")
+        try:
+            emi = EMISchedule.objects.get(id=int(id_item))
+        except (EMISchedule.DoesNotExist, ValueError, TypeError):
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "9",
+                "msg_respuesta": "EMI record not found",
+                "texto_ticket": "Payment could not be processed."
+            }, status=status.HTTP_200_OK)
+
+        # Parse payment amount from cents
+        amount = parse_importe(data.get("importe", "0"))
         pending_amount = Decimal(emi.installment_amount - emi.amount_paid)
-        amount = Decimal(data.get("amount", 0))
 
-        #  Reject overpayment
         if amount > pending_amount:
             return Response({
-                "operation_type": data.get("operation_type"),
+                "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),
                 "terminal": data.get("terminal"),
-                "date": data.get("date"),
-                "time": data.get("time"),
-                "sequence": data.get("sequence"),
-                "transaction_code": data.get("transaction_code"),
-                "operation_code": data.get("operation_code"),
-                "response_code": "5",
-                "response_message": "Payment exceeds pending EMI amount",
-                "ticket_text": f"Payment rejected. Pending amount is ₹{pending_amount:.2f}. Please retry with the exact amount."
-            }, status=status.HTTP_400_BAD_REQUEST)
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "5",
+                "msg_respuesta": "Payment exceeds pending EMI amount",
+                "texto_ticket": f"Payment rejected. Pending amount is ₹{pending_amount:.2f}. Please retry with the exact amount."
+            }, status=status.HTTP_200_OK)
 
-        emi.amount_paid += amount
-        emi.update_status()
-        emi.save()
+        with transaction.atomic():
+            emi.amount_paid += amount
+            emi.update_status()
+            emi.save()
 
-        # Save payment record
-        PaymentRecord.objects.create(
-            finance_plan=emi.finance_plan,
-            emi_schedule=emi,
-            payment_type="EMI",
-            payment_method="WESTERN_UNION",
-            payment_amount=amount,
-            payment_date=timezone.now(),
-            payment_status="COMPLETED",
-            transaction_reference=data.get("transaction_code"),
-            notes="Payment received via Western Union"
-        )
+            # Save payment record
+            PaymentRecord.objects.create(
+                finance_plan=emi.finance_plan,
+                emi_schedule=emi,
+                payment_type="EMI",
+                payment_method="WESTERN_UNION",
+                payment_amount=amount,
+                payment_date=timezone.now(),
+                payment_status="COMPLETED",
+                transaction_reference=data.get("cod_trx"),
+                notes="Payment received via Western Union"
+            )
 
         return Response({
-            "operation_type": data.get("operation_type"),
+            "tipo_operacion": data.get("tipo_operacion"),
             "utility": data.get("utility"),
             "terminal": data.get("terminal"),
-            "date": data.get("date"),
-            "time": data.get("time"),
-            "sequence": data.get("sequence"),
-            "transaction_code": data.get("transaction_code"),
-            "operation_code": data.get("operation_code"),
-            "response_code": "0",
-            "response_message": "Payment successful",
-            "ticket_text": f"Thank you! Your payment of ₹{amount} was received successfully."
+            "fecha": data.get("fecha"),
+            "hora": data.get("hora"),
+            "secuencia": data.get("secuencia"),
+            "cod_trx": data.get("cod_trx"),
+            "cod_operacion": data.get("cod_operacion"),
+            "cod_severidad": "0",
+            "cod_respuesta": "0",
+            "msg_respuesta": "Cobranza exitosa",
+            "texto_ticket": f"Thank you! Your payment of ₹{amount} was received successfully."
         }, status=status.HTTP_200_OK)
 
 

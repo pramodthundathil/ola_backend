@@ -433,15 +433,38 @@ class EMIPaymentRequestSerializer(serializers.Serializer):
 # ========== SERIALIZER FOR WESTERN UNION VERIFY CUSTOMER=============
 
 class VerifyCustomerSerializer(serializers.Serializer):
-    customer_id = serializers.CharField()
-    operation_type = serializers.CharField()
-    utility = serializers.CharField()
-    terminal_id = serializers.CharField()
-    date = serializers.CharField()
-    time = serializers.CharField()
-    operation_code = serializers.CharField()
-    user = serializers.CharField()
-    password = serializers.CharField()
+    tipo_operacion = serializers.CharField(required=True)
+    campos_busqueda = serializers.ListField(
+        child=serializers.DictField(child=serializers.CharField()),
+        required=True
+    )
+    utility = serializers.CharField(required=True)
+    terminal = serializers.CharField(required=True)
+    fecha = serializers.CharField(required=True)
+    hora = serializers.CharField(required=True)
+    cod_operacion = serializers.CharField(required=True)
+    user = serializers.CharField(required=False, default='pagofacil')
+    password = serializers.CharField(required=False, default='pagofacil')
+
+
+# ========== SERIALIZER FOR WESTERN UNION PAYMENT (DIRECTA) =============
+
+class WesternUnionPaymentSerializer(serializers.Serializer):
+    tipo_operacion = serializers.CharField(required=True)
+    cod_cliente = serializers.CharField(required=True, allow_null=True, allow_blank=True)
+    cod_operacion = serializers.CharField(required=True)
+    id_item = serializers.CharField(required=True, allow_null=True, allow_blank=True)
+    terminal = serializers.CharField(required=True)
+    fecha = serializers.CharField(required=True)
+    hora = serializers.CharField(required=True)
+    secuencia = serializers.CharField(required=True)
+    cod_trx = serializers.CharField(required=True)
+    cod_barra = serializers.CharField(required=True)
+    utility = serializers.CharField(required=True)
+    importe = serializers.CharField(required=True)
+    medio_pago = serializers.CharField(required=True)
+    user = serializers.CharField(required=False, default='pagofacil')
+    password = serializers.CharField(required=False, default='pagofacil')
 
 
 # ============================================================

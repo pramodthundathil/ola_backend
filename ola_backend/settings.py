@@ -30,15 +30,15 @@ EXPERIAN_PASSWORD = os.getenv("EXPERIAN_PASSWORD")
 # SMS_API_URL = os.getenv("SMS_API_URL") 
 # SENDER = os.getenv("SENDER") 
 
-#SMS Sending credentials
-LAB_MOBILES_TOKEN = 'jmendoza@olacredits.com:xFvjPh6gIRyY4Jr8lXMDGlImxF1eMtya'
-
-SENDER = 'blank'
-SMS_API_URL = 'https://api.labsmobile.com/json/send'
+# SMS Sending credentials
+LAB_MOBILES_TOKEN = os.getenv("LAB_MOBILES_TOKEN")
+SENDER = os.getenv("SENDER")
+SMS_API_URL = os.getenv("SMS_API_URL")
 
 # western union credentials
 WESTERN_USER = os.getenv("WESTERN_USER")
 WESTERN_PASS = os.getenv("WESTERN_PASS")
+
 
 # yappy
 YAPPY_MERCHANT_ID = os.getenv("YAPPY_MERCHANT_ID")
@@ -47,9 +47,9 @@ YAPPY_IPN_URL = os.getenv("YAPPY_IPN_URL")
 urlDomain = os.getenv("urlDomain")
 
 # VERIFF
-# VERIFF_API_KEY = os.getenv("VERIFF_API_KEY")
-# VERIFF_SHARED_SECRET = os.getenv("VERIFF_SHARED_SECRET")
-VERIFF_SHARED_SECRET = "dd456250-1c75-433e-9cf8-3d41fdfffa49"
+VERIFF_API_KEY = os.getenv("VERIFF_API_KEY")
+VERIFF_SHARED_SECRET = os.getenv("VERIFF_SHARED_SECRET")
+
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -60,12 +60,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-mb+tvda!gk6d-%u$477p9@l)js#vh%5x7=5%s_+3j4g#f5n!1j'
+SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-mb+tvda!gk6d-%u$477p9@l)js#vh%5x7=5%s_+3j4g#f5n!1j")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "True") == "True"
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+
 
 
 # Application definition
@@ -222,6 +223,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'ola_backend.wsgi.application'
 
 
+
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
 
@@ -233,16 +235,30 @@ WSGI_APPLICATION = 'ola_backend.wsgi.application'
 # }
 
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': 'ola_credit',
+#         'USER': 'olauser',
+#         'PASSWORD': '1234@qwer',
+#         'HOST': 'localhost',
+#         'PORT': '5432',
+#     }
+# }
+
+
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'ola_credit',
-        'USER': 'olauser',
-        'PASSWORD': '1234@qwer',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': os.getenv("DB_NAME", "ola_credit"),
+        'USER': os.getenv("DB_USER", "postgres"),
+        'PASSWORD': os.getenv("DB_PASSWORD", ""),
+        'HOST': os.getenv("DB_HOST", "localhost"),
+        'PORT': os.getenv("DB_PORT", "5432"),
     }
 }
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
@@ -303,8 +319,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_USE_TLS = True
 EMAIL_PORT = 587
-EMAIL_HOST_USER = 'profitgym.management@gmail.com'
-EMAIL_HOST_PASSWORD = 'psoovwzscskarabv'
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
+
 
 
 EXCEL_CACHE_DB = BASE_DIR / "income_cache.sqlite3"
