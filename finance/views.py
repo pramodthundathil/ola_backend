@@ -2071,7 +2071,6 @@ class PaymentRecordCreateAPIView(APIView):
             with transaction.atomic():
                 # --- Create Payment Record
                 payment = serializer.save(
-                    payment_method="CASH",
                     payment_date=timezone.now(),
                     payment_status="COMPLETED",
                     processed_by=request.user if request.user.is_authenticated else None,

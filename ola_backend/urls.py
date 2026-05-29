@@ -64,6 +64,7 @@ urlpatterns = [
     path('api/docs/swagger.yaml', schema_view.without_ui(cache_timeout=0), name='schema-yaml'),
     
     # API v1
+    path('api/v1/', include('finance.punto_pago_urls')),
     path('v1/users/', include('home.urls')),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     # path('api/v1/applications/', include('applications.urls')),

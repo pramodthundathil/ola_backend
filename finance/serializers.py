@@ -198,6 +198,19 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
         allow_blank=True,
         help_text="Optional transaction reference from gateway (e.g., YAPPY-TRX-784923)."
     )
+    payment_method = serializers.ChoiceField(
+        choices=[
+            ('PUNTO_PAGO', 'Punto Pago'),
+            ('YAPPY', 'Yappy'),
+            ('WESTERN_UNION', 'Western Union'),
+            ('CASH', 'Cash'),
+            ('BANK_TRANSFER', 'Bank Transfer'),
+            ('OTHER', 'Other'),
+        ],
+        default="CASH",
+        required=False,
+        help_text="Payment method used (e.g. CASH, YAPPY, PUNTO_PAGO, WESTERN_UNION)."
+    )
 
     class Meta:
         model = PaymentRecord
@@ -206,6 +219,7 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
             "payment_type",
             "payment_amount",
             "transaction_reference",
+            "payment_method",
         ]
 
     def validate_finance_plan(self, value):
@@ -528,3 +542,31 @@ class FinanceFullDetailsSerializer(serializers.Serializer):
             data["interest_details"] = None
 
         return data
+
+
+# ============================================================
+# FOR PUNTO PAGO INTEGRATION
+# ============================================================
+
+class PuntoPagoVerifyRequestSerializer(serializers.Serializer):
+    identification = serializers.CharField(
+        required=True, 
+        help_text="Customer ID/Document number to verify"
+    )
+
+
+class PuntoPagoProcessRequestSerializer(serializers.Serializer):
+    identification = serializers.CharField(
+        required=True, 
+        help_text="Customer ID/Document number"
+    )
+    payment_reference = serializers.CharField(
+        required=True, 
+        help_text="Unique external payment transaction reference"
+    )
+    amount = serializers.DecimalField(
+        required=True, 
+        max_digits=10, 
+        decimal_places=2, 
+        help_text="Payment amount"
+    )
