@@ -27,6 +27,6 @@ yarn-error.log*
 .vscode/
 
 # OS generated files
-
+.env
 .DS_Store
 Thumbs.db
