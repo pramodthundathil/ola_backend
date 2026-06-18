@@ -2615,7 +2615,7 @@ class VerifyCustomerAPIView(APIView):
                 "cod_respuesta": "9",
                 "msg_respuesta": "Invalid credentials",
                 "items": []
-            }, status=status.HTTP_401_UNAUTHORIZED)
+            }, status=status.HTTP_200_OK)
 
         campos = data.get("campos_busqueda", [])
         if not campos or not isinstance(campos, list):
@@ -2806,6 +2806,7 @@ class WesternUnionPaymentAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        # 1. Validate credentials
         if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
@@ -2819,12 +2820,51 @@ class WesternUnionPaymentAPIView(APIView):
                 "cod_severidad": "0",
                 "cod_respuesta": "9",
                 "msg_respuesta": "Invalid credentials"
-            }, status=status.HTTP_401_UNAUTHORIZED)
+            }, status=status.HTTP_200_OK)
+
+        # 2. Utility validation
+        if data.get("utility") != settings.WESTERN_UTILITY:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "9",
+                "msg_respuesta": "Invalid utility"
+            }, status=status.HTTP_200_OK)
+
+        # 3. Duplicate payment protection
+        cod_trx = data.get("cod_trx")
+        existing_payment = PaymentRecord.objects.filter(
+            transaction_reference=cod_trx,
+            payment_method="WESTERN_UNION"
+        ).first()
+
+        if existing_payment:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "0",
+                "msg_respuesta": "Transaction already processed",
+                "texto_ticket": f"Payment already registered with transaction ref: {cod_trx}"
+            }, status=status.HTTP_200_OK)
 
         id_item = data.get("id_item")
         try:
-            emi = EMISchedule.objects.get(id=int(id_item))
-        except (EMISchedule.DoesNotExist, ValueError, TypeError):
+            id_item_int = int(id_item)
+        except (ValueError, TypeError):
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),
@@ -2840,11 +2880,102 @@ class WesternUnionPaymentAPIView(APIView):
                 "texto_ticket": "Payment could not be processed."
             }, status=status.HTTP_200_OK)
 
-        # Parse payment amount from cents
-        amount = parse_importe(data.get("importe", "0"))
-        pending_amount = Decimal(emi.installment_amount - emi.amount_paid)
+        # 4. Idempotency Lock using select_for_update inside transaction.atomic
+        try:
+            with transaction.atomic():
+                emi = EMISchedule.objects.select_for_update().get(id=id_item_int)
 
-        if amount > pending_amount:
+                # 5. Customer validation
+                expected_customer_id = emi.finance_plan.credit_application.customer.id
+                incoming_customer_id = data.get("cod_cliente")
+                if str(expected_customer_id) != str(incoming_customer_id):
+                    return Response({
+                        "tipo_operacion": data.get("tipo_operacion"),
+                        "utility": data.get("utility"),
+                        "terminal": data.get("terminal"),
+                        "fecha": data.get("fecha"),
+                        "hora": data.get("hora"),
+                        "secuencia": data.get("secuencia"),
+                        "cod_trx": data.get("cod_trx"),
+                        "cod_operacion": data.get("cod_operacion"),
+                        "cod_severidad": "0",
+                        "cod_respuesta": "9",
+                        "msg_respuesta": "Customer validation failed",
+                        "texto_ticket": "Payment could not be processed."
+                    }, status=status.HTTP_200_OK)
+
+                # 6. Barcode validation
+                utility_str = data.get("utility", "").zfill(8)[:8]
+                id_item_str = str(emi.id).zfill(21)[:21]
+                monto_abierto_str = "0"
+                cents = int(round(emi.balance_remaining * 100))
+                importe_str = str(cents).zfill(11)[:11]
+                
+                due_date = emi.due_date
+                aa = due_date.strftime("%y")
+                jjj = f"{due_date.timetuple().tm_yday:03d}"
+                julian_str = f"{aa}{jjj}"
+                filler_str = "0" * 13
+
+                expected_cod_barra = f"{utility_str}{id_item_str}{monto_abierto_str}{importe_str}{julian_str}{filler_str}"
+                
+                if data.get("cod_barra") != expected_cod_barra:
+                    return Response({
+                        "tipo_operacion": data.get("tipo_operacion"),
+                        "utility": data.get("utility"),
+                        "terminal": data.get("terminal"),
+                        "fecha": data.get("fecha"),
+                        "hora": data.get("hora"),
+                        "secuencia": data.get("secuencia"),
+                        "cod_trx": data.get("cod_trx"),
+                        "cod_operacion": data.get("cod_operacion"),
+                        "cod_severidad": "0",
+                        "cod_respuesta": "9",
+                        "msg_respuesta": "Barcode validation failed",
+                        "texto_ticket": "Payment could not be processed."
+                    }, status=status.HTTP_200_OK)
+
+                # 7. Parse payment amount and check exact amount for closed amount (monto_abierto = False)
+                amount = parse_importe(data.get("importe", "0"))
+                pending_amount = (
+                    Decimal(emi.installment_amount)
+                    - Decimal(emi.amount_paid)
+                )
+
+                if amount != pending_amount:
+                    return Response({
+                        "tipo_operacion": data.get("tipo_operacion"),
+                        "utility": data.get("utility"),
+                        "terminal": data.get("terminal"),
+                        "fecha": data.get("fecha"),
+                        "hora": data.get("hora"),
+                        "secuencia": data.get("secuencia"),
+                        "cod_trx": data.get("cod_trx"),
+                        "cod_operacion": data.get("cod_operacion"),
+                        "cod_severidad": "0",
+                        "cod_respuesta": "5",
+                        "msg_respuesta": f"Payment amount ({amount}) must exactly match pending EMI amount ({pending_amount})",
+                        "texto_ticket": f"Payment rejected. Exact pending amount is ₹{pending_amount:.2f}."
+                    }, status=status.HTTP_200_OK)
+
+                emi.amount_paid += amount
+                emi.update_status()
+                emi.save()
+
+                # Save payment record
+                PaymentRecord.objects.create(
+                    finance_plan=emi.finance_plan,
+                    emi_schedule=emi,
+                    payment_type="EMI",
+                    payment_method="WESTERN_UNION",
+                    payment_amount=amount,
+                    payment_date=timezone.now(),
+                    payment_status="COMPLETED",
+                    transaction_reference=data.get("cod_trx"),
+                    notes="Payment received via Western Union"
+                )
+
+        except EMISchedule.DoesNotExist:
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),
@@ -2855,28 +2986,10 @@ class WesternUnionPaymentAPIView(APIView):
                 "cod_trx": data.get("cod_trx"),
                 "cod_operacion": data.get("cod_operacion"),
                 "cod_severidad": "0",
-                "cod_respuesta": "5",
-                "msg_respuesta": "Payment exceeds pending EMI amount",
-                "texto_ticket": f"Payment rejected. Pending amount is ₹{pending_amount:.2f}. Please retry with the exact amount."
+                "cod_respuesta": "9",
+                "msg_respuesta": "EMI record not found",
+                "texto_ticket": "Payment could not be processed."
             }, status=status.HTTP_200_OK)
-
-        with transaction.atomic():
-            emi.amount_paid += amount
-            emi.update_status()
-            emi.save()
-
-            # Save payment record
-            PaymentRecord.objects.create(
-                finance_plan=emi.finance_plan,
-                emi_schedule=emi,
-                payment_type="EMI",
-                payment_method="WESTERN_UNION",
-                payment_amount=amount,
-                payment_date=timezone.now(),
-                payment_status="COMPLETED",
-                transaction_reference=data.get("cod_trx"),
-                notes="Payment received via Western Union"
-            )
 
         return Response({
             "tipo_operacion": data.get("tipo_operacion"),
@@ -2891,6 +3004,158 @@ class WesternUnionPaymentAPIView(APIView):
             "cod_respuesta": "0",
             "msg_respuesta": "Cobranza exitosa",
             "texto_ticket": f"Thank you! Your payment of ₹{amount} was received successfully."
+        }, status=status.HTTP_200_OK)
+
+
+class WesternUnionReverseAPIView(APIView):
+    permission_classes = [AllowAny]
+    """
+    Step 3: Western Union calls this API to reverse a transaction.
+    Endpoint: /reversa/
+    only for western union dashboard
+    """
+    @swagger_auto_schema(
+        operation_summary="Process Western Union Reversal- FOR WESTERN UNION (NOT FOR FROTEND)",
+        operation_description=(
+            "This API is called by Western Union to reverse a payment transaction."
+        ),
+        request_body=WesternUnionPaymentSerializer,
+        responses={
+            200: openapi.Response(
+                description="Reversal Successful",
+                examples={
+                    "application/json": {
+                        "tipo_operacion": "CashIn",
+                        "utility": "90061234",
+                        "terminal": "D00561",
+                        "fecha": "20190106",
+                        "hora": "102000",
+                        "secuencia": "1125",
+                        "cod_trx": "D00561201901061020001125",
+                        "cod_operacion": "R",
+                        "cod_severidad": "0",
+                        "cod_respuesta": "0",
+                        "msg_respuesta": "Reversa exitosa"
+                    }
+                },
+            ),
+        },
+        tags=["Western Union Payments"]
+    )
+    def post(self, request):
+        serializer = WesternUnionPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # 1. Validate credentials
+        if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "9",
+                "msg_respuesta": "Invalid credentials"
+            }, status=status.HTTP_200_OK)
+
+        # 2. Utility validation
+        if data.get("utility") != settings.WESTERN_UTILITY:
+            return Response({
+                "tipo_operacion": data.get("tipo_operacion"),
+                "utility": data.get("utility"),
+                "terminal": data.get("terminal"),
+                "fecha": data.get("fecha"),
+                "hora": data.get("hora"),
+                "secuencia": data.get("secuencia"),
+                "cod_trx": data.get("cod_trx"),
+                "cod_operacion": data.get("cod_operacion"),
+                "cod_severidad": "0",
+                "cod_respuesta": "9",
+                "msg_respuesta": "Invalid utility"
+            }, status=status.HTTP_200_OK)
+
+        cod_trx = data.get("cod_trx")
+        
+        with transaction.atomic():
+            payment = PaymentRecord.objects.select_for_update().filter(
+                transaction_reference=cod_trx,
+                payment_method="WESTERN_UNION"
+            ).first()
+
+            if not payment:
+                return Response({
+                    "tipo_operacion": data.get("tipo_operacion"),
+                    "utility": data.get("utility"),
+                    "terminal": data.get("terminal"),
+                    "fecha": data.get("fecha"),
+                    "hora": data.get("hora"),
+                    "secuencia": data.get("secuencia"),
+                    "cod_trx": data.get("cod_trx"),
+                    "cod_operacion": data.get("cod_operacion"),
+                    "cod_severidad": "0",
+                    "cod_respuesta": "9",
+                    "msg_respuesta": "Payment record not found"
+                }, status=status.HTTP_200_OK)
+
+            if payment.payment_status == "REVERSED":
+                return Response({
+                    "tipo_operacion": data.get("tipo_operacion"),
+                    "utility": data.get("utility"),
+                    "terminal": data.get("terminal"),
+                    "fecha": data.get("fecha"),
+                    "hora": data.get("hora"),
+                    "secuencia": data.get("secuencia"),
+                    "cod_trx": data.get("cod_trx"),
+                    "cod_operacion": data.get("cod_operacion"),
+                    "cod_severidad": "0",
+                    "cod_respuesta": "0",
+                    "msg_respuesta": "Transaction already reversed"
+                }, status=status.HTTP_200_OK)
+
+            if payment.payment_status != "COMPLETED":
+                return Response({
+                    "tipo_operacion": data.get("tipo_operacion"),
+                    "utility": data.get("utility"),
+                    "terminal": data.get("terminal"),
+                    "fecha": data.get("fecha"),
+                    "hora": data.get("hora"),
+                    "secuencia": data.get("secuencia"),
+                    "cod_trx": data.get("cod_trx"),
+                    "cod_operacion": data.get("cod_operacion"),
+                    "cod_severidad": "0",
+                    "cod_respuesta": "9",
+                    "msg_respuesta": f"Invalid payment status: {payment.payment_status}"
+                }, status=status.HTTP_200_OK)
+
+            emi = EMISchedule.objects.select_for_update().get(id=payment.emi_schedule.id)
+            
+            # Revert the amount
+            emi.amount_paid -= payment.payment_amount
+            emi.update_status()
+            emi.save()
+
+            # Update payment status
+            payment.payment_status = "REVERSED"
+            payment.save()
+
+        return Response({
+            "tipo_operacion": data.get("tipo_operacion"),
+            "utility": data.get("utility"),
+            "terminal": data.get("terminal"),
+            "fecha": data.get("fecha"),
+            "hora": data.get("hora"),
+            "secuencia": data.get("secuencia"),
+            "cod_trx": data.get("cod_trx"),
+            "cod_operacion": data.get("cod_operacion"),
+            "cod_severidad": "0",
+            "cod_respuesta": "0",
+            "msg_respuesta": "Reversa exitosa",
+            "texto_ticket": "Reversal processed successfully"
         }, status=status.HTTP_200_OK)
 
 

@@ -806,6 +806,7 @@ class PaymentRecord(models.Model):
         ('FAILED', 'Failed'),
         ('REFUNDED', 'Refunded'),
         ('CANCELLED', 'Cancelled'),
+        ('REVERSED', 'Reversed'),
     ]
     
     PAYMENT_TYPE_CHOICES = [

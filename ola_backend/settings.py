@@ -38,6 +38,7 @@ SMS_API_URL = os.getenv("SMS_API_URL")
 # western union credentials
 WESTERN_USER = os.getenv("WESTERN_USER")
 WESTERN_PASS = os.getenv("WESTERN_PASS")
+WESTERN_UTILITY = os.getenv("WESTERN_UTILITY", "90061234")
 
 
 # yappy
@@ -105,6 +106,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'finance.middleware.WesternUnionHostBypassMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     "corsheaders.middleware.CorsMiddleware",

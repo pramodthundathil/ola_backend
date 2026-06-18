@@ -29,8 +29,9 @@ urlpatterns = [
     path('finance-multiples/<int:pk>/', views.FinanceMultipleDetailView.as_view(), name='finance-multiple-detail'),
     
     # PAYMENT
-    path('verify-customer/', views.VerifyCustomerAPIView.as_view(), name='v2_finance_verify-customer_create'),
-    path('directa/', views.WesternUnionPaymentAPIView.as_view(), name='v2_finance_directa_create'),
+    path('pagofacil/api/consulta/', views.VerifyCustomerAPIView.as_view(), name='v2_finance_verify-customer_create'),
+    path('pagofacil/api/directa/', views.WesternUnionPaymentAPIView.as_view(), name='v2_finance_directa_create'),
+    path('pagofacil/api/reversa/', views.WesternUnionReverseAPIView.as_view(), name='v2_finance_reversa_create'),
 
     #Finance Complete Details
     path('full-details/admin/',views.FinanceCompleteDetailsAdminAPIView.as_view(),name='finance-full-details'),

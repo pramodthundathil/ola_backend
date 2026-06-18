@@ -13,7 +13,7 @@ from finance.models import FinancePlan, EMISchedule, PaymentRecord, FinanceMulti
 
 User = get_user_model()
 
-@override_settings(WESTERN_USER="pagofacil", WESTERN_PASS="pagofacil")
+@override_settings(WESTERN_USER="pagofacil", WESTERN_PASS="pagofacil", WESTERN_UTILITY="90061234")
 class TestWesternUnionAPIs(TestCase):
     def setUp(self):
         # 1. Create User
@@ -83,6 +83,20 @@ class TestWesternUnionAPIs(TestCase):
         )
         self.client = APIClient()
 
+    def get_expected_barcode(self, emi):
+        utility_str = "90061234"
+        id_item_str = str(emi.id).zfill(21)
+        monto_abierto_str = "0"
+        cents = int(round(emi.balance_remaining * 100))
+        importe_str = str(cents).zfill(11)
+        
+        due_date = emi.due_date
+        aa = due_date.strftime("%y")
+        jjj = f"{due_date.timetuple().tm_yday:03d}"
+        julian_str = f"{aa}{jjj}"
+        filler_str = "0" * 13
+        return f"{utility_str}{id_item_str}{monto_abierto_str}{importe_str}{julian_str}{filler_str}"
+
     # ==========================================
     # VERIFY CUSTOMER TESTS
     # ==========================================
@@ -110,7 +124,6 @@ class TestWesternUnionAPIs(TestCase):
         assert data["msg_respuesta"] == "Consulta exitosa"
         assert len(data["items"]) == 1
         assert data["items"][0]["id_item"] == str(self.emi1.id)
-        # Importe is 100.00 * 100 = 10000
         assert data["items"][0]["importe"] == "10000"
 
     def test_verify_customer_by_id_success(self):
@@ -201,13 +214,16 @@ class TestWesternUnionAPIs(TestCase):
             "password": "wrong_password"
         }
         response = self.client.post(url, payload, format="json")
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "9"
+        assert response.data["msg_respuesta"] == "Invalid credentials"
 
     # ==========================================
     # WESTERN UNION PAYMENT TESTS
     # ==========================================
     def test_payment_success(self):
         url = reverse("v2_finance_directa_create")
+        barcode = self.get_expected_barcode(self.emi1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
@@ -218,7 +234,7 @@ class TestWesternUnionAPIs(TestCase):
             "hora": "102000",
             "secuencia": "1125",
             "cod_trx": "D00561202605261020001125",
-            "cod_barra": "90061234000232500005656500",
+            "cod_barra": barcode,
             "utility": "90061234",
             "importe": "10000",  # 100.00
             "medio_pago": "E01",
@@ -240,11 +256,13 @@ class TestWesternUnionAPIs(TestCase):
         # Verify payment record is created
         assert PaymentRecord.objects.filter(
             transaction_reference="D00561202605261020001125",
-            payment_amount=Decimal("100.00")
+            payment_amount=Decimal("100.00"),
+            payment_status="COMPLETED"
         ).exists()
 
-    def test_payment_partial_success(self):
+    def test_payment_partial_rejected_for_closed_amounts(self):
         url = reverse("v2_finance_directa_create")
+        barcode = self.get_expected_barcode(self.emi1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
@@ -255,38 +273,9 @@ class TestWesternUnionAPIs(TestCase):
             "hora": "102000",
             "secuencia": "1125",
             "cod_trx": "D00561202605261020001125",
-            "cod_barra": "90061234000232500005656500",
+            "cod_barra": barcode,
             "utility": "90061234",
-            "importe": "4500",  # 45.00
-            "medio_pago": "E01",
-            "user": "pagofacil",
-            "password": "pagofacil"
-        }
-        response = self.client.post(url, payload, format="json")
-        assert response.status_code == status.HTTP_200_OK
-        data = response.data
-        assert data["cod_respuesta"] == "0"
-        
-        self.emi1.refresh_from_db()
-        assert self.emi1.status == "PARTIALLY_PAID"
-        assert self.emi1.amount_paid == Decimal("45.00")
-        assert self.emi1.balance_remaining == Decimal("55.00")
-
-    def test_payment_overpayment_rejected(self):
-        url = reverse("v2_finance_directa_create")
-        payload = {
-            "tipo_operacion": "CashIn",
-            "cod_cliente": str(self.customer.id),
-            "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
-            "terminal": "D00561",
-            "fecha": "20260526",
-            "hora": "102000",
-            "secuencia": "1125",
-            "cod_trx": "D00561202605261020001125",
-            "cod_barra": "90061234000232500005656500",
-            "utility": "90061234",
-            "importe": "10500",  # 105.00 > 100.00
+            "importe": "4500",  # 45.00 (not 100.00)
             "medio_pago": "E01",
             "user": "pagofacil",
             "password": "pagofacil"
@@ -295,7 +284,118 @@ class TestWesternUnionAPIs(TestCase):
         assert response.status_code == status.HTTP_200_OK
         data = response.data
         assert data["cod_respuesta"] == "5"
-        assert "exceeds pending" in data["msg_respuesta"]
+        assert "must exactly match" in data["msg_respuesta"]
+
+    def test_payment_duplicate_protection(self):
+        # Register a completed transaction
+        PaymentRecord.objects.create(
+            finance_plan=self.plan,
+            emi_schedule=self.emi1,
+            payment_type="EMI",
+            payment_method="WESTERN_UNION",
+            payment_amount=Decimal("100.00"),
+            payment_date=timezone.now(),
+            payment_status="COMPLETED",
+            transaction_reference="D00561202605261020001125"
+        )
+        
+        url = reverse("v2_finance_directa_create")
+        barcode = self.get_expected_barcode(self.emi1)
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "D",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": barcode,
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "0"
+        assert "already processed" in response.data["msg_respuesta"]
+
+    def test_payment_barcode_validation_failure(self):
+        url = reverse("v2_finance_directa_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "D",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": "INVALID_BARCODE",
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "9"
+        assert "Barcode validation failed" in response.data["msg_respuesta"]
+
+    def test_payment_customer_validation_failure(self):
+        url = reverse("v2_finance_directa_create")
+        barcode = self.get_expected_barcode(self.emi1)
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": "99999", # wrong customer id
+            "cod_operacion": "D",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": barcode,
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "9"
+        assert "Customer validation failed" in response.data["msg_respuesta"]
+
+    def test_payment_utility_validation_failure(self):
+        url = reverse("v2_finance_directa_create")
+        barcode = self.get_expected_barcode(self.emi1)
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "D",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": barcode,
+            "utility": "88888888", # wrong utility
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "9"
+        assert "Invalid utility" in response.data["msg_respuesta"]
 
     def test_payment_emi_not_found(self):
         url = reverse("v2_finance_directa_create")
@@ -321,3 +421,164 @@ class TestWesternUnionAPIs(TestCase):
         data = response.data
         assert data["cod_respuesta"] == "9"
         assert "not found" in data["msg_respuesta"]
+
+    # ==========================================
+    # REVERSAL TESTS
+    # ==========================================
+    def test_reversal_success(self):
+        # First process payment successfully
+        url_pay = reverse("v2_finance_directa_create")
+        barcode = self.get_expected_barcode(self.emi1)
+        payload_pay = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "D",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": barcode,
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        res_pay = self.client.post(url_pay, payload_pay, format="json")
+        assert res_pay.status_code == status.HTTP_200_OK
+        
+        # Verify payment created and completed
+        payment = PaymentRecord.objects.get(transaction_reference="D00561202605261020001125")
+        assert payment.payment_status == "COMPLETED"
+        assert self.emi1.amount_paid == Decimal("0.00") # Need to refresh first
+        self.emi1.refresh_from_db()
+        assert self.emi1.amount_paid == Decimal("100.00")
+        assert self.emi1.status == "PAID"
+
+        # Now call reversal
+        url_rev = reverse("v2_finance_reversa_create")
+        payload_rev = payload_pay.copy()
+        payload_rev["cod_operacion"] = "R"
+        response = self.client.post(url_rev, payload_rev, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "0"
+        assert "Reversa exitosa" in response.data["msg_respuesta"]
+
+        # Verify database reverted
+        payment.refresh_from_db()
+        assert payment.payment_status == "REVERSED"
+        self.emi1.refresh_from_db()
+        assert self.emi1.amount_paid == Decimal("0.00")
+        assert self.emi1.status == "OVERDUE"
+
+    def test_reversal_already_reversed(self):
+        # Setup payment record as REVERSED
+        PaymentRecord.objects.create(
+            finance_plan=self.plan,
+            emi_schedule=self.emi1,
+            payment_type="EMI",
+            payment_method="WESTERN_UNION",
+            payment_amount=Decimal("100.00"),
+            payment_date=timezone.now(),
+            payment_status="REVERSED",
+            transaction_reference="D00561202605261020001125"
+        )
+        
+        url_rev = reverse("v2_finance_reversa_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "R",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": self.get_expected_barcode(self.emi1),
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url_rev, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "0"
+        assert "already reversed" in response.data["msg_respuesta"]
+
+    def test_reversal_payment_not_found(self):
+        url_rev = reverse("v2_finance_reversa_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "R",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "NON_EXISTENT_TRX",
+            "cod_barra": self.get_expected_barcode(self.emi1),
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url_rev, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "9"
+        assert "record not found" in response.data["msg_respuesta"]
+
+    def test_reversal_wrong_credentials(self):
+        url_rev = reverse("v2_finance_reversa_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "cod_cliente": str(self.customer.id),
+            "cod_operacion": "R",
+            "id_item": str(self.emi1.id),
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "102000",
+            "secuencia": "1125",
+            "cod_trx": "D00561202605261020001125",
+            "cod_barra": self.get_expected_barcode(self.emi1),
+            "utility": "90061234",
+            "importe": "10000",
+            "medio_pago": "E01",
+            "user": "wrong_user",
+            "password": "wrong_password"
+        }
+        response = self.client.post(url_rev, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "9"
+        assert "Invalid credentials" in response.data["msg_respuesta"]
+
+    def test_host_bypass_for_western_union_endpoints(self):
+        # Verify that requesting a Western Union endpoint with a disallowed host header works (bypassed by middleware)
+        url = reverse("v2_finance_verify-customer_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "campos_busqueda": [
+                {"campo1": "8-000-000"}
+            ],
+            "utility": "90061234",
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "101940",
+            "cod_operacion": "C",
+            "user": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json", HTTP_HOST="unauthorized-domain.com")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["cod_respuesta"] == "0"
+
+        # Verify that requesting a different endpoint with a disallowed host header is rejected with 400 Bad Request
+        url_other = reverse("finance-auto-plan")
+        response_other = self.client.get(url_other, HTTP_HOST="unauthorized-domain.com")
+        assert response_other.status_code == status.HTTP_400_BAD_REQUEST
+
