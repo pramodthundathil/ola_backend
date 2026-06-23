@@ -4286,18 +4286,85 @@ class LedgerEntryListAPIView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        entries = LedgerEntry.objects.all().select_related('invoice', 'payment_received', 'accounting_code', 'bill').order_by('-entry_date', '-id')
+        entries = LedgerEntry.objects.all().select_related('invoice', 'payment_received', 'accounting_code', 'bill', 'expense', 'payment_made', 'credit_note').order_by('-entry_date', '-id')
         bill_id = request.query_params.get('bill_id')
         invoice_id = request.query_params.get('invoice_id')
+        expense_id = request.query_params.get('expense_id')
+        payment_received_id = request.query_params.get('payment_received_id')
+        payment_made_id = request.query_params.get('payment_made_id')
+        credit_note_id = request.query_params.get('credit_note_id')
+        vendor_id = request.query_params.get('vendor_id')
+        customer_id = request.query_params.get('customer_id')
+
         if bill_id:
             entries = entries.filter(bill_id=bill_id)
         if invoice_id:
             entries = entries.filter(invoice_id=invoice_id)
+        if expense_id:
+            entries = entries.filter(expense_id=expense_id)
+        if payment_received_id:
+            entries = entries.filter(payment_received_id=payment_received_id)
+        if payment_made_id:
+            entries = entries.filter(payment_made_id=payment_made_id)
+        if credit_note_id:
+            entries = entries.filter(credit_note_id=credit_note_id)
+        if vendor_id:
+            from django.db.models import Q
+            entries = entries.filter(Q(bill__vendor_id=vendor_id) | Q(payment_made__vendor_id=vendor_id))
+        if customer_id:
+            from django.db.models import Q
+            entries = entries.filter(Q(invoice__customer_id=customer_id) | Q(payment_received__customer_id=customer_id))
             
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(entries, request, view=self)
         serializer = LedgerEntrySerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class PaymentReceivedDetailAPIView(APIView):
+    """
+    Retrieve a single payment received.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            payment = PaymentReceived.objects.select_related('customer', 'deposited_to').get(pk=pk)
+            serializer = PaymentReceivedSerializer(payment)
+            return Response(serializer.data)
+        except PaymentReceived.DoesNotExist:
+            return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ExpenseDetailAPIView(APIView):
+    """
+    Retrieve a single manual expense.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            expense = Expense.objects.select_related('paid_from', 'expense_category').get(pk=pk)
+            serializer = ExpenseSerializer(expense)
+            return Response(serializer.data)
+        except Expense.DoesNotExist:
+            return Response({"error": "Expense not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class VendorDetailAPIView(APIView):
+    """
+    Retrieve a single vendor.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            vendor = Vendor.objects.get(pk=pk)
+            serializer = VendorSerializer(vendor)
+            return Response(serializer.data)
+        except Vendor.DoesNotExist:
+            return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
+
 
 
 class VendorListCreateAPIView(APIView):
@@ -4516,10 +4583,28 @@ class PaymentMadeListCreateAPIView(APIView):
 
     def get(self, request):
         payments = PaymentMade.objects.all().select_related('vendor', 'paid_from').order_by('-payment_date', '-id')
+        vendor_id = request.query_params.get('vendor_id')
+        if vendor_id:
+            payments = payments.filter(vendor_id=vendor_id)
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(payments, request, view=self)
         serializer = PaymentMadeSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class PaymentMadeDetailAPIView(APIView):
+    """
+    Retrieve a single payment made to a vendor.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            payment = PaymentMade.objects.select_related('vendor', 'paid_from').get(pk=pk)
+            serializer = PaymentMadeSerializer(payment)
+            return Response(serializer.data)
+        except PaymentMade.DoesNotExist:
+            return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
 
     def post(self, request):
         data = request.data

@@ -196,7 +196,15 @@ class CustomerManagementView(APIView):
 
             queryset = (
                 Customer.objects
-                .select_related("created_by")                    
+                .select_related(
+                    "created_by",
+                    "created_by__store",
+                    "created_by__store__region",
+                    "created_by__store__province",
+                    "created_by__store__district",
+                    "created_by__store__corregimiento",
+                    "created_by__store__sales_advisor",
+                )                    
                 .prefetch_related(                              
                     "credit_applications__finance_plan__store",
                     "credit_applications__finance_plan__device"

@@ -59,6 +59,9 @@ class FinancePlanSerializer(serializers.ModelSerializer):
 
     def get_device_details(self, obj):
         if obj.device:
+            imei = None
+            if obj.credit_application:
+                imei = obj.credit_application.device_imei
             return {
                 "id": obj.device.id,
                 "brand": obj.device.brand.name if obj.device.brand else None,
@@ -66,6 +69,7 @@ class FinancePlanSerializer(serializers.ModelSerializer):
                 "color": obj.device.color,
                 "ram": obj.device.ram,
                 "storage": obj.device.storage,
+                "imei": imei,
             }
         return None
 
@@ -79,6 +83,7 @@ class FinancePlanSerializer(serializers.ModelSerializer):
                 "province_name": obj.store.province.name if obj.store.province else None,
                 "district_name": obj.store.district.name if obj.store.district else None,
                 "corregimiento_name": obj.store.corregimiento.name if obj.store.corregimiento else None,
+                "sales_advisor": f"{obj.store.sales_advisor.first_name} {obj.store.sales_advisor.last_name}" if obj.store.sales_advisor else None,
             }
         return None
 
@@ -89,6 +94,7 @@ class FinancePlanSerializer(serializers.ModelSerializer):
                 "first_name": obj.created_by.first_name,
                 "last_name": obj.created_by.last_name,
                 "username": obj.created_by.username,
+                "email": obj.created_by.email,
             }
         return None
 

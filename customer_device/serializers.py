@@ -26,6 +26,12 @@ class DeviceEnrollmentCreateSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     "Finance plan must have a device associated with it"
                 )
+            
+            # Check if enrollment already exists
+            if DeviceEnrollmentCustomer.objects.filter(finance_plan=finance_plan).exists():
+                raise serializers.ValidationError(
+                    "A device enrollment already exists for this financing plan"
+                )
         except FinancePlan.DoesNotExist:
             raise serializers.ValidationError(
                 f"Finance plan with ID {value} does not exist"

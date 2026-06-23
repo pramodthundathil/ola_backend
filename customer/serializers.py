@@ -12,6 +12,8 @@ from .models import ( Customer,CreditScore,
 
   
 class CustomerSerializer(serializers.ModelSerializer):
+    created_by_details = serializers.SerializerMethodField()
+
     class Meta:
         model = Customer
         fields = [
@@ -27,6 +29,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'latitude',
             'longitude',
             'created_by',
+            'created_by_details',
             'created_at',
             'updated_at',
         ]
@@ -43,6 +46,36 @@ class CustomerSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = self.context['request'].user
         return Customer.objects.create(created_by=user, **validated_data)
+
+    def get_created_by_details(self, obj):
+        if not obj.created_by:
+            return None
+        
+        user = obj.created_by
+        data = {
+            'id': user.id,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'email': user.email,
+            'role': user.role,
+        }
+        
+        if hasattr(user, 'store') and user.store:
+            store = user.store
+            data['store'] = {
+                'id': str(store.id),
+                'name': store.name,
+                'code': store.code,
+                'region': store.region.name if store.region else None,
+                'province': store.province.name if store.province else None,
+                'district': store.district.name if store.district else None,
+                'corregimiento': store.corregimiento.name if store.corregimiento else None,
+                'sales_advisor': f"{store.sales_advisor.first_name} {store.sales_advisor.last_name}" if store.sales_advisor else None,
+            }
+        else:
+            data['store'] = None
+            
+        return data
 
 
 

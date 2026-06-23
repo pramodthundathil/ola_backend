@@ -250,10 +250,10 @@ class DeviceEnrollmentAPIView(APIView):
         },
         tags=["Device Enrollment"]
     )
-    def get(self, request):
+    def get(self, request, id=None):
         try:
             # Get query parameters
-            enrollment_id = request.query_params.get('id')
+            enrollment_id = id or request.query_params.get('id')
             customer_id = request.query_params.get('customer_id')
             finance_plan_id = request.query_params.get('finance_plan_id')
             imei = request.query_params.get('imei')
