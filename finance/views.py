@@ -2600,8 +2600,15 @@ class VerifyCustomerAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # Validate credentials
-        if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
+        # Validate credentials (supporting user, username, and userName keys)
+        req_user = (
+            request.data.get("user") or 
+            request.data.get("username") or 
+            request.data.get("userName") or 
+            "pagofacil"
+        )
+        req_pass = request.data.get("password") or "pagofacil"
+        if req_user != settings.WESTERN_USER or req_pass != settings.WESTERN_PASS:
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "cod_cliente": "",
@@ -2806,8 +2813,15 @@ class WesternUnionPaymentAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # 1. Validate credentials
-        if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
+        # 1. Validate credentials (supporting user, username, and userName keys)
+        req_user = (
+            request.data.get("user") or 
+            request.data.get("username") or 
+            request.data.get("userName") or 
+            "pagofacil"
+        )
+        req_pass = request.data.get("password") or "pagofacil"
+        if req_user != settings.WESTERN_USER or req_pass != settings.WESTERN_PASS:
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),
@@ -3047,8 +3061,15 @@ class WesternUnionReverseAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # 1. Validate credentials
-        if data.get("user") != settings.WESTERN_USER or data.get("password") != settings.WESTERN_PASS:
+        # 1. Validate credentials (supporting user, username, and userName keys)
+        req_user = (
+            request.data.get("user") or 
+            request.data.get("username") or 
+            request.data.get("userName") or 
+            "pagofacil"
+        )
+        req_pass = request.data.get("password") or "pagofacil"
+        if req_user != settings.WESTERN_USER or req_pass != settings.WESTERN_PASS:
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),

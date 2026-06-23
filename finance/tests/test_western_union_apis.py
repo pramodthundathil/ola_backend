@@ -126,6 +126,46 @@ class TestWesternUnionAPIs(TestCase):
         assert data["items"][0]["id_item"] == str(self.emi1.id)
         assert data["items"][0]["importe"] == "10000"
 
+    def test_verify_customer_username_success(self):
+        url = reverse("v2_finance_verify-customer_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "campos_busqueda": [
+                {"campo1": "8-000-000"}
+            ],
+            "utility": "90061234",
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "101940",
+            "cod_operacion": "C",
+            "username": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data
+        assert data["cod_respuesta"] == "0"
+
+    def test_verify_customer_username_caps_success(self):
+        url = reverse("v2_finance_verify-customer_create")
+        payload = {
+            "tipo_operacion": "CashIn",
+            "campos_busqueda": [
+                {"campo1": "8-000-000"}
+            ],
+            "utility": "90061234",
+            "terminal": "D00561",
+            "fecha": "20260526",
+            "hora": "101940",
+            "cod_operacion": "C",
+            "userName": "pagofacil",
+            "password": "pagofacil"
+        }
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data
+        assert data["cod_respuesta"] == "0"
+
     def test_verify_customer_by_id_success(self):
         url = reverse("v2_finance_verify-customer_create")
         payload = {

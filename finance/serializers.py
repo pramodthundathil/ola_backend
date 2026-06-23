@@ -515,6 +515,8 @@ class VerifyCustomerSerializer(serializers.Serializer):
     hora = serializers.CharField(required=True)
     cod_operacion = serializers.CharField(required=True)
     user = serializers.CharField(required=False, default='pagofacil')
+    username = serializers.CharField(required=False, default='pagofacil')
+    userName = serializers.CharField(required=False, default='pagofacil')
     password = serializers.CharField(required=False, default='pagofacil')
 
 
@@ -535,6 +537,8 @@ class WesternUnionPaymentSerializer(serializers.Serializer):
     importe = serializers.CharField(required=True)
     medio_pago = serializers.CharField(required=True)
     user = serializers.CharField(required=False, default='pagofacil')
+    username = serializers.CharField(required=False, default='pagofacil')
+    userName = serializers.CharField(required=False, default='pagofacil')
     password = serializers.CharField(required=False, default='pagofacil')
 
 
