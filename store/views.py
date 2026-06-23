@@ -187,9 +187,9 @@ class StoreViewSet(viewsets.ModelViewSet):
         if user.role in ['admin', 'global_manager', 'financial_manager']:
             queryset = Store.objects.all()
         
-        # Sales Advisor sees assigned stores
+        # Sales Advisor sees assigned stores or stores they created
         elif user.role == 'sales_advisor':
-            queryset = Store.objects.filter(sales_advisor=user)
+            queryset = Store.objects.filter(Q(sales_advisor=user) | Q(created_by=user))
         
         # Store Manager sees only their store
         elif user.role == 'store_manager':

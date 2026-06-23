@@ -24,8 +24,8 @@ class CanManageStores(permissions.BasePermission):
         if user.role in ['admin', 'global_manager', 'financial_manager']:
             return True
         
-        # Sales Advisor can view assigned stores
-        if user.role == 'sales_advisor' and obj.sales_advisor == user:
+        # Sales Advisor can view assigned stores or stores they created
+        if user.role == 'sales_advisor' and (obj.sales_advisor == user or obj.created_by == user):
             return True
         
         # Store Manager can view their own store
@@ -53,8 +53,8 @@ class CanViewStore(permissions.BasePermission):
         if user.role in ['admin', 'global_manager', 'financial_manager']:
             return True
         
-        # Sales Advisor can view assigned stores
-        if user.role == 'sales_advisor' and obj.sales_advisor == user:
+        # Sales Advisor can view assigned stores or stores they created
+        if user.role == 'sales_advisor' and (obj.sales_advisor == user or obj.created_by == user):
             return True
         
         # Store Manager can view their own store
@@ -80,8 +80,8 @@ class IsStoreManagerOfStore(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # Admin and Global Manager always have permission
-        if request.user.role in ['admin', 'global_manager']:
+        # Admin, Global Manager, and Sales Advisor always have permission
+        if request.user.role in ['admin', 'global_manager', 'sales_advisor']:
             return True
         
         # Store manager must be assigned to a store
@@ -93,6 +93,10 @@ class IsStoreManagerOfStore(permissions.BasePermission):
         # Admin and Global Manager can access all
         if user.role in ['admin', 'global_manager']:
             return True
+        
+        # Sales Advisor can access stores they advise or created
+        if user.role == 'sales_advisor':
+            return obj.sales_advisor == user or obj.created_by == user
         
         # Store manager can only access their own store
         if user.role == 'store_manager':

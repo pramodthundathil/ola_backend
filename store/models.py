@@ -299,6 +299,25 @@ class Store(models.Model):
                 self.store_manager.save(update_fields=['store_id'])
 
 
+class StoreImage(models.Model):
+    """
+    Multiple images for a store location.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='additional_images')
+    image = models.ImageField(upload_to='store_images/', verbose_name='Store Image')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'store_images'
+        ordering = ['created_at']
+        verbose_name = 'Store Image'
+        verbose_name_plural = 'Store Images'
+
+    def __str__(self):
+        return f"Image for {self.store.name} ({self.id})"
+
+
 class StorePerformance(models.Model):
     """
     Monthly performance tracking for stores.

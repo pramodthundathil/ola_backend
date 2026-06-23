@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Region, Province, District, Corregimiento, Store, StorePerformance
+from .models import Region, Province, District, Corregimiento, Store, StorePerformance, StoreImage
 from home.models import CustomUser
 
 
@@ -61,6 +61,14 @@ class SalespersonSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'date_joined']
 
 
+class StoreImageSerializer(serializers.ModelSerializer):
+    """Serializer for store additional images."""
+    class Meta:
+        model = StoreImage
+        fields = ['id', 'image', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
 class StoreListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for store listings."""
     region_name = serializers.CharField(source='region.name', read_only=True)
@@ -93,6 +101,7 @@ class StoreDetailSerializer(serializers.ModelSerializer):
     salespersons = serializers.SerializerMethodField()
     salespersons_count = serializers.IntegerField(source='get_salespersons_count', read_only=True)
     full_address = serializers.CharField(source='get_full_address', read_only=True)
+    additional_images = StoreImageSerializer(many=True, read_only=True)
     
     class Meta:
         model = Store
@@ -108,7 +117,7 @@ class StoreDetailSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'image', 'address', 'full_address',
             'is_active', 'opening_date', 'monthly_target',
             'salespersons', 'salespersons_count',
-            'created_at', 'updated_at', 'created_by'
+            'created_at', 'updated_at', 'created_by', 'additional_images'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'created_by']
     
@@ -179,6 +188,17 @@ class StoreCreateUpdateSerializer(serializers.ModelSerializer):
     
     def validate(self, attrs):
         """Cross-field validation."""
+        # Ensure image is present for new stores
+        if not self.instance and not attrs.get('image'):
+            raise serializers.ValidationError({"image": "Store image is mandatory."})
+
+        # Ensure location is present for new stores
+        if not self.instance:
+            if not attrs.get('latitude') or not attrs.get('longitude'):
+                raise serializers.ValidationError({
+                    "latitude": "Store location (latitude/longitude) is mandatory."
+                })
+
         # Validate geographical hierarchy
         if 'province' in attrs and 'region' in attrs:
             if attrs['province'].region != attrs['region']:
@@ -201,11 +221,38 @@ class StoreCreateUpdateSerializer(serializers.ModelSerializer):
         return attrs
     
     def create(self, validated_data):
-        """Create store and assign created_by."""
+        """Create store, assign created_by, and handle multiple store images."""
         request = self.context.get('request')
         if request and hasattr(request, 'user'):
             validated_data['created_by'] = request.user
-        return super().create(validated_data)
+            if request.user.role == 'sales_advisor':
+                validated_data['sales_advisor'] = request.user
+        
+        # Create store
+        store = super().create(validated_data)
+        
+        # Save additional images if uploaded
+        if request and request.FILES:
+            uploaded_images = request.FILES.getlist('uploaded_images')
+            for img in uploaded_images:
+                StoreImage.objects.create(store=store, image=img)
+                
+        return store
+
+    def update(self, instance, validated_data):
+        """Update store and handle multiple store images."""
+        request = self.context.get('request')
+        
+        # Update store
+        store = super().update(instance, validated_data)
+        
+        # Save additional images if uploaded
+        if request and request.FILES:
+            uploaded_images = request.FILES.getlist('uploaded_images')
+            for img in uploaded_images:
+                StoreImage.objects.create(store=store, image=img)
+                
+        return store
 
 
 class AddSalespersonSerializer(serializers.Serializer):
