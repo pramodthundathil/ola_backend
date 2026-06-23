@@ -42,6 +42,10 @@ class FinancePlanSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    device_details = serializers.SerializerMethodField()
+    store_details = serializers.SerializerMethodField()
+    sales_person_details = serializers.SerializerMethodField()
+    customer_details = serializers.SerializerMethodField()
     
     class Meta:
         model = FinancePlan
@@ -52,6 +56,59 @@ class FinancePlanSerializer(serializers.ModelSerializer):
         instance = FinancePlan(**validated_data)
         instance.save(user=user)  #  pass logged-in user to model save
         return instance
+
+    def get_device_details(self, obj):
+        if obj.device:
+            return {
+                "id": obj.device.id,
+                "brand": obj.device.brand.name if obj.device.brand else None,
+                "model_name": obj.device.model_name,
+                "color": obj.device.color,
+                "ram": obj.device.ram,
+                "storage": obj.device.storage,
+            }
+        return None
+
+    def get_store_details(self, obj):
+        if obj.store:
+            return {
+                "id": str(obj.store.id),
+                "name": obj.store.name,
+                "code": obj.store.code,
+                "region_name": obj.store.region.name if obj.store.region else None,
+                "province_name": obj.store.province.name if obj.store.province else None,
+                "district_name": obj.store.district.name if obj.store.district else None,
+                "corregimiento_name": obj.store.corregimiento.name if obj.store.corregimiento else None,
+            }
+        return None
+
+    def get_sales_person_details(self, obj):
+        if obj.created_by:
+            return {
+                "id": obj.created_by.id,
+                "first_name": obj.created_by.first_name,
+                "last_name": obj.created_by.last_name,
+                "username": obj.created_by.username,
+            }
+        return None
+
+    def get_customer_details(self, obj):
+        if obj.credit_application and obj.credit_application.customer:
+            c = obj.credit_application.customer
+            return {
+                "id": c.id,
+                "first_name": c.first_name,
+                "last_name": c.last_name,
+                "email": c.email,
+                "phone_number": c.phone_number,
+                "document_number": c.document_number,
+                "document_type": c.document_type,
+                "status": c.status,
+                "otp_verified": c.otp_verified,
+                "latitude": float(c.latitude) if c.latitude else None,
+                "longitude": float(c.longitude) if c.longitude else None,
+            }
+        return None
     
 
 # --------------------------------------------------------
@@ -570,3 +627,182 @@ class PuntoPagoProcessRequestSerializer(serializers.Serializer):
         decimal_places=2, 
         help_text="Payment amount"
     )
+
+
+# ========================================
+# ACCOUNTING SERIALIZERS (OLA CARS STYLE)
+# ========================================
+
+from .models import AccountingCode, Invoice, PaymentReceived, LedgerEntry, Tax, BankAccount, Vendor, Expense, Bill, PaymentMade, CreditNote, JournalEntry
+
+class AccountingCodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AccountingCode
+        fields = '__all__'
+
+
+class InvoiceSerializer(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+    customer_document = serializers.SerializerMethodField()
+    device_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Invoice
+        fields = '__all__'
+
+    def get_customer_name(self, obj):
+        return f"{obj.customer.first_name} {obj.customer.last_name}"
+
+    def get_customer_document(self, obj):
+        return obj.customer.document_number
+
+    def get_device_name(self, obj):
+        if obj.finance_plan and obj.finance_plan.device:
+            return f"{obj.finance_plan.device.brand.name} {obj.finance_plan.device.model_name}"
+        return "N/A"
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        from datetime import date
+        if instance.status in ['PENDING', 'PARTIAL'] and instance.due_date and instance.due_date < date.today():
+            ret['status'] = 'OVERDUE'
+        return ret
+
+
+class PaymentReceivedSerializer(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+    deposited_to_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaymentReceived
+        fields = '__all__'
+
+    def get_customer_name(self, obj):
+        return f"{obj.customer.first_name} {obj.customer.last_name}"
+
+    def get_deposited_to_name(self, obj):
+        return f"{obj.deposited_to.code} - {obj.deposited_to.name}"
+
+
+class LedgerEntrySerializer(serializers.ModelSerializer):
+    accounting_code_details = serializers.SerializerMethodField()
+    reference_document = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LedgerEntry
+        fields = '__all__'
+
+    def get_accounting_code_details(self, obj):
+        return {
+            "code": obj.accounting_code.code,
+            "name": obj.accounting_code.name,
+            "category": obj.accounting_code.category
+        }
+
+    def get_reference_document(self, obj):
+        if obj.invoice:
+            return f"Invoice {obj.invoice.invoice_number}"
+        elif obj.payment_received:
+            return f"Payment {obj.payment_received.payment_number}"
+        elif obj.expense:
+            return f"Expense {obj.expense.expense_number}"
+        elif obj.bill:
+            return f"Bill {obj.bill.bill_number}"
+        elif obj.payment_made:
+            return f"Vendor Pay {obj.payment_made.payment_number}"
+        elif obj.credit_note:
+            return f"Credit Note {obj.credit_note.credit_note_number}"
+        elif obj.journal_entry:
+            return f"Journal {obj.journal_entry.reference_number}"
+        return "N/A"
+
+
+class TaxSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tax
+        fields = '__all__'
+
+
+class BankAccountSerializer(serializers.ModelSerializer):
+    accounting_code_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BankAccount
+        fields = '__all__'
+
+    def get_accounting_code_name(self, obj):
+        if obj.accounting_code:
+            return f"{obj.accounting_code.code} - {obj.accounting_code.name}"
+        return "N/A"
+
+
+class VendorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Vendor
+        fields = '__all__'
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    paid_from_name = serializers.SerializerMethodField()
+    expense_category_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Expense
+        fields = '__all__'
+
+    def get_paid_from_name(self, obj):
+        if obj.paid_from:
+            return f"{obj.paid_from.code} - {obj.paid_from.name}"
+        return "N/A"
+
+    def get_expense_category_name(self, obj):
+        if obj.expense_category:
+            return f"{obj.expense_category.code} - {obj.expense_category.name}"
+        return "N/A"
+
+
+class BillSerializer(serializers.ModelSerializer):
+    vendor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Bill
+        fields = '__all__'
+
+    def get_vendor_name(self, obj):
+        return obj.vendor.name if obj.vendor else "N/A"
+
+
+class PaymentMadeSerializer(serializers.ModelSerializer):
+    vendor_name = serializers.SerializerMethodField()
+    paid_from_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaymentMade
+        fields = '__all__'
+
+    def get_vendor_name(self, obj):
+        return obj.vendor.name if obj.vendor else "N/A"
+
+    def get_paid_from_name(self, obj):
+        if obj.paid_from:
+            return f"{obj.paid_from.code} - {obj.paid_from.name}"
+        return "N/A"
+
+
+class CreditNoteSerializer(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CreditNote
+        fields = '__all__'
+
+    def get_customer_name(self, obj):
+        return f"{obj.customer.first_name} {obj.customer.last_name}" if obj.customer else "N/A"
+
+
+class JournalEntrySerializer(serializers.ModelSerializer):
+    ledger_entries = LedgerEntrySerializer(many=True, read_only=True)
+
+    class Meta:
+        model = JournalEntry
+        fields = '__all__'

@@ -42,7 +42,20 @@ urlpatterns = [
     path("yappy/create-order/", views.YappyCreateOrderView.as_view(), name="yappy-create-order"),
     path("yappy/ipn/", views.YappyIPNView.as_view(), name="yappy-ipn"),
 
-
-
-
+    # ACCOUNTING
+    path('accounting-codes/', views.AccountingCodeListAPIView.as_view(), name='accounting-codes-list'),
+    path('accounting-codes/create/', views.AccountingCodeCreateAPIView.as_view(), name='accounting-codes-create'),
+    path('tax/', views.TaxListCreateAPIView.as_view(), name='tax-list-create'),
+    path('bank-accounts/', views.BankAccountListCreateAPIView.as_view(), name='bank-account-list-create'),
+    path('invoices/', views.InvoiceListAPIView.as_view(), name='invoices-list'),
+    path('invoices/<int:pk>/', views.InvoiceDetailAPIView.as_view(), name='invoices-detail'),
+    path('payment-received/', views.PaymentReceivedListCreateAPIView.as_view(), name='payment-received-list-create'),
+    path('ledger-entries/', views.LedgerEntryListAPIView.as_view(), name='ledger-entries-list'),
+    path('vendors/', views.VendorListCreateAPIView.as_view(), name='vendors-list-create'),
+    path('expenses/', views.ExpenseListCreateAPIView.as_view(), name='expenses-list-create'),
+    path('bills/', views.BillListCreateAPIView.as_view(), name='bills-list-create'),
+    path('bills/<int:pk>/', views.BillDetailAPIView.as_view(), name='bills-detail'),
+    path('payments-made/', views.PaymentMadeListCreateAPIView.as_view(), name='payments-made-list-create'),
+    path('credit-notes/', views.CreditNoteListCreateAPIView.as_view(), name='credit-notes-list-create'),
+    path('journal-entries/', views.JournalEntryListCreateAPIView.as_view(), name='journal-entries-list-create'),
 ]

@@ -829,6 +829,14 @@ class PaymentRecord(models.Model):
         related_name='payments',
         help_text="Link to specific EMI installment"
     )
+    payment_received = models.ForeignKey(
+        "PaymentReceived",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payment_records",
+        help_text="Link to accounting PaymentReceived record"
+    )
     
     payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES)
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
@@ -1062,4 +1070,652 @@ class FinanceMultiple(models.Model):
             return record.multiple
         except FinanceMultiple.DoesNotExist:
             return None
+
+
+# ========================================
+# ACCOUNTING MODELS (OLA CARS STYLE)
+# ========================================
+
+class AccountingCode(models.Model):
+    """
+    Accounting code representing accounts in Chart of Accounts
+    """
+    CATEGORY_CHOICES = [
+        ('ASSET', 'Asset'),
+        ('LIABILITY', 'Liability'),
+        ('EQUITY', 'Equity'),
+        ('REVENUE', 'Revenue'),
+        ('EXPENSE', 'Expense'),
+    ]
+
+    code = models.CharField(max_length=20, unique=True, help_text="Unique account code (e.g. 1100)")
+    name = models.CharField(max_length=100, help_text="Account name (e.g. Cash & Bank)")
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'accounting_codes'
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} - {self.name} ({self.category})"
+
+class Tax(models.Model):
+    """
+    Tax rate used in invoicing
+    """
+    name = models.CharField(max_length=50, unique=True)
+    rate = models.DecimalField(max_digits=5, decimal_places=2, help_text="Tax percentage rate (e.g. 7.00 for 7%)")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'taxes'
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} ({self.rate}%)"
+
+
+class BankAccount(models.Model):
+    """
+    Bank / Cash account linked to an accounting code
+    """
+    bank_name = models.CharField(max_length=100)
+    account_number = models.CharField(max_length=50, unique=True)
+    account_holder_name = models.CharField(max_length=100)
+    swift_code = models.CharField(max_length=20, blank=True, null=True)
+    currency = models.CharField(max_length=10, default="USD")
+    initial_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    current_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    status = models.CharField(max_length=20, default="ACTIVE")
+    account_type = models.CharField(max_length=20, default="Bank") # Bank, Cash, Credit Card
+    account_name = models.CharField(max_length=100)
+    accounting_code = models.ForeignKey(AccountingCode, on_delete=models.SET_NULL, null=True, blank=True, related_name='bank_accounts')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'bank_accounts'
+        ordering = ['account_name']
+
+    def __str__(self):
+        return f"{self.account_name} - {self.bank_name} ({self.account_number})"
+
+
+class Invoice(models.Model):
+    """
+    Customer invoice representing an installment bill or manual bill
+    """
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('PARTIAL', 'Partial'),
+        ('PAID', 'Paid'),
+        ('OVERDUE', 'Overdue'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+
+    INVOICE_TYPE_CHOICES = [
+        ('PLAN', 'Financing Plan EMI'),
+        ('MANUAL', 'Manual Invoice'),
+    ]
+
+    invoice_number = models.CharField(max_length=50, unique=True)
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='invoices')
+    finance_plan = models.ForeignKey(FinancePlan, on_delete=models.CASCADE, related_name='invoices', null=True, blank=True)
+    emi_schedule = models.ForeignKey(EMISchedule, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
+    due_date = models.DateField()
+    base_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    balance = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    invoice_type = models.CharField(max_length=20, choices=INVOICE_TYPE_CHOICES, default='PLAN')
+    line_items = models.JSONField(default=list, blank=True, help_text="Split items for manual invoices")
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    notes = models.TextField(blank=True, null=True, help_text="Internal notes or memo")
+    generated_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'invoices'
+        ordering = ['-due_date', '-id']
+
+    def __str__(self):
+        return f"Invoice {self.invoice_number} - {self.customer.first_name} {self.customer.last_name} ({self.status})"
+
+    def generate_ledger_entries(self):
+        """
+        Generates double-entry ledger records for the invoice
+        Debit Accounts Receivable (1200), Credit Sales/Rental Income (4100), Credit Tax Payable (2300)
+        """
+        # Find Accounting Codes
+        ar_code = AccountingCode.objects.filter(code="1200").first()
+        sales_code = AccountingCode.objects.filter(code="4100").first()
+        tax_code = AccountingCode.objects.filter(code="2300").first()
+
+        if not ar_code:
+            return
+
+        # Leg 1: Debit Accounts Receivable (Asset Increases)
+        LedgerEntry.objects.create(
+            invoice=self,
+            accounting_code=ar_code,
+            type='DEBIT',
+            amount=self.total_amount,
+            description=f"Invoice {self.invoice_number} generated for {self.customer.first_name} {self.customer.last_name}",
+            entry_date=self.generated_at
+        )
+
+        if self.invoice_type == 'MANUAL' and self.line_items:
+            for item in self.line_items:
+                # Find custom account code if selected, fallback to standard sales account
+                account_id = item.get('sales_account_id')
+                custom_sales_code = None
+                if account_id:
+                    custom_sales_code = AccountingCode.objects.filter(id=account_id).first()
+                if not custom_sales_code:
+                    custom_sales_code = sales_code
+
+                qty = Decimal(str(item.get('qty', 1)))
+                unit_price = Decimal(str(item.get('unit_price', 0)))
+                line_subtotal = qty * unit_price
+
+                # Leg 2: Credit custom Sales account (Revenue Increases)
+                if custom_sales_code and line_subtotal > 0:
+                    LedgerEntry.objects.create(
+                        invoice=self,
+                        accounting_code=custom_sales_code,
+                        type='CREDIT',
+                        amount=line_subtotal,
+                        description=f"Revenue recognized for {item.get('name', 'Line Item')} in manual invoice {self.invoice_number}",
+                        entry_date=self.generated_at
+                    )
+
+                # Leg 3: Credit Tax Payable (Liability Increases)
+                line_tax = Decimal(str(item.get('tax_amount', 0)))
+                if line_tax > 0 and tax_code:
+                    LedgerEntry.objects.create(
+                        invoice=self,
+                        accounting_code=tax_code,
+                        type='CREDIT',
+                        amount=line_tax,
+                        description=f"Tax liability recorded for {item.get('name', 'Line Item')} in manual invoice {self.invoice_number}",
+                        entry_date=self.generated_at
+                    )
+        else:
+            # Leg 2: Credit Sales/Rental Income (Revenue Increases)
+            if sales_code:
+                LedgerEntry.objects.create(
+                    invoice=self,
+                    accounting_code=sales_code,
+                    type='CREDIT',
+                    amount=self.base_amount,
+                    description=f"Revenue recognized for invoice {self.invoice_number}",
+                    entry_date=self.generated_at
+                )
+
+            # Leg 3: Credit Tax Payable (Liability Increases)
+            if self.tax_amount > 0 and tax_code:
+                LedgerEntry.objects.create(
+                    invoice=self,
+                    accounting_code=tax_code,
+                    type='CREDIT',
+                    amount=self.tax_amount,
+                    description=f"Tax liability recorded for invoice {self.invoice_number}",
+                    entry_date=self.generated_at
+                )
+
+
+class PaymentReceived(models.Model):
+    """
+    Payment receipt representing money paid against one or more invoices
+    """
+    payment_number = models.CharField(max_length=50, unique=True)
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='payments_received')
+    amount_received = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_date = models.DateTimeField(default=timezone.now)
+    payment_method = models.CharField(max_length=50, default='CASH')
+    transaction_reference = models.CharField(max_length=100, null=True, blank=True)
+    deposited_to = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='deposits')
+    invoices = models.JSONField(help_text="List of {invoice_id, amount_applied}")
+    notes = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payments_received'
+        ordering = ['-payment_date']
+
+    def __str__(self):
+        return f"PaymentReceived {self.payment_number} - {self.amount_received} from {self.customer.first_name}"
+
+    def process_payment(self, user=None):
+        """
+        Processes the payment:
+        1. Updates Invoice balances & statuses
+        2. Dispatches payment to financing EMI schedule logic (updates EMISchedule, creates PaymentRecord)
+        3. Creates double-entry ledger entries: Debit Cash/Bank, Credit Accounts Receivable
+        """
+        from decimal import Decimal
+        ar_code = AccountingCode.objects.filter(code="1200").first()
+        
+        # Leg 1: Debit Cash/Bank (Asset Increases)
+        LedgerEntry.objects.create(
+            payment_received=self,
+            accounting_code=self.deposited_to,
+            type='DEBIT',
+            amount=self.amount_received,
+            description=f"Payment received {self.payment_number} via {self.payment_method}. Ref: {self.transaction_reference or 'N/A'}",
+            entry_date=self.payment_date
+        )
+
+        total_applied = Decimal('0.00')
+
+        # Apply to invoices
+        for item in self.invoices:
+            inv_id = item.get('invoice_id')
+            applied_amount = Decimal(str(item.get('amount_applied', 0)))
+            if not inv_id or applied_amount <= 0:
+                continue
+
+            try:
+                invoice = Invoice.objects.get(id=inv_id)
+                invoice.amount_paid += applied_amount
+                invoice.balance = invoice.total_amount - invoice.amount_paid
+                if invoice.balance <= 0:
+                    invoice.status = 'PAID'
+                else:
+                    invoice.status = 'PARTIAL'
+                invoice.save()
+
+                total_applied += applied_amount
+
+                # Credit Accounts Receivable (Asset Decreases) for the applied amount
+                if ar_code:
+                    LedgerEntry.objects.create(
+                        payment_received=self,
+                        accounting_code=ar_code,
+                        type='CREDIT',
+                        amount=applied_amount,
+                        description=f"AR cleared for invoice {invoice.invoice_number} via payment {self.payment_number}",
+                        entry_date=self.payment_date
+                    )
+
+                # Dispatch to financing logic
+                if invoice.emi_schedule:
+                    # Create a standard PaymentRecord linking to this EMISchedule
+                    payment_rec = PaymentRecord.objects.create(
+                        finance_plan=invoice.finance_plan,
+                        emi_schedule=invoice.emi_schedule,
+                        payment_received=self,
+                        payment_type='EMI',
+                        payment_method=self.payment_method,
+                        payment_amount=applied_amount,
+                        payment_date=self.payment_date,
+                        payment_status='COMPLETED',
+                        transaction_reference=self.transaction_reference or self.payment_number,
+                        receipt_number=self.payment_number,
+                        processed_by=user,
+                        notes=self.notes or f"Paid via Invoice Payment {self.payment_number}"
+                    )
+                    # Trigger the EMI schedule updates and financing logic (device lock/unlock etc.)
+                    payment_rec.apply_to_emi()
+
+            except Invoice.DoesNotExist:
+                pass
+
+        # Handle any excess amount as credit/advance received
+        excess = self.amount_received - total_applied
+        if excess > 0:
+            advance_code = AccountingCode.objects.filter(code="2200").first()
+            if advance_code:
+                LedgerEntry.objects.create(
+                    payment_received=self,
+                    accounting_code=advance_code,
+                    type='CREDIT',
+                    amount=excess,
+                    description=f"Excess payment recorded as Customer Advance under payment {self.payment_number}",
+                    entry_date=self.payment_date
+                )
+
+
+class LedgerEntry(models.Model):
+    """
+    Double-entry ledger entries for all transactions
+    """
+    TYPE_CHOICES = [
+        ('DEBIT', 'Debit'),
+        ('CREDIT', 'Credit'),
+    ]
+
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    payment_received = models.ForeignKey(PaymentReceived, on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    expense = models.ForeignKey('Expense', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    bill = models.ForeignKey('Bill', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    payment_made = models.ForeignKey('PaymentMade', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    credit_note = models.ForeignKey('CreditNote', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    journal_entry = models.ForeignKey('JournalEntry', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    
+    accounting_code = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='ledger_entries')
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.TextField()
+    entry_date = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ledger_entries'
+        ordering = ['-entry_date', '-id']
+
+    def __str__(self):
+        return f"{self.type} of {self.amount} on {self.accounting_code.code} ({self.entry_date})"
+
+
+class Vendor(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    contact_name = models.CharField(max_length=100, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    phone = models.CharField(max_length=30, blank=True, null=True)
+    tax_id = models.CharField(max_length=50, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'vendors'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class Expense(models.Model):
+    expense_number = models.CharField(max_length=50, unique=True)
+    payment_date = models.DateField()
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_method = models.CharField(max_length=50, default='CASH')
+    paid_from = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='expense_payments_made')
+    expense_category = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='expense_categories')
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'expenses'
+        ordering = ['-payment_date', '-id']
+
+    def __str__(self):
+        return f"Expense {self.expense_number} - {self.amount}"
+
+    def generate_ledger_entries(self):
+        import datetime
+        date_val = self.payment_date
+        if isinstance(date_val, str):
+            date_val = datetime.datetime.strptime(date_val[:10], "%Y-%m-%d").date()
+        elif isinstance(date_val, datetime.datetime):
+            date_val = date_val.date()
+        dt = timezone.make_aware(datetime.datetime.combine(date_val, datetime.time.min))
+        
+        # Debit: Expense Category (increases expense)
+        LedgerEntry.objects.create(
+            expense=self,
+            accounting_code=self.expense_category,
+            type='DEBIT',
+            amount=self.amount,
+            description=f"Expense recorded: {self.notes or 'N/A'}",
+            entry_date=dt
+        )
+        # Credit: Cash/Bank (decreases asset)
+        LedgerEntry.objects.create(
+            expense=self,
+            accounting_code=self.paid_from,
+            type='CREDIT',
+            amount=self.amount,
+            description=f"Paid from {self.paid_from.name} for expense {self.expense_number}",
+            entry_date=dt
+        )
+
+
+class Bill(models.Model):
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('PARTIAL', 'Partial'),
+        ('PAID', 'Paid'),
+        ('OVERDUE', 'Overdue'),
+    ]
+
+    bill_number = models.CharField(max_length=50, unique=True)
+    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='bills')
+    bill_date = models.DateField()
+    due_date = models.DateField()
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2)
+    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    balance = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    notes = models.TextField(blank=True, null=True)
+    line_items = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'bills'
+        ordering = ['-due_date', '-id']
+
+    def __str__(self):
+        return f"Bill {self.bill_number} - {self.vendor.name} ({self.status})"
+
+    def generate_ledger_entries(self):
+        import datetime
+        ap_code = AccountingCode.objects.filter(code="2100").first() # Accounts Payable
+        if not ap_code:
+            return
+
+        date_val = self.bill_date
+        if isinstance(date_val, str):
+            date_val = datetime.datetime.strptime(date_val[:10], "%Y-%m-%d").date()
+        elif isinstance(date_val, datetime.datetime):
+            date_val = date_val.date()
+        dt = timezone.make_aware(datetime.datetime.combine(date_val, datetime.time.min))
+
+        # Credit leg: Accounts Payable (Liability Increases)
+        LedgerEntry.objects.create(
+            bill=self,
+            accounting_code=ap_code,
+            type='CREDIT',
+            amount=self.total_amount,
+            description=f"Bill {self.bill_number} from vendor {self.vendor.name}",
+            entry_date=dt
+        )
+
+        # Debit legs for each line item
+        for item in self.line_items:
+            qty = Decimal(str(item.get('qty', 1)))
+            unit_price = Decimal(str(item.get('unit_price', 0)))
+            line_subtotal = qty * unit_price
+            
+            # Find expense/asset GL code from item
+            expense_code_id = item.get('expense_account_id')
+            expense_code = None
+            if expense_code_id:
+                expense_code = AccountingCode.objects.filter(id=expense_code_id).first()
+            
+            if not expense_code:
+                expense_code = AccountingCode.objects.filter(category="EXPENSE").first()
+
+            if expense_code and line_subtotal > 0:
+                LedgerEntry.objects.create(
+                    bill=self,
+                    accounting_code=expense_code,
+                    type='DEBIT',
+                    amount=line_subtotal,
+                    description=f"Purchase expense recognized for {item.get('name', 'Line Item')} in bill {self.bill_number}",
+                    entry_date=dt
+                )
+
+            # Tax tracking if tax is present
+            line_tax = Decimal(str(item.get('tax_amount', 0)))
+            tax_code = AccountingCode.objects.filter(code="2300").first() # Tax Payable
+            if line_tax > 0 and tax_code:
+                LedgerEntry.objects.create(
+                    bill=self,
+                    accounting_code=tax_code,
+                    type='DEBIT',
+                    amount=line_tax,
+                    description=f"Tax recorded for {item.get('name', 'Line Item')} in bill {self.bill_number}",
+                    entry_date=dt
+                )
+
+
+class PaymentMade(models.Model):
+    payment_number = models.CharField(max_length=50, unique=True)
+    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='payments_made')
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_date = models.DateField()
+    payment_method = models.CharField(max_length=50, default='CASH')
+    paid_from = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='payments_made_from')
+    bills = models.JSONField(help_text="List of {bill_id, amount_applied}")
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payments_made'
+        ordering = ['-payment_date', '-id']
+
+    def __str__(self):
+        return f"PaymentMade {self.payment_number} - {self.amount_paid} to {self.vendor.name}"
+
+    def process_payment(self):
+        import datetime
+        ap_code = AccountingCode.objects.filter(code="2100").first() # Accounts Payable
+        date_val = self.payment_date
+        if isinstance(date_val, str):
+            date_val = datetime.datetime.strptime(date_val[:10], "%Y-%m-%d").date()
+        elif isinstance(date_val, datetime.datetime):
+            date_val = date_val.date()
+        dt = timezone.make_aware(datetime.datetime.combine(date_val, datetime.time.min))
+
+        # Credit leg: Bank/Cash (Asset Decreases)
+        LedgerEntry.objects.create(
+            payment_made=self,
+            accounting_code=self.paid_from,
+            type='CREDIT',
+            amount=self.amount_paid,
+            description=f"Payment {self.payment_number} made to vendor {self.vendor.name}",
+            entry_date=dt
+        )
+
+        total_applied = Decimal('0.00')
+
+        for item in self.bills:
+            bill_id = item.get('bill_id')
+            applied_amount = Decimal(str(item.get('amount_applied', 0)))
+            if not bill_id or applied_amount <= 0:
+                continue
+
+            try:
+                bill = Bill.objects.get(id=bill_id)
+                bill.amount_paid += applied_amount
+                bill.balance = bill.total_amount - bill.amount_paid
+                if bill.balance <= 0:
+                    bill.status = 'PAID'
+                else:
+                    bill.status = 'PARTIAL'
+                bill.save()
+
+                total_applied += applied_amount
+
+                # Debit leg: Accounts Payable (Liability Decreases)
+                if ap_code:
+                    LedgerEntry.objects.create(
+                        payment_made=self,
+                        accounting_code=ap_code,
+                        type='DEBIT',
+                        amount=applied_amount,
+                        description=f"Accounts Payable cleared for bill {bill.bill_number} via payment {self.payment_number}",
+                        entry_date=dt
+                    )
+
+            except Bill.DoesNotExist:
+                pass
+
+
+class CreditNote(models.Model):
+    STATUS_CHOICES = [
+        ('UNAPPLIED', 'Unapplied'),
+        ('APPLIED', 'Applied'),
+        ('VOID', 'Void'),
+    ]
+
+    credit_note_number = models.CharField(max_length=50, unique=True)
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='credit_notes')
+    date = models.DateField()
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UNAPPLIED')
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'credit_notes'
+        ordering = ['-date', '-id']
+
+    def __str__(self):
+        return f"Credit Note {self.credit_note_number} - {self.amount}"
+
+    def generate_ledger_entries(self):
+        import datetime
+        ar_code = AccountingCode.objects.filter(code="1200").first() # Accounts Receivable
+        sales_code = AccountingCode.objects.filter(code="4100").first() # Sales
+        date_val = self.date
+        if isinstance(date_val, str):
+            date_val = datetime.datetime.strptime(date_val[:10], "%Y-%m-%d").date()
+        elif isinstance(date_val, datetime.datetime):
+            date_val = date_val.date()
+        dt = timezone.make_aware(datetime.datetime.combine(date_val, datetime.time.min))
+
+        if ar_code:
+            # Credit leg: Accounts Receivable (Asset Decreases)
+            LedgerEntry.objects.create(
+                credit_note=self,
+                accounting_code=ar_code,
+                type='CREDIT',
+                amount=self.amount,
+                description=f"Credit note {self.credit_note_number} issued to customer {self.customer.first_name} {self.customer.last_name}",
+                entry_date=dt
+            )
+
+        if sales_code:
+            # Debit leg: Sales Revenue (Revenue Decreases)
+            LedgerEntry.objects.create(
+                credit_note=self,
+                accounting_code=sales_code,
+                type='DEBIT',
+                amount=self.amount,
+                description=f"Revenue reversal via credit note {self.credit_note_number}",
+                entry_date=dt
+            )
+
+
+class JournalEntry(models.Model):
+    reference_number = models.CharField(max_length=50, unique=True)
+    entry_date = models.DateField()
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'journal_entries'
+        ordering = ['-entry_date', '-id']
+
+    def __str__(self):
+        return f"Journal Entry {self.reference_number} ({self.entry_date})"
+
 

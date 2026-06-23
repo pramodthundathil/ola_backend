@@ -23,13 +23,14 @@ class CustomerSerializer(serializers.ModelSerializer):
             'email', 
             'phone_number', 
             'status',
+            'otp_verified',
             'latitude',
             'longitude',
             'created_by',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['status', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = ['created_by', 'created_at', 'updated_at']
         extra_kwargs = {
             'first_name': {'required': False, 'allow_blank': True},
             'last_name': {'required': False, 'allow_blank': True},

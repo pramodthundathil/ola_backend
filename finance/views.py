@@ -3940,4 +3940,761 @@ class YappyIPNView(APIView):
         return Response({"success": True})
 
 
+# ========================================
+# ACCOUNTING VIEWS (OLA CARS STYLE)
+# ========================================
+
+from .models import AccountingCode, Invoice, PaymentReceived, LedgerEntry, Tax, BankAccount, Vendor, Expense, Bill, PaymentMade, CreditNote, JournalEntry
+from .serializers import (
+    AccountingCodeSerializer,
+    InvoiceSerializer,
+    PaymentReceivedSerializer,
+    LedgerEntrySerializer,
+    TaxSerializer,
+    BankAccountSerializer,
+    VendorSerializer,
+    ExpenseSerializer,
+    BillSerializer,
+    PaymentMadeSerializer,
+    CreditNoteSerializer,
+    JournalEntrySerializer
+)
+from .signals import seed_default_accounting_codes
+
+class AccountingCodeListAPIView(APIView):
+    """
+    List all accounting codes. Seeds default codes if none exist.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        seed_default_accounting_codes()
+        codes = AccountingCode.objects.all().order_by('code')
+        serializer = AccountingCodeSerializer(codes, many=True)
+        return Response(serializer.data)
+
+
+class AccountingCodeCreateAPIView(APIView):
+    """
+    Create a new accounting code.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = AccountingCodeSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TaxListCreateAPIView(APIView):
+    """
+    List all taxes or create a new tax rate.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        taxes = Tax.objects.all().order_by('name')
+        serializer = TaxSerializer(taxes, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = TaxSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BankAccountListCreateAPIView(APIView):
+    """
+    List all bank accounts or create a new bank account.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        accounts = BankAccount.objects.all().select_related('accounting_code').order_by('account_name')
+        serializer = BankAccountSerializer(accounts, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        data = request.data.copy()
+        if 'initial_balance' in data and 'current_balance' not in data:
+            data['current_balance'] = data['initial_balance']
+        
+        serializer = BankAccountSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class InvoiceListAPIView(APIView):
+    """
+    List and filter all invoices, or create a new manual invoice.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        invoices = Invoice.objects.all().select_related('customer', 'finance_plan', 'emi_schedule').order_by('-due_date')
+        
+        customer_id = request.query_params.get('customer_id')
+        status_param = request.query_params.get('status')
+        
+        if customer_id:
+            invoices = invoices.filter(customer_id=customer_id)
+        if status_param:
+            status_param = status_param.upper()
+            today = timezone.now().date()
+            if status_param == 'OVERDUE':
+                invoices = invoices.filter(
+                    Q(status='OVERDUE') | 
+                    Q(status__in=['PENDING', 'PARTIAL'], due_date__lt=today)
+                )
+            elif status_param == 'PENDING':
+                invoices = invoices.filter(status='PENDING', due_date__gte=today)
+            elif status_param == 'PARTIAL':
+                invoices = invoices.filter(status='PARTIAL', due_date__gte=today)
+            else:
+                invoices = invoices.filter(status=status_param)
+
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(invoices, request, view=self)
+        serializer = InvoiceSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        customer_id = data.get('customer_id')
+        due_date = data.get('due_date')
+        line_items_data = data.get('line_items', [])
+        notes = data.get('notes', '')
+
+        if not customer_id or not due_date or not line_items_data:
+            return Response({"error": "Missing required fields: customer_id, due_date, and line_items"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                customer = Customer.objects.get(id=customer_id)
+
+                # Compute totals
+                subtotal = Decimal('0.00')
+                tax_amount = Decimal('0.00')
+                processed_line_items = []
+
+                for item in line_items_data:
+                    name = item.get('name', 'Line Item')
+                    qty = Decimal(str(item.get('qty', 1)))
+                    unit_price = Decimal(str(item.get('unit_price', 0)))
+                    sales_account_id = item.get('sales_account_id')
+                    tax_rate_id = item.get('tax_rate_id')
+
+                    line_subtotal = qty * unit_price
+                    subtotal += line_subtotal
+
+                    line_tax = Decimal('0.00')
+                    tax_rate_val = Decimal('0.00')
+                    if tax_rate_id:
+                        tax_obj = Tax.objects.get(id=tax_rate_id)
+                        tax_rate_val = tax_obj.rate
+                        line_tax = line_subtotal * (tax_rate_val / Decimal('100.00'))
+                        line_tax = line_tax.quantize(Decimal('0.01'))
+                    tax_amount += line_tax
+
+                    processed_line_items.append({
+                        "name": name,
+                        "qty": float(qty),
+                        "unit_price": float(unit_price),
+                        "sales_account_id": sales_account_id,
+                        "tax_rate_id": tax_rate_id,
+                        "tax_rate": float(tax_rate_val),
+                        "tax_amount": float(line_tax),
+                        "total": float(line_subtotal + line_tax)
+                    })
+
+                total_amount = subtotal + tax_amount
+
+                # Generate unique invoice number
+                import random
+                invoice_number = None
+                while not invoice_number:
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    candidate = f"INV-MAN-{date_str}-{rand_str}"
+                    if not Invoice.objects.filter(invoice_number=candidate).exists():
+                        invoice_number = candidate
+
+                invoice = Invoice.objects.create(
+                    invoice_number=invoice_number,
+                    customer=customer,
+                    due_date=due_date,
+                    base_amount=subtotal,
+                    subtotal=subtotal,
+                    tax_amount=tax_amount,
+                    total_amount=total_amount,
+                    balance=total_amount,
+                    amount_paid=Decimal('0.00'),
+                    status='PENDING',
+                    invoice_type='MANUAL',
+                    line_items=processed_line_items,
+                    notes=notes
+                )
+
+                # Generate ledger entries
+                invoice.generate_ledger_entries()
+
+                # Audit log
+                AuditLog.objects.create(
+                    user=request.user if request.user.is_authenticated else None,
+                    customer=customer,
+                    action_type='CREATE_PAYMENT',
+                    description=f"Manually created invoice {invoice_number} of total {total_amount} for customer {customer.first_name} {customer.last_name}"
+                )
+
+                return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
+
+        except Customer.DoesNotExist:
+            return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Tax.DoesNotExist:
+            return Response({"error": "Tax rate not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class InvoiceDetailAPIView(APIView):
+    """
+    Retrieve a single invoice's details.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        invoice = get_object_or_404(Invoice, pk=pk)
+        serializer = InvoiceSerializer(invoice)
+        return Response(serializer.data)
+
+
+class PaymentReceivedListCreateAPIView(APIView):
+    """
+    List all payments received or record a new payment against invoices.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        payments = PaymentReceived.objects.all().select_related('customer', 'deposited_to').order_by('-payment_date')
+        customer_id = request.query_params.get('customer_id')
+        if customer_id:
+            payments = payments.filter(customer_id=customer_id)
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(payments, request, view=self)
+        serializer = PaymentReceivedSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        customer_id = data.get('customer_id')
+        amount_received = Decimal(str(data.get('amount_received', 0)))
+        payment_method = data.get('payment_method', 'CASH')
+        transaction_reference = data.get('transaction_reference')
+        deposited_to_id = data.get('deposited_to')
+        invoices_data = data.get('invoices', [])
+        notes = data.get('notes')
+
+        if not customer_id or amount_received <= 0 or not deposited_to_id:
+            return Response({"error": "Missing required fields"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                customer = Customer.objects.get(id=customer_id)
+                deposited_to = AccountingCode.objects.get(id=deposited_to_id)
+
+                # Generate payment number PR-YYYYMMDD-XXXX
+                import random
+                date_str = timezone.now().strftime("%Y%m%d")
+                rand_str = str(random.randint(1000, 9999))
+                payment_number = f"PR-{date_str}-{rand_str}"
+
+                payment = PaymentReceived.objects.create(
+                    payment_number=payment_number,
+                    customer=customer,
+                    amount_received=amount_received,
+                    payment_date=timezone.now(),
+                    payment_method=payment_method,
+                    transaction_reference=transaction_reference,
+                    deposited_to=deposited_to,
+                    invoices=invoices_data,
+                    notes=notes
+                )
+
+                # Process invoice balance updates, EMI schedule integration, and ledger postings
+                payment.process_payment(user=request.user if request.user.is_authenticated else None)
+
+                # Create Audit Log
+                AuditLog.objects.create(
+                    user=request.user if request.user.is_authenticated else None,
+                    customer=customer,
+                    action_type='PAYMENT_RECEIVED',
+                    description=f"Recorded PaymentReceived {payment_number} of {amount_received} from customer {customer.first_name} {customer.last_name}",
+                    metadata={
+                        "payment_number": payment_number,
+                        "amount_received": str(amount_received),
+                        "payment_method": payment_method,
+                        "transaction_reference": transaction_reference
+                    }
+                )
+
+                return Response({
+                    "status": "success",
+                    "message": "Payment received and processed successfully",
+                    "payment_number": payment_number
+                }, status=status.HTTP_201_CREATED)
+
+        except Customer.DoesNotExist:
+            return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+        except AccountingCode.DoesNotExist:
+            return Response({"error": "Accounting code not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class LedgerEntryListAPIView(APIView):
+    """
+    List all general ledger entries.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        entries = LedgerEntry.objects.all().select_related('invoice', 'payment_received', 'accounting_code', 'bill').order_by('-entry_date', '-id')
+        bill_id = request.query_params.get('bill_id')
+        invoice_id = request.query_params.get('invoice_id')
+        if bill_id:
+            entries = entries.filter(bill_id=bill_id)
+        if invoice_id:
+            entries = entries.filter(invoice_id=invoice_id)
+            
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(entries, request, view=self)
+        serializer = LedgerEntrySerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class VendorListCreateAPIView(APIView):
+    """
+    List all vendors or create a new vendor.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        vendors = Vendor.objects.all().order_by('name')
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(vendors, request, view=self)
+        serializer = VendorSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        serializer = VendorSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ExpenseListCreateAPIView(APIView):
+    """
+    List all expenses or create a new expense.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        expenses = Expense.objects.all().select_related('paid_from', 'expense_category').order_by('-payment_date', '-id')
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(expenses, request, view=self)
+        serializer = ExpenseSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        payment_date = data.get('payment_date')
+        amount = Decimal(str(data.get('amount', 0)))
+        payment_method = data.get('payment_method', 'CASH')
+        paid_from_id = data.get('paid_from')
+        expense_category_id = data.get('expense_category')
+        notes = data.get('notes', '')
+
+        if not payment_date or amount <= 0 or not paid_from_id or not expense_category_id:
+            return Response({"error": "Missing required fields: payment_date, amount, paid_from, and expense_category"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                paid_from = AccountingCode.objects.get(id=paid_from_id)
+                expense_category = AccountingCode.objects.get(id=expense_category_id)
+
+                # Generate unique expense number EXP-YYYYMMDD-XXXX
+                import random
+                expense_number = None
+                while not expense_number:
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    candidate = f"EXP-{date_str}-{rand_str}"
+                    if not Expense.objects.filter(expense_number=candidate).exists():
+                        expense_number = candidate
+
+                expense = Expense.objects.create(
+                    expense_number=expense_number,
+                    payment_date=payment_date,
+                    amount=amount,
+                    payment_method=payment_method,
+                    paid_from=paid_from,
+                    expense_category=expense_category,
+                    notes=notes
+                )
+
+                # Generate ledger entries
+                expense.generate_ledger_entries()
+
+                return Response(ExpenseSerializer(expense).data, status=status.HTTP_201_CREATED)
+
+        except AccountingCode.DoesNotExist:
+            return Response({"error": "GL Account not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BillListCreateAPIView(APIView):
+    """
+    List all vendor bills or create a new purchase bill.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        bills = Bill.objects.all().select_related('vendor').order_by('-due_date')
+        
+        vendor_id = request.query_params.get('vendor_id')
+        status_param = request.query_params.get('status')
+        
+        if vendor_id:
+            bills = bills.filter(vendor_id=vendor_id)
+        if status_param:
+            bills = bills.filter(status=status_param)
+
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(bills, request, view=self)
+        serializer = BillSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        vendor_id = data.get('vendor_id')
+        bill_date = data.get('bill_date')
+        due_date = data.get('due_date')
+        line_items_data = data.get('line_items', [])
+        notes = data.get('notes', '')
+
+        if not vendor_id or not bill_date or not due_date or not line_items_data:
+            return Response({"error": "Missing required fields: vendor_id, bill_date, due_date, and line_items"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                vendor = Vendor.objects.get(id=vendor_id)
+
+                # Compute subtotal, tax and total
+                subtotal = Decimal('0.00')
+                tax_amount = Decimal('0.00')
+                processed_line_items = []
+
+                for item in line_items_data:
+                    name = item.get('name', 'Line Item')
+                    qty = Decimal(str(item.get('qty', 1)))
+                    unit_price = Decimal(str(item.get('unit_price', 0)))
+                    expense_account_id = item.get('expense_account_id')
+                    tax_rate_id = item.get('tax_rate_id')
+
+                    line_subtotal = qty * unit_price
+                    subtotal += line_subtotal
+
+                    line_tax = Decimal('0.00')
+                    tax_rate_val = Decimal('0.00')
+                    if tax_rate_id:
+                        tax_obj = Tax.objects.get(id=tax_rate_id)
+                        tax_rate_val = tax_obj.rate
+                        line_tax = line_subtotal * (tax_rate_val / Decimal('100.00'))
+                        line_tax = line_tax.quantize(Decimal('0.01'))
+                    tax_amount += line_tax
+
+                    processed_line_items.append({
+                        "name": name,
+                        "qty": float(qty),
+                        "unit_price": float(unit_price),
+                        "expense_account_id": expense_account_id,
+                        "tax_rate_id": tax_rate_id,
+                        "tax_rate": float(tax_rate_val),
+                        "tax_amount": float(line_tax),
+                        "total": float(line_subtotal + line_tax)
+                    })
+
+                total_amount = subtotal + tax_amount
+
+                # Generate unique bill number
+                import random
+                bill_number = None
+                while not bill_number:
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    candidate = f"BILL-{date_str}-{rand_str}"
+                    if not Bill.objects.filter(bill_number=candidate).exists():
+                        bill_number = candidate
+
+                bill = Bill.objects.create(
+                    bill_number=bill_number,
+                    vendor=vendor,
+                    bill_date=bill_date,
+                    due_date=due_date,
+                    subtotal=subtotal,
+                    tax_amount=tax_amount,
+                    total_amount=total_amount,
+                    balance=total_amount,
+                    amount_paid=Decimal('0.00'),
+                    status='PENDING',
+                    line_items=processed_line_items,
+                    notes=notes
+                )
+
+                # Generate ledger entries
+                bill.generate_ledger_entries()
+
+                return Response(BillSerializer(bill).data, status=status.HTTP_201_CREATED)
+
+        except Vendor.DoesNotExist:
+            return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Tax.DoesNotExist:
+            return Response({"error": "Tax rate not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BillDetailAPIView(APIView):
+    """
+    Retrieve a single bill's details.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        bill = get_object_or_404(Bill, pk=pk)
+        serializer = BillSerializer(bill)
+        return Response(serializer.data)
+
+
+class PaymentMadeListCreateAPIView(APIView):
+    """
+    List all payments made to vendors or record a new bill payment.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        payments = PaymentMade.objects.all().select_related('vendor', 'paid_from').order_by('-payment_date', '-id')
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(payments, request, view=self)
+        serializer = PaymentMadeSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        vendor_id = data.get('vendor_id')
+        amount_paid = Decimal(str(data.get('amount_paid', 0)))
+        payment_date = data.get('payment_date')
+        payment_method = data.get('payment_method', 'CASH')
+        paid_from_id = data.get('paid_from')
+        bills_data = data.get('bills', [])
+        notes = data.get('notes', '')
+
+        if not vendor_id or amount_paid <= 0 or not payment_date or not paid_from_id:
+            return Response({"error": "Missing required fields: vendor_id, amount_paid, payment_date, and paid_from"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                vendor = Vendor.objects.get(id=vendor_id)
+                paid_from = AccountingCode.objects.get(id=paid_from_id)
+
+                # Generate payment number VPM-YYYYMMDD-XXXX
+                import random
+                date_str = timezone.now().strftime("%Y%m%d")
+                rand_str = str(random.randint(1000, 9999))
+                payment_number = f"VPM-{date_str}-{rand_str}"
+
+                payment = PaymentMade.objects.create(
+                    payment_number=payment_number,
+                    vendor=vendor,
+                    amount_paid=amount_paid,
+                    payment_date=payment_date,
+                    payment_method=payment_method,
+                    paid_from=paid_from,
+                    bills=bills_data,
+                    notes=notes
+                )
+
+                # Process applied bills and generate ledger entries
+                payment.process_payment()
+
+                return Response(PaymentMadeSerializer(payment).data, status=status.HTTP_201_CREATED)
+
+        except Vendor.DoesNotExist:
+            return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
+        except AccountingCode.DoesNotExist:
+            return Response({"error": "GL Account not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CreditNoteListCreateAPIView(APIView):
+    """
+    List all credit notes or create a new credit note.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        credit_notes = CreditNote.objects.all().select_related('customer').order_by('-date', '-id')
+        customer_id = request.query_params.get('customer_id')
+        if customer_id:
+            credit_notes = credit_notes.filter(customer_id=customer_id)
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(credit_notes, request, view=self)
+        serializer = CreditNoteSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        customer_id = data.get('customer_id')
+        date = data.get('date')
+        amount = Decimal(str(data.get('amount', 0)))
+        notes = data.get('notes', '')
+
+        if not customer_id or not date or amount <= 0:
+            return Response({"error": "Missing required fields: customer_id, date, and amount"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                customer = Customer.objects.get(id=customer_id)
+
+                # Generate unique credit note number CN-YYYYMMDD-XXXX
+                import random
+                credit_note_number = None
+                while not credit_note_number:
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    candidate = f"CN-{date_str}-{rand_str}"
+                    if not CreditNote.objects.filter(credit_note_number=candidate).exists():
+                        credit_note_number = candidate
+
+                credit_note = CreditNote.objects.create(
+                    credit_note_number=credit_note_number,
+                    customer=customer,
+                    date=date,
+                    amount=amount,
+                    status='UNAPPLIED',
+                    notes=notes
+                )
+
+                # Generate ledger entries
+                credit_note.generate_ledger_entries()
+
+                return Response(CreditNoteSerializer(credit_note).data, status=status.HTTP_201_CREATED)
+
+        except Customer.DoesNotExist:
+            return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class JournalEntryListCreateAPIView(APIView):
+    """
+    List all manual journal entries or post a new double-entry journal.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        journal_entries = JournalEntry.objects.all().order_by('-entry_date', '-id')
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(journal_entries, request, view=self)
+        serializer = JournalEntrySerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        data = request.data
+        entry_date = data.get('entry_date')
+        description = data.get('description', '')
+        lines = data.get('lines', [])
+
+        if not entry_date or not lines:
+            return Response({"error": "Missing required fields: entry_date and lines"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate debits match credits
+        total_debit = Decimal('0.00')
+        total_credit = Decimal('0.00')
+        for line in lines:
+            amt = Decimal(str(line.get('amount', 0)))
+            if line.get('type') == 'DEBIT':
+                total_debit += amt
+            elif line.get('type') == 'CREDIT':
+                total_credit += amt
+
+        if total_debit != total_credit:
+            return Response({"error": f"Unbalanced Journal Entry: Debits (${total_debit}) must equal Credits (${total_credit})"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if total_debit <= 0:
+            return Response({"error": "Journal Entry amount must be greater than zero"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                # Generate unique reference number JR-YYYYMMDD-XXXX
+                import random
+                reference_number = None
+                while not reference_number:
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    candidate = f"JR-{date_str}-{rand_str}"
+                    if not JournalEntry.objects.filter(reference_number=candidate).exists():
+                        reference_number = candidate
+
+                journal = JournalEntry.objects.create(
+                    reference_number=reference_number,
+                    entry_date=entry_date,
+                    description=description
+                )
+
+                import datetime
+                dt = timezone.make_aware(datetime.datetime.combine(timezone.datetime.strptime(entry_date, '%Y-%m-%d').date(), datetime.time.min))
+
+                # Create Ledger Entries
+                for line in lines:
+                    code_id = line.get('accounting_code_id')
+                    code = AccountingCode.objects.get(id=code_id)
+                    amt = Decimal(str(line.get('amount', 0)))
+                    l_type = line.get('type')
+
+                    LedgerEntry.objects.create(
+                        journal_entry=journal,
+                        accounting_code=code,
+                        type=l_type,
+                        amount=amt,
+                        description=description or f"Manual journal adjustment {reference_number}",
+                        entry_date=dt
+                    )
+
+                return Response(JournalEntrySerializer(journal).data, status=status.HTTP_201_CREATED)
+
+        except AccountingCode.DoesNotExist:
+            return Response({"error": "GL Account not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
 
