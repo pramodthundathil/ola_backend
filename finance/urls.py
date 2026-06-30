@@ -6,6 +6,11 @@ urlpatterns = [
     path('auto-plan/', views.AutoFinancePlanView.as_view(), name='finance-auto-plan'),
     path('finance-plan/', views.FinancePlanAPIView.as_view(), name='finance-plan-list'),
     path('finance-plan/<int:plan_id>/', views.FinancePlanDetailAPIView.as_view(), name='finance-plan-detail'), 
+    path('finance-plan/<int:plan_id>/activate/', views.FinancePlanActivateAPIView.as_view(), name='finance-plan-activate'),
+    path('configuration/', views.FinanceConfigAPIView.as_view(), name='finance-configuration'), 
+    path('generate-plans/', views.FinanceGeneratePlansAPIView.as_view(), name='finance-generate-plans'), 
+    path('contracts/', views.FinanceContractsAPIView.as_view(), name='finance-contracts'), 
+    path('contracts/download-pdf/', views.FinanceContractsPDFView.as_view(), name='finance-contracts-download-pdf'), 
 
     #Analytics
     path('analytics/overview/', views.FinanceOverviewAPIView.as_view(), name='finance-overview'),  

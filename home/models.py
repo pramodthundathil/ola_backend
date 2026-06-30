@@ -306,7 +306,13 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         Override save to auto-generate username from email if not provided.
         """
         if not self.username:
-            self.username = self.email.split('@')[0]
+            base_username = self.email.split('@')[0]
+            username = base_username
+            counter = 1
+            while self.__class__.objects.filter(username=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+            self.username = username
         
         # Sync phone and phone_number fields
         if self.phone and not self.phone_number:

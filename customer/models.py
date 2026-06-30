@@ -143,10 +143,17 @@ class IdentityVerification(models.Model):
     ]
     
    # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    customer = models.OneToOneField(
+    customer = models.ForeignKey(
         Customer, 
         on_delete=models.CASCADE,
-        related_name='identity_verification'
+        related_name='identity_verifications'
+    )
+    credit_application = models.OneToOneField(
+        'CreditApplication',
+        on_delete=models.CASCADE,
+        related_name='identity_verification',
+        null=True,
+        blank=True
     )
     
     # Document Upload
@@ -303,6 +310,13 @@ class CreditScore(models.Model):
         default='PENDING'
     )
     
+    # Bureau details for Panama workflow
+    risk_category = models.CharField(max_length=50, null=True, blank=True, help_text="e.g. Low Risk, Medium Risk, etc.")
+    existing_monthly_debt = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Existing monthly debt obligations")
+    existing_loans_count = models.IntegerField(default=0, help_text="Number of existing active loans")
+    late_payments_count = models.IntegerField(default=0, help_text="Number of late payments recorded")
+    bureau_recommendation = models.TextField(null=True, blank=True, help_text="Bureau recommendation notes")
+    
     # Internal Score (Ola Cell Payment History)
     internal_score = models.IntegerField(
         null=True,
@@ -440,9 +454,47 @@ class CreditScore(models.Model):
 
 
 
-# ========================================
-# DYNAMIC CREDIT SCORE  FOR TIAR CONFIG MODEL 
-# ========================================
+DEFAULT_TEMPLATE = """================================================================================
+                       LOAN & CREDIT AGREEMENT (PANAMA)
+================================================================================
+This agreement is entered into on this day {date}
+by and between:
+
+CREDITOR: OLA CREDIT PANAMA, S.A.
+BORROWER: {first_name} {last_name}
+IDENTIFICATION (CEDULA): {cedula}
+EMAIL: {email}
+PHONE: {phone}
+
+1. PRODUCT DESCRIPTION:
+   Brand: {device_brand}
+   Model: {device_model}
+   IMEI: {device_imei}
+   
+2. FINANCING DETAILS:
+   Total Selling Price: ${selling_price} USD
+   Cash Price: ${cash_price} USD
+   Accessories: ${accessories} USD
+   Warranty: ${warranty} USD
+   Insurance: ${insurance} USD
+   Total Value: ${total_price} USD
+   Down Payment Paid: ${actual_down_payment} USD
+   Principal Amount to Finance: ${amount_to_finance} USD
+   Term: {selected_term} Months
+   Installment Frequency: Every {installment_frequency_days} Days
+   Monthly Installment: ${monthly_installment} USD
+   Total Repayment: ${total_amount_payable} USD
+   
+3. PAYMENTS & AMORTIZATION:
+   Borrower agrees to make all payments strictly on or before their due dates
+   in accordance with the generated EMI Schedule. Default on any installment
+   will trigger automated remote locking of the product via Samsung Knox/Device Enrollment systems.
+   
+EMI Repayment Schedule:
+{emi_schedule}
+
+Signed by Borrower: ___________________________
+Signed for Ola Credit: _________________________"""
 
 
 class CreditConfig(models.Model):
@@ -454,6 +506,12 @@ class CreditConfig(models.Model):
     tier_a_min_score = models.IntegerField(default=600, help_text="Minimum APC score for Tier A")
     tier_b_min_score = models.IntegerField(default=550, help_text="Minimum APC score for Tier B")
     tier_c_min_score = models.IntegerField(default=500, help_text="Minimum APC score for Tier C")
+    loan_agreement_template = models.TextField(
+        default=DEFAULT_TEMPLATE,
+        null=True,
+        blank=True,
+        help_text="HTML or text template for the Loan Agreement. Use placeholders like {first_name}, {last_name}, {cedula}, {emi_schedule}, etc."
+    )
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -582,6 +640,17 @@ class CreditApplication(models.Model):
     pre_qualification_date = models.DateTimeField(null=True, blank=True)
     
     # Device Selection
+    device = models.ForeignKey(
+        'products.ProductModel',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='credit_applications'
+    )
+    installment_frequency_days = models.IntegerField(default=30)
+    otp_verified = models.BooleanField(default=False)
+    identity_verified = models.BooleanField(default=False)
+    
     device_brand = models.CharField(max_length=100, null=True, blank=True)
     device_model = models.CharField(max_length=100, null=True, blank=True)
     device_reference = models.CharField(max_length=100, null=True, blank=True)
@@ -634,6 +703,18 @@ class CreditApplication(models.Model):
         blank=True
     )
     
+    current_step = models.IntegerField(default=0, help_text="Current step index for resuming the application flow")
+    draft_data = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="JSON draft data containing all frontend form inputs/states"
+    )
+    loan_agreement_pdf = models.FileField(
+        upload_to='loan_agreements/',
+        null=True,
+        blank=True,
+        help_text="Generated PDF contract for the loan agreement"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)

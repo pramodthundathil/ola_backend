@@ -214,6 +214,8 @@ class FinancePlan(models.Model):
         (8, '8 Months'),
     ]
     FREQUENCY_CHOICES = [
+        (3, 'Twice a week (3 Days)'),
+        (7, 'Weekly (7 Days)'),
         (10, '10 Days'),
         (15, '15 Days (Bi-Monthly)'),
         (30, '30 Days (Monthly)'),
@@ -250,6 +252,19 @@ class FinancePlan(models.Model):
         default=False,
         help_text="Device price > $300"
     )
+    
+    # Device pricing breakdown for Panama
+    cash_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Cash price from product model")
+    selling_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Selling price from product model")
+    insurance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Insurance price")
+    accessories = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Accessories total price")
+    warranty = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Warranty price")
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Total price = selling + insurance + accessories + warranty")
+    
+    # Capacity math for Panama
+    available_capacity = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Income minus existing monthly debt obligations")
+    max_emi_allowed = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Available capacity multiplied by allowed debt ratio")
+    debt_ratio_pct = models.DecimalField(max_digits=5, decimal_places=2, default=20.00, help_text="Debt ratio percentage applied for this tier")
     
     # Down Payment
     minimum_down_payment_percentage = models.DecimalField(
@@ -349,7 +364,7 @@ class FinancePlan(models.Model):
     # new ly added fields for easy calculation of finance by store and creator    
     store = models.ForeignKey(Store, on_delete=models.DO_NOTHING, null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.DO_NOTHING)
-    status = models.CharField(max_length=20, choices=[("ACTIVE", "Active"), ("CLOSED", "Closed")]) 
+    status = models.CharField(max_length=20, choices=[("DRAFT", "Draft"), ("ACTIVE", "Active"), ("CLOSED", "Closed")], default="DRAFT") 
     is_active = models.BooleanField(default=True) 
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -366,6 +381,12 @@ class FinancePlan(models.Model):
     
     def __str__(self):
         return f"Finance Plan for App {self.credit_application.id} - {self.risk_tier}"
+    
+    @property
+    def customer(self):
+        if self.credit_application:
+            return self.credit_application.customer
+        return None
     
     def determine_risk_tier(self, tier_a_min_score = 600,tier_b_min_score = 550, tier_c_min_score = 500):
         """Determine risk tier based on APC score"""        
@@ -667,6 +688,13 @@ class EMISchedule(models.Model):
         help_text="EMI amount for this installment"
     )
     
+    # Panama specific schedule breakdown
+    principal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text="Principal portion of EMI")
+    interest = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text="Interest portion of EMI")
+    insurance = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text="Insurance fee portion of EMI")
+    fees = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text="Processing/Other fees portion")
+    balance = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text="Remaining principal balance")
+    
     amount_paid = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -753,27 +781,124 @@ class EMISchedule(models.Model):
     @classmethod
     def generate_schedule(cls, finance_plan, first_due_date):
         """
-        Generate EMI schedule for any frequency (10, 15, 30 days).
+        Generate EMI schedule for any frequency (3, 7, 10, 15, 30 days) using IRR declining-balance amortization.
         """
+        from decimal import Decimal, ROUND_HALF_UP
+        
         schedules = []
-        total_installments = finance_plan.selected_term
-        emi_amount = finance_plan.monthly_installment
         frequency_days = finance_plan.installment_frequency_days or 30  # Default 30 days
+        term_months = finance_plan.selected_term
+        principal = Decimal(str(finance_plan.amount_to_finance))
+
+        # 1. Total installments count
+        if frequency_days == 30:
+            total_installments = term_months
+        elif frequency_days == 15:
+            total_installments = term_months * 2
+        elif frequency_days == 7:
+            total_installments = term_months * 4
+        elif frequency_days == 3:
+            total_installments = term_months * 8
+        else:
+            total_installments = int(term_months * 30 / frequency_days)
+
+        # 2. Grab interest/fee parameters
+        term_obj = LoanTerm.objects.filter(months=term_months).first()
+        plan_obj = InterestPlan.objects.filter(loan_term=term_obj, is_active=True).first()
+        
+        multiplier = plan_obj.risk_multiplier if plan_obj else (term_obj.multiplier if term_obj else None)
+        if multiplier is None or multiplier <= 0:
+            multiplier = Decimal('1.2')  # default fallback
+            
+        proc_fee = plan_obj.processing_fee if plan_obj else Decimal('15.00')
+        ins_fee = plan_obj.insurance_fee if plan_obj else Decimal('20.00')
+
+        # 3. Total repayment and emi per installment under FLAT model
+        total_repayment = principal * Decimal(str(multiplier))
+        total_interest = total_repayment - principal
+        emi_amount = (total_repayment / Decimal(str(total_installments))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        # 4. Solve for Tasa_quincenal (IRR of biweekly cash flows)
+        n_biweekly = term_months * 2
+        low = Decimal('0.0')
+        high = Decimal('2.0')
+        target = Decimal(n_biweekly) / Decimal(str(multiplier))
+        for _ in range(100):
+            r_temp = (low + high) / Decimal('2.0')
+            if r_temp > 0:
+                val = (1 - (1 + r_temp)**(-n_biweekly)) / r_temp
+            else:
+                val = Decimal(n_biweekly)
+            if val > target:
+                low = r_temp
+            else:
+                high = r_temp
+        tasa_quincenal = (low + high) / Decimal('2.0')
+
+        # 5. Scale interest rate according to the cadence
+        if frequency_days == 30:
+            r_periodic = tasa_quincenal * Decimal('2.0')
+        elif frequency_days == 15:
+            r_periodic = tasa_quincenal
+        elif frequency_days == 7:
+            r_periodic = tasa_quincenal / Decimal('2.0')
+        elif frequency_days == 3:
+            r_periodic = tasa_quincenal / Decimal('4.0')
+        else:
+            r_periodic = tasa_quincenal * (Decimal(str(frequency_days)) / Decimal('15.0'))
+
+        # 6. Amortize
+        running_balance = principal
+        running_principal_sum = Decimal('0.00')
+        running_emi_sum = Decimal('0.00')
 
         for i in range(1, total_installments + 1):
             due_date = first_due_date + timedelta(days=(i - 1) * frequency_days)
+
+            inst_insurance = (ins_fee / Decimal(str(total_installments))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            inst_fees = (proc_fee / Decimal(str(total_installments))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+            if i == total_installments:
+                p_amount = principal - running_principal_sum
+                inst_amount = total_repayment - running_emi_sum
+                int_amount = inst_amount - p_amount
+                current_balance = Decimal('0.00')
+            else:
+                int_amount = (running_balance * r_periodic).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                inst_amount = emi_amount
+                p_amount = inst_amount - int_amount
+
+                # Safeguard: ensure p_amount doesn't exceed remaining principal
+                if p_amount < 0:
+                    p_amount = Decimal('0.00')
+                    int_amount = inst_amount
+                if running_balance - p_amount < 0:
+                    p_amount = running_balance
+                    int_amount = inst_amount - p_amount
+
+                current_balance = running_balance - p_amount
+                running_emi_sum += inst_amount
+                running_principal_sum += p_amount
+
+            running_balance = current_balance
+
             schedules.append(
                 cls(
                     finance_plan=finance_plan,
                     installment_number=i,
                     due_date=due_date,
-                    installment_amount=emi_amount,
-                    balance_remaining=emi_amount
+                    installment_amount=inst_amount,
+                    balance_remaining=inst_amount,
+                    principal=p_amount,
+                    interest=int_amount,
+                    insurance=inst_insurance,
+                    fees=inst_fees,
+                    balance=current_balance
                 )
             )
 
         cls.objects.bulk_create(schedules)
-        return schedules 
+        return schedules
 
 
 # ========================================
@@ -1033,6 +1158,8 @@ class FinanceMultiple(models.Model):
     ]
 
     INTERVAL_CHOICES = [
+        (3, 'Every 3 Days'),
+        (7, 'Every 7 Days'),
         (15, 'Every 15 Days'),
         (30, 'Every 30 Days'),
     ]
@@ -1717,5 +1844,138 @@ class JournalEntry(models.Model):
 
     def __str__(self):
         return f"Journal Entry {self.reference_number} ({self.entry_date})"
+
+
+class RiskTier(models.Model):
+    code = models.CharField(max_length=20, unique=True, help_text="e.g. TIER_A, TIER_B")
+    name = models.CharField(max_length=100)
+    min_score = models.IntegerField(null=True, blank=True)
+    max_score = models.IntegerField(null=True, blank=True)
+    min_salary = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    max_debt_ratio_pct = models.DecimalField(max_digits=5, decimal_places=2, default=30.00, help_text="Maximum EMI to Income ratio in %")
+    min_down_payment_pct = models.DecimalField(max_digits=5, decimal_places=2, default=20.00)
+    max_device_value = models.DecimalField(max_digits=10, decimal_places=2, default=1500.00)
+    approval_level = models.CharField(
+        max_length=50,
+        choices=[
+            ('AUTO', 'Auto Approval'),
+            ('FINANCE_ADMIN', 'Finance Admin Approval'),
+            ('ADMIN', 'Admin Approval'),
+            ('GLOBAL_MANAGER', 'Global Manager Approval')
+        ],
+        default='AUTO'
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'finance_risk_tiers'
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+
+class LoanTerm(models.Model):
+    months = models.IntegerField(unique=True, help_text="Term in months, e.g. 4, 6, 8, 10, 12")
+    fortnights = models.IntegerField(help_text="Number of fortnights, e.g. 8, 12, 16, 20, 24")
+    multiplier = models.DecimalField(max_digits=5, decimal_places=2, default=1.00, help_text="Flat interest multiplier, e.g. 3.00 for 12 months")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_loan_terms'
+
+    def __str__(self):
+        return f"{self.months} Months ({self.fortnights} Fortnights)"
+
+
+class InterestPlan(models.Model):
+    loan_term = models.ForeignKey(LoanTerm, on_delete=models.CASCADE, related_name='interest_plans')
+    name = models.CharField(max_length=100)
+    interest_rate_pct = models.DecimalField(max_digits=5, decimal_places=2, help_text="Interest rate in % (annual)")
+    processing_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    insurance_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    risk_multiplier = models.DecimalField(max_digits=5, decimal_places=2, default=1.00)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_interest_plans'
+
+    def __str__(self):
+        return f"{self.name} - {self.loan_term.months} Months"
+
+
+class EmployerRule(models.Model):
+    employer_name = models.CharField(max_length=200, unique=True)
+    min_employment_duration_months = models.IntegerField(default=6)
+    is_blacklisted = models.BooleanField(default=False)
+    max_loan_multiplier = models.DecimalField(max_digits=5, decimal_places=2, default=1.00)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_employer_rules'
+
+    def __str__(self):
+        return self.employer_name
+
+
+class ApprovalRule(models.Model):
+    risk_tier = models.OneToOneField(RiskTier, on_delete=models.CASCADE, related_name='approval_rule')
+    min_down_payment_pct = models.DecimalField(max_digits=5, decimal_places=2, default=20.00)
+    max_loan_amount = models.DecimalField(max_digits=10, decimal_places=2, default=1000.00)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_approval_rules'
+
+    def __str__(self):
+        return f"Approval Rule for {self.risk_tier.name}"
+
+
+class DecisionRule(models.Model):
+    rule_key = models.CharField(max_length=50, unique=True, help_text="e.g. min_score, max_debt_ratio, blacklist_check")
+    description = models.CharField(max_length=250)
+    value = models.CharField(max_length=100, help_text="Parameters like numbers or booleans")
+    is_mandatory = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_decision_rules'
+
+    def __str__(self):
+        return self.rule_key
+
+
+class ReferenceRule(models.Model):
+    min_references = models.IntegerField(default=2)
+    require_verification = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_reference_rules'
+
+    def __str__(self):
+        return f"Min References: {self.min_references}"
+
+
+class EMIConfiguration(models.Model):
+    method = models.CharField(
+        max_length=20,
+        choices=[
+            ('FLAT', 'Flat Interest / Multiplier'),
+            ('REDUCING', 'Reducing Balance EMI')
+        ],
+        default='FLAT'
+    )
+    processing_fee_default = models.DecimalField(max_digits=10, decimal_places=2, default=15.00)
+    insurance_fee_default = models.DecimalField(max_digits=10, decimal_places=2, default=20.00)
+    tax_rate_pct = models.DecimalField(max_digits=5, decimal_places=2, default=7.00, help_text="ITBMS Tax in %")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_emi_configurations'
+
+    def __str__(self):
+        return f"EMI Config: {self.method}"
 
 

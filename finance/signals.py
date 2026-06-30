@@ -36,8 +36,12 @@ def seed_default_accounting_codes():
 
 @receiver(post_save, sender=FinancePlan)
 def create_emi_schedule(sender, instance, created, **kwargs):
-    if not created:
+    if not created and instance.status != "DRAFT":
         return
+
+    if not created and instance.status == "DRAFT":
+        instance.emi_schedule.all().delete()
+        logger.info(f"[EMI UPDATED] Cleared old EMI schedules for updated draft FinancePlan ID={instance.id}")
 
     if instance.emi_schedule.exists():
         logger.warning(f"[EMI SKIP] FinancePlan ID={instance.id} already has EMI schedules.")
@@ -48,7 +52,7 @@ def create_emi_schedule(sender, instance, created, **kwargs):
 
     try:
         with transaction.atomic():
-            if frequency in [10, 15, 30]:
+            if frequency in [3, 7, 10, 15, 30]:
                 EMISchedule.generate_schedule(instance, first_due_date)
                 logger.info(f"[EMI CREATED] {frequency}-day EMI schedule for FinancePlan ID={instance.id}")
             else:
@@ -56,38 +60,7 @@ def create_emi_schedule(sender, instance, created, **kwargs):
                 EMISchedule.generate_schedule_emi(instance, first_due_date)
                 logger.info(f"[EMI CREATED] Monthly EMI schedule for FinancePlan ID={instance.id}")
 
-            # --- Seed accounting codes and generate Invoices/Ledgers
-            seed_default_accounting_codes()
 
-            from finance.models import Invoice
-            from decimal import Decimal
-
-            emis = instance.emi_schedule.all()
-            for emi in emis:
-                invoice_num = f"INV-FP{instance.id}-{emi.installment_number}"
-                
-                # 7% tax calculation
-                tax_rate = Decimal('0.07')
-                total = emi.installment_amount
-                base = total / (Decimal('1.00') + tax_rate)
-                base = base.quantize(Decimal('0.01'))
-                tax = total - base
-
-                invoice = Invoice.objects.create(
-                    invoice_number=invoice_num,
-                    customer=instance.customer,
-                    finance_plan=instance,
-                    emi_schedule=emi,
-                    due_date=emi.due_date,
-                    base_amount=base,
-                    tax_amount=tax,
-                    total_amount=total,
-                    balance=total,
-                    status='PENDING'
-                )
-                # Generate double-entry ledger entries for the invoice
-                invoice.generate_ledger_entries()
-                logger.info(f"[INVOICE CREATED] Generated invoice {invoice_num} for EMI installment {emi.installment_number}")
 
     except Exception as e:
         logger.exception(f"[EMI ERROR] Failed to generate EMI schedule or invoices for FinancePlan ID={instance.id}: {e}")

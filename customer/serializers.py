@@ -13,6 +13,10 @@ from .models import ( Customer,CreditScore,
   
 class CustomerSerializer(serializers.ModelSerializer):
     created_by_details = serializers.SerializerMethodField()
+    apc_score = serializers.SerializerMethodField()
+    registration_status = serializers.SerializerMethodField()
+    next_step_label = serializers.SerializerMethodField()
+    next_step_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -30,6 +34,10 @@ class CustomerSerializer(serializers.ModelSerializer):
             'longitude',
             'created_by',
             'created_by_details',
+            'apc_score',
+            'registration_status',
+            'next_step_label',
+            'next_step_url',
             'created_at',
             'updated_at',
         ]
@@ -76,6 +84,120 @@ class CustomerSerializer(serializers.ModelSerializer):
             data['store'] = None
             
         return data
+
+    def get_apc_score(self, obj):
+        latest_score = obj.credit_scores.order_by('-created_at').first()
+        return latest_score.apc_score if latest_score else None
+
+    def _get_registration_details(self, obj):
+        if hasattr(obj, '_cached_registration_details'):
+            return obj._cached_registration_details
+
+        # Fetch latest application
+        latest_app = obj.credit_applications.order_by('-created_at').first()
+
+        # 1. OTP Check (Not Verified status)
+        otp_is_verified = latest_app.otp_verified if latest_app else obj.otp_verified
+        if not otp_is_verified:
+            res = {
+                "status": "Not Verified",
+                "next_step_label": "Verify OTP",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+ 
+        # 2. Credit Score check (OTP Verified status)
+        latest_score = obj.credit_scores.order_by('-created_at').first()
+        if not latest_score:
+            res = {
+                "status": "OTP Verified",
+                "next_step_label": "Check Credit Score",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+ 
+        # Check if rejected at credit score level
+        if latest_score.apc_status == "REJECTED" or latest_score.final_credit_status == "REJECTED" or (latest_score.apc_score and latest_score.apc_score < 500):
+            res = {
+                "status": "Rejected",
+                "next_step_label": "Rejected",
+                "next_step_url": None
+            }
+            obj._cached_registration_details = res
+            return res
+ 
+        # 3. Credit Application check (APC Checked status)
+        if not latest_app:
+            res = {
+                "status": "APC Checked",
+                "next_step_label": "Resume Application",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+
+        # Check application status
+        if latest_app.status == "REJECTED":
+            res = {
+                "status": "Rejected",
+                "next_step_label": "Rejected",
+                "next_step_url": None
+            }
+            obj._cached_registration_details = res
+            return res
+        elif latest_app.status == "EXPIRED":
+            res = {
+                "status": "Expired",
+                "next_step_label": "Restart Application",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+
+        # Map status dynamically on each customer based on latest_app.current_step
+        step = latest_app.current_step
+        
+        if latest_app.status == "APPROVED":
+            if not latest_app.device_imei:
+                status_str = "Device Enrollment Pending"
+            else:
+                status_str = "Disbursed"
+        elif step == 1 or step == 2:
+            status_str = "APC Checked"
+        elif step == 3:
+            status_str = "Salary Checked"
+        elif step == 4:
+            status_str = "Identity Verified"
+        elif step == 5:
+            status_str = "Device Selected"
+        elif step == 6:
+            status_str = "Draft Plan Created"
+        elif step == 7:
+            status_str = "Device IMEI Enrolled"
+        elif step == 8:
+            status_str = "Personal References Added"
+        else:
+            status_str = "APC Checked"
+
+        res = {
+            "status": status_str,
+            "next_step_label": "Resume",
+            "next_step_url": "/sellerPortal/createApplicant"
+        }
+        
+        obj._cached_registration_details = res
+        return res
+
+    def get_registration_status(self, obj):
+        return self._get_registration_details(obj)["status"]
+
+    def get_next_step_label(self, obj):
+        return self._get_registration_details(obj)["next_step_label"]
+
+    def get_next_step_url(self, obj):
+        return self._get_registration_details(obj)["next_step_url"]
 
 
 
@@ -132,6 +254,11 @@ class CreditScoreSerializer(serializers.ModelSerializer):
             'is_expired',
             'verbal_authorization_given',
             'consulted_by',
+            'risk_category',
+            'existing_monthly_debt',
+            'existing_loans_count',
+            'late_payments_count',
+            'bureau_recommendation',
             'created_at',
             'updated_at',
         ]
@@ -155,6 +282,7 @@ class CreditConfigSerializer(serializers.ModelSerializer):
             "tier_a_min_score",
             "tier_b_min_score",
             "tier_c_min_score",
+            "loan_agreement_template",
             "updated_at",
             "created_at",
         ]

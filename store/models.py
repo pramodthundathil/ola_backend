@@ -189,6 +189,20 @@ class Store(models.Model):
         verbose_name='RUC (Tax ID)',
         help_text='Registro Único de Contribuyente'
     )
+    commercial_name = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        verbose_name='Commercial Name',
+        help_text='Nombre Comercial'
+    )
+    legal_representative = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        verbose_name='Legal Representative',
+        help_text='Representante Legal'
+    )
     
     # Location Coordinates
     latitude = models.DecimalField(
@@ -225,6 +239,11 @@ class Store(models.Model):
         decimal_places=2,
         default=0.00,
         verbose_name='Monthly Sales Target'
+    )
+    avail_all_models = models.BooleanField(
+        default=False,
+        verbose_name='Available All Models',
+        help_text='If checked, all product models will be available for this store.'
     )
     
     # Timestamps
@@ -288,8 +307,19 @@ class Store(models.Model):
             return True
         return False
     
+    def generate_unique_code(self):
+        import random
+        import string
+        while True:
+            digits = ''.join(random.choices(string.digits, k=6))
+            code = f"STR-{digits}"
+            if not Store.objects.filter(code=code).exists():
+                return code
+
     def save(self, *args, **kwargs):
         """Override save to update store_manager's store_id."""
+        if not self.code:
+            self.code = self.generate_unique_code()
         super().save(*args, **kwargs)
         
         # Update store_manager's store_id
@@ -363,3 +393,26 @@ class StorePerformance(models.Model):
     
     def __str__(self):
         return f"{self.store.name} - {self.month.strftime('%B %Y')}"
+
+
+class StoreProductAvailability(models.Model):
+    """
+    Availability and stock quantity of a product model at a specific store.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='product_availabilities')
+    product_model = models.ForeignKey('products.ProductModel', on_delete=models.CASCADE, related_name='store_availabilities')
+    in_stock = models.BooleanField(default=True)
+    stock_qty = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'store_product_availabilities'
+        unique_together = ['store', 'product_model']
+        ordering = ['-created_at']
+        verbose_name = 'Store Product Availability'
+        verbose_name_plural = 'Store Product Availabilities'
+
+    def __str__(self):
+        return f"{self.store.name} - {self.product_model.model_name} (Qty: {self.stock_qty})"

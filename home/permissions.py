@@ -149,3 +149,12 @@ class CanViewStoreManagerFinance(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.role == "store_manager"
 
+
+class CanListUsers(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return (
+            request.user 
+            and request.user.is_authenticated 
+            and request.user.role in ['admin', 'global_manager', 'financial_manager', 'sales_advisor', 'store_manager']
+        )
+

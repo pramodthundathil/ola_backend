@@ -375,6 +375,303 @@ class StoreViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+    @swagger_auto_schema(
+        method='get',
+        operation_summary="Get My Store Availabilities",
+        operation_description="Get list of all models with their availability status for the manager's store.",
+        tags=["Store Stock"]
+    )
+    @swagger_auto_schema(
+        method='patch',
+        operation_summary="Update My Store Availabilities",
+        operation_description="Update availability settings or stock levels.",
+        tags=["Store Stock"]
+    )
+    @action(detail=False, methods=['get', 'patch'], url_path='my_store/availabilities', permission_classes=[IsAuthenticated])
+    def my_store_availabilities(self, request):
+        """
+        Get or update product availabilities and settings for the authenticated manager's store.
+        """
+        user = request.user
+        if user.role not in ['store_manager', 'salesperson']:
+            return Response(
+                {'error': 'Only store managers and salespersons can access store availabilities.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if request.method == 'PATCH' and user.role != 'store_manager':
+            return Response(
+                {'error': 'Only store managers can update store availabilities.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if user.role == 'store_manager':
+            try:
+                store = Store.objects.get(store_manager=user)
+            except Store.DoesNotExist:
+                return Response(
+                    {'error': 'No store assigned to you.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            store = user.store
+            if not store:
+                return Response(
+                    {'error': 'No store assigned to you.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        if request.method == 'GET':
+            from products.models import ProductModel
+            from .models import StoreProductAvailability
+            
+            # Get existing availabilities
+            availabilities = {
+                avail.product_model_id: avail 
+                for avail in StoreProductAvailability.objects.filter(store=store)
+            }
+            
+            models_data = []
+            all_models = ProductModel.objects.filter(is_active=True).select_related('brand', 'brand__category')
+            
+            for model in all_models:
+                avail = availabilities.get(model.id)
+                models_data.append({
+                    'model_id': str(model.id),
+                    'model_name': model.model_name,
+                    'brand_name': model.brand.name,
+                    'category_name': model.brand.category.name,
+                    'suggested_price': float(model.suggested_price),
+                    'ola_code': model.ola_code,
+                    'primary_image': request.build_absolute_uri(model.primary_image.url) if model.primary_image else None,
+                    'in_stock': avail.in_stock if avail else False,
+                    'stock_qty': avail.stock_qty if avail else 0,
+                })
+            
+            return Response({
+                'store_id': str(store.id),
+                'store_name': store.name,
+                'avail_all_models': store.avail_all_models,
+                'models': models_data
+            })
+            
+        elif request.method == 'PATCH':
+            from .models import StoreProductAvailability
+            from products.models import ProductModel
+            
+            avail_all_models = request.data.get('avail_all_models')
+            if avail_all_models is not None:
+                store.avail_all_models = bool(avail_all_models)
+                store.save(update_fields=['avail_all_models'])
+            
+            updates = request.data.get('updates', [])
+            for update in updates:
+                model_id = update.get('model_id')
+                in_stock = update.get('in_stock')
+                stock_qty = update.get('stock_qty')
+                
+                if not model_id:
+                    continue
+                
+                try:
+                    product_model = ProductModel.objects.get(id=model_id)
+                except ProductModel.DoesNotExist:
+                    continue
+                
+                avail, created = StoreProductAvailability.objects.get_or_create(
+                    store=store,
+                    product_model=product_model
+                )
+                
+                if in_stock is not None:
+                    avail.in_stock = bool(in_stock)
+                if stock_qty is not None:
+                    avail.stock_qty = max(0, int(stock_qty))
+                
+                avail.save()
+                
+            return Response({
+                'message': 'Availabilities updated successfully.',
+                'avail_all_models': store.avail_all_models
+            })
+
+    @swagger_auto_schema(
+        method='get',
+        operation_summary="Get Product Sales in My Store",
+        operation_description="Get list of sales of a specific product model in the manager's store.",
+        manual_parameters=[
+            openapi.Parameter('product_model_id', openapi.IN_QUERY, 
+                            description="Product Model UUID", type=openapi.TYPE_STRING, required=True)
+        ],
+        tags=["Store Stock"]
+    )
+    @action(detail=False, methods=['get'], url_path='my_store/product_sales', permission_classes=[IsAuthenticated])
+    def my_store_product_sales(self, request):
+        user = request.user
+        if user.role != 'store_manager':
+            return Response(
+                {'error': 'Only store managers can view store product sales.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            store = Store.objects.get(store_manager=user)
+        except Store.DoesNotExist:
+            return Response(
+                {'error': 'No store assigned to you.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        product_model_id = request.query_params.get('product_model_id')
+        if not product_model_id:
+            return Response(
+                {'error': 'product_model_id parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        from finance.models import FinancePlan
+        from products.models import ProductModel
+        
+        try:
+            product_model = ProductModel.objects.get(id=product_model_id)
+        except ProductModel.DoesNotExist:
+            return Response(
+                {'error': 'Product model not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        sales = FinancePlan.objects.filter(
+            device=product_model,
+            credit_application__sales_person__store=store
+        ).select_related('credit_application', 'credit_application__sales_person', 'credit_application__customer')
+        
+        sales_data = []
+        for sale in sales:
+            customer = sale.credit_application.customer
+            sales_person = sale.credit_application.sales_person
+            sales_data.append({
+                'customer_name': customer.get_full_name() if customer else "N/A",
+                'customer_email': customer.email if customer else "N/A",
+                'salesperson_name': sales_person.get_full_name() if sales_person else "N/A",
+                'salesperson_email': sales_person.email if sales_person else "N/A",
+                'sale_date': sale.credit_application.application_date,
+                'device_price': float(sale.device_price),
+                'amount_financed': float(sale.credit_application.amount_to_finance) if sale.credit_application.amount_to_finance else 0.0,
+                'status': sale.credit_application.status,
+                'imei': sale.credit_application.device_imei or "N/A"
+            })
+            
+        return Response({
+            'product_model_id': product_model_id,
+            'model_name': product_model.model_name,
+            'brand_name': product_model.brand.name,
+            'total_sold': len(sales_data),
+            'sales': sales_data
+        })
+
+    @swagger_auto_schema(
+        operation_summary="Get Store Product Availabilities",
+        operation_description="Get list of all product models with their availability status and stock level for this specific store.",
+        tags=["Store Stock"]
+    )
+    @action(detail=True, methods=['get'], url_path='availabilities', permission_classes=[IsAuthenticated])
+    def store_availabilities(self, request, pk=None):
+        """
+        Get product availabilities for a specific store.
+        """
+        store = self.get_object()
+        
+        permission = CanViewStore()
+        if not permission.has_object_permission(request, None, store):
+            return Response(
+                {'error': 'You do not have permission to view this store.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
+        from products.models import ProductModel
+        from .models import StoreProductAvailability
+        
+        # Get existing availabilities
+        availabilities = {
+            avail.product_model_id: avail 
+            for avail in StoreProductAvailability.objects.filter(store=store)
+        }
+        
+        models_data = []
+        all_models = ProductModel.objects.filter(is_active=True).select_related('brand', 'brand__category')
+        
+        for model in all_models:
+            avail = availabilities.get(model.id)
+            models_data.append({
+                'model_id': str(model.id),
+                'model_name': model.model_name,
+                'brand_name': model.brand.name,
+                'category_name': model.brand.category.name,
+                'suggested_price': float(model.suggested_price),
+                'ola_code': model.ola_code,
+                'primary_image': request.build_absolute_uri(model.primary_image.url) if model.primary_image else None,
+                'in_stock': avail.in_stock if avail else False,
+                'stock_qty': avail.stock_qty if avail else 0,
+            })
+        
+        return Response({
+            'store_id': str(store.id),
+            'store_name': store.name,
+            'avail_all_models': store.avail_all_models,
+            'models': models_data
+        })
+
+    @swagger_auto_schema(
+        operation_summary="Get All Sales in Store",
+        operation_description="Get list of all sales transactions for this specific store.",
+        tags=["Store Stock"]
+    )
+    @action(detail=True, methods=['get'], url_path='sales', permission_classes=[IsAuthenticated])
+    def store_sales(self, request, pk=None):
+        """
+        Get all sales transactions for a specific store.
+        """
+        store = self.get_object()
+        
+        permission = CanViewStore()
+        if not permission.has_object_permission(request, None, store):
+            return Response(
+                {'error': 'You do not have permission to view this store.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
+        from finance.models import FinancePlan
+        
+        sales = FinancePlan.objects.filter(
+            credit_application__sales_person__store=store
+        ).select_related('device', 'credit_application', 'credit_application__sales_person', 'credit_application__customer')
+        
+        sales_data = []
+        for sale in sales:
+            customer = sale.credit_application.customer
+            sales_person = sale.credit_application.sales_person
+            sales_data.append({
+                'customer_name': customer.get_full_name() if customer else "N/A",
+                'customer_email': customer.email if customer else "N/A",
+                'salesperson_name': sales_person.get_full_name() if sales_person else "N/A",
+                'salesperson_email': sales_person.email if sales_person else "N/A",
+                'sale_date': sale.credit_application.application_date,
+                'device_name': f"{sale.device.brand.name} {sale.device.model_name}" if sale.device else "Unknown",
+                'device_price': float(sale.device_price),
+                'amount_financed': float(sale.credit_application.amount_to_finance) if sale.credit_application.amount_to_finance else 0.0,
+                'status': sale.credit_application.status,
+                'imei': sale.credit_application.device_imei or "N/A"
+            })
+            
+        return Response({
+            'store_id': str(store.id),
+            'store_name': store.name,
+            'total_sold': len(sales_data),
+            'sales': sales_data
+        })
+
+
+
 
 # ==================== SALESPERSON MANAGEMENT ====================
 

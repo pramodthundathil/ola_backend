@@ -15,7 +15,7 @@ from rest_framework import status
 from .models import ( Customer,CreditScore,
                      CreditConfig,PersonalReference,
                      CustomerIncomeFile,CustomerIncome,
-                     IdentityVerification
+                     IdentityVerification, CreditApplication
                      )
 from .serializers import (
      CustomerSerializer,
@@ -192,8 +192,6 @@ class CustomerManagementView(APIView):
             customer_id = request.query_params.get('id')
             search_query = request.query_params.get('search', '').strip()
 
-            # ------------ 3D FETCHING (optimized) ------------
-
             queryset = (
                 Customer.objects
                 .select_related(
@@ -211,6 +209,11 @@ class CustomerManagementView(APIView):
                 )
                 .order_by("-created_at")
             )
+
+            if request.user.role == 'salesperson':
+                queryset = queryset.filter(
+                    Q(created_by=request.user) | Q(credit_applications__sales_person=request.user)
+                ).distinct()
 
             # ------------ SINGLE CUSTOMER ------------
 
@@ -361,8 +364,10 @@ class CustomerManagementView(APIView):
             ).first()
 
             if existing_customer:
-                existing_customer.otp_verified=False
-                existing_customer.save(update_fields=["otp_verified"])
+                latest_app = existing_customer.credit_applications.order_by("-created_at").first()
+                if not latest_app or latest_app.status in ["APPROVED", "REJECTED", "EXPIRED"]:
+                    existing_customer.otp_verified = False
+                    existing_customer.save(update_fields=["otp_verified"])
                 newly_created = False
                 customer = existing_customer
 
@@ -390,12 +395,55 @@ class CustomerManagementView(APIView):
 
             credit_score = credit_data.get("data", {}).get("credit_score", {})
             source = credit_data.get("data", {}).get("source", "experian")
+            latest_app = customer.credit_applications.order_by("-created_at").first()
+            if latest_app and latest_app.status in ["APPROVED", "REJECTED", "EXPIRED"]:
+                latest_app = None
+
+            app_id = latest_app.id if latest_app else None
+            current_step = latest_app.current_step if latest_app else 0
+
+            # Fetch AutoFinancePlan id
+            from finance.models import AutoFinancePlan, FinancePlan, EMISchedule
+            latest_auto_plan = AutoFinancePlan.objects.filter(credit_application=latest_app).order_by("-id").first() if latest_app else None
+            auto_plan_id = latest_auto_plan.id if latest_auto_plan else None
+
+            # Check if customer has an active finance plan with unpaid EMIs
+            active_plan = FinancePlan.objects.filter(
+                credit_application__customer=customer,
+                status="ACTIVE"
+            ).first()
+
+            has_active_plan = False
+            if active_plan:
+                has_active_plan = EMISchedule.objects.filter(
+                    finance_plan=active_plan
+                ).exclude(status="PAID").exists()
+
+            # previous applications history
+            previous_apps = []
+            apps_qs = customer.credit_applications.order_by("-created_at")
+            if latest_app:
+                apps_qs = apps_qs.exclude(id=latest_app.id)
+            for app in apps_qs:
+                previous_apps.append({
+                    "id": app.id,
+                    "status": app.status,
+                    "device_model": app.device_model or "N/A",
+                    "device_price": str(app.device_price) if app.device_price else "0.00",
+                    "created_at": app.created_at.strftime('%Y-%m-%d')
+                })
 
             return Response({
                 "status": "success",
                 "message": "Customer created successfully." if newly_created else "Customer already exists.",
                 "newly_created_customer": newly_created,
                 "data": CustomerSerializer(customer).data,
+                "application_id": app_id,
+                "auto_plan_id": auto_plan_id,
+                "current_step": current_step,
+                "draft_data": latest_app.draft_data if latest_app else None,
+                "has_active_plan": has_active_plan,
+                "previous_applications": previous_apps,
                 "credit_score": {
                     "id": credit_score.get("id"),
                     "source": source,
@@ -522,7 +570,13 @@ class CustomerManagementView(APIView):
 
 
             try:
-                customer = Customer.objects.get(id=customer_id)
+                if request.user.role == 'salesperson':
+                    customer = Customer.objects.filter(
+                        Q(id=customer_id) &
+                        (Q(created_by=request.user) | Q(credit_applications__sales_person=request.user))
+                    ).distinct().get()
+                else:
+                    customer = Customer.objects.get(id=customer_id)
             except Customer.DoesNotExist:
                 return Response({
                     "status": "error",
@@ -541,6 +595,10 @@ class CustomerManagementView(APIView):
                     cache.delete(f"otp_{phone}")
                     customer.otp_verified = True
                     customer.save(update_fields=["otp_verified"])
+                    latest_app = customer.credit_applications.order_by("-created_at").first()
+                    if latest_app:
+                        latest_app.otp_verified = True
+                        latest_app.save(update_fields=["otp_verified"])
                     otp_valid = True
                 else:
                     otp_valid = False
@@ -1684,6 +1742,14 @@ class CustomerDashboardAPIView(APIView):
                 "data": None
             }, status=status.HTTP_404_NOT_FOUND)
 
+        if request.user.role == 'salesperson':
+            is_owner = (customer.created_by == request.user) or customer.credit_applications.filter(sales_person=request.user).exists()
+            if not is_owner:
+                return Response({
+                    "status": "error",
+                    "message": "Permission denied."
+                }, status=status.HTTP_403_FORBIDDEN)
+
         # --- related data ---
         identity = getattr(customer, "identity_verification", None)
         latest_credit_score = customer.credit_scores.order_by("-created_at").first()
@@ -1944,16 +2010,28 @@ class VeriffWebhookAPIView(APIView):
                 # return Response(status=404) 
                 return Response(status=200)
 
-            identity = getattr(customer, "identity_verification", None)
-
+            latest_app = customer.credit_applications.order_by("-created_at").first()
+            identity = None
+            if latest_app:
+                try:
+                    identity = latest_app.identity_verification
+                except IdentityVerification.DoesNotExist:
+                    identity = None
             if identity is None:
-                identity = IdentityVerification.objects.create(customer=customer)  
-            
+                identity = IdentityVerification.objects.filter(credit_application=latest_app).first()
+            if identity is None:
+                identity = IdentityVerification.objects.create(customer=customer, credit_application=latest_app)
 
             if status == "approved":
                 identity.overall_status = "VERIFIED"
+                if latest_app:
+                    latest_app.identity_verified = True
+                    latest_app.save(update_fields=["identity_verified"])
             elif status == "declined":
                 identity.overall_status = "REJECTED"
+                if latest_app:
+                    latest_app.identity_verified = False
+                    latest_app.save(update_fields=["identity_verified"])
             elif status == "submitted" or status == "started":
                 identity.overall_status = "IN_PROGRESS"
             elif status == "expired":
@@ -2123,7 +2201,16 @@ class VerificationStatusAPIView(APIView):
                 }, status=status.HTTP_404_NOT_FOUND)
             
             # -------- Check IdentityVerification --------
-            identity = getattr(customer, "identity_verification", None)
+            latest_app = customer.credit_applications.order_by("-created_at").first()
+            identity = None
+            if latest_app:
+                try:
+                    identity = latest_app.identity_verification
+                except IdentityVerification.DoesNotExist:
+                    identity = None
+            if identity is None:
+                identity = IdentityVerification.objects.filter(credit_application=latest_app).first()
+                
             if identity is None:
                 logger.warning("VerificationStatus: IdentityVerification missing for customer %s", customer_id)
                 return Response({
@@ -2153,4 +2240,126 @@ class VerificationStatusAPIView(APIView):
                 "status": "error",
                 "message": str(e),
                 "data": None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def post(self, request, customer_id):
+        # Allow mock verification from frontend
+        try:
+            customer = Customer.objects.get(id=customer_id)
+            latest_app = customer.credit_applications.order_by("-created_at").first()
+            identity, created = IdentityVerification.objects.get_or_create(
+                customer=customer,
+                credit_application=latest_app
+            )
+            identity.overall_status = "VERIFIED"
+            identity.save()
+            if latest_app:
+                latest_app.identity_verified = True
+                latest_app.save(update_fields=["identity_verified"])
+            return Response({
+                "status": "success",
+                "message": "Customer identity mock-verified successfully.",
+                "data": {
+                    "overall_status": "VERIFIED"
+                }
+            }, status=status.HTTP_200_OK)
+        except Customer.DoesNotExist:
+            return Response({
+                "status": "error",
+                "message": "Customer not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class StartVerificationAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request):
+        customer_id = request.data.get("customer_id")
+        if not customer_id:
+            return Response({
+                "status": "error",
+                "message": "customer_id is required."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response({
+                "status": "error",
+                "message": "Customer not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        latest_app = customer.credit_applications.order_by("-created_at").first()
+        # Get or create IdentityVerification record
+        identity, created = IdentityVerification.objects.get_or_create(
+            customer=customer,
+            credit_application=latest_app,
+            defaults={
+                "overall_status": "PENDING"
+            }
+        )
+
+        veriff_session_url = f"https://demo.veriff.me/check/{customer.id}"
+        identity.verification_link = veriff_session_url
+        identity.overall_status = "IN_PROGRESS"
+        identity.save()
+
+        return Response({
+            "status": "success",
+            "message": "Verification session started successfully.",
+            "data": {
+                "verification": {
+                    "id": str(identity.id),
+                    "url": veriff_session_url
+                }
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class CreditApplicationStepView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request):
+        application_id = request.data.get("application_id")
+        current_step = request.data.get("current_step")
+        draft_data = request.data.get("draft_data")
+
+        if not application_id or current_step is None:
+            return Response({
+                "status": "error",
+                "message": "Both application_id and current_step are required."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            app = CreditApplication.objects.get(id=application_id)
+            app.current_step = int(current_step)
+            update_fields = ["current_step"]
+            if draft_data is not None:
+                app.draft_data = draft_data
+                update_fields.append("draft_data")
+            app.save(update_fields=update_fields)
+            return Response({
+                "status": "success",
+                "message": "Credit application step and draft updated successfully.",
+                "data": {
+                    "application_id": app.id,
+                    "current_step": app.current_step,
+                    "draft_data": app.draft_data
+                }
+            }, status=status.HTTP_200_OK)
+        except CreditApplication.DoesNotExist:
+            return Response({
+                "status": "error",
+                "message": "Credit application not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.exception("Error updating credit application step")
+            return Response({
+                "status": "error",
+                "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

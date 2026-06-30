@@ -26,6 +26,7 @@ class FinancePlanCreateSerializer(serializers.Serializer):
         child=serializers.IntegerField(),
         help_text='Example: {"selected_term": 6, "installment_frequency_days": 30}'
     )
+    imei = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 # --------------------------------------------------------
@@ -58,44 +59,53 @@ class FinancePlanSerializer(serializers.ModelSerializer):
         return instance
 
     def get_device_details(self, obj):
-        if obj.device:
-            imei = None
-            if obj.credit_application:
-                imei = obj.credit_application.device_imei
-            return {
-                "id": obj.device.id,
-                "brand": obj.device.brand.name if obj.device.brand else None,
-                "model_name": obj.device.model_name,
-                "color": obj.device.color,
-                "ram": obj.device.ram,
-                "storage": obj.device.storage,
-                "imei": imei,
-            }
+        try:
+            if obj.device:
+                imei = None
+                if obj.credit_application:
+                    imei = obj.credit_application.device_imei
+                return {
+                    "id": obj.device.id,
+                    "brand": obj.device.brand.name if obj.device.brand else None,
+                    "model_name": obj.device.model_name,
+                    "color": obj.device.color,
+                    "ram": obj.device.ram,
+                    "storage": obj.device.storage,
+                    "imei": imei,
+                }
+        except Exception:
+            pass
         return None
 
     def get_store_details(self, obj):
-        if obj.store:
-            return {
-                "id": str(obj.store.id),
-                "name": obj.store.name,
-                "code": obj.store.code,
-                "region_name": obj.store.region.name if obj.store.region else None,
-                "province_name": obj.store.province.name if obj.store.province else None,
-                "district_name": obj.store.district.name if obj.store.district else None,
-                "corregimiento_name": obj.store.corregimiento.name if obj.store.corregimiento else None,
-                "sales_advisor": f"{obj.store.sales_advisor.first_name} {obj.store.sales_advisor.last_name}" if obj.store.sales_advisor else None,
-            }
+        try:
+            if obj.store:
+                return {
+                    "id": str(obj.store.id),
+                    "name": obj.store.name,
+                    "code": obj.store.code,
+                    "region_name": obj.store.region.name if obj.store.region else None,
+                    "province_name": obj.store.province.name if obj.store.province else None,
+                    "district_name": obj.store.district.name if obj.store.district else None,
+                    "corregimiento_name": obj.store.corregimiento.name if obj.store.corregimiento else None,
+                    "sales_advisor": f"{obj.store.sales_advisor.first_name} {obj.store.sales_advisor.last_name}" if obj.store.sales_advisor else None,
+                }
+        except Exception:
+            pass
         return None
 
     def get_sales_person_details(self, obj):
-        if obj.created_by:
-            return {
-                "id": obj.created_by.id,
-                "first_name": obj.created_by.first_name,
-                "last_name": obj.created_by.last_name,
-                "username": obj.created_by.username,
-                "email": obj.created_by.email,
-            }
+        try:
+            if obj.created_by:
+                return {
+                    "id": obj.created_by.id,
+                    "first_name": obj.created_by.first_name,
+                    "last_name": obj.created_by.last_name,
+                    "username": obj.created_by.username,
+                    "email": obj.created_by.email,
+                }
+        except Exception:
+            pass
         return None
 
     def get_customer_details(self, obj):
@@ -673,8 +683,14 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        from datetime import date
-        if instance.status in ['PENDING', 'PARTIAL'] and instance.due_date and instance.due_date < date.today():
+        from datetime import date, datetime
+        due_date = instance.due_date
+        if isinstance(due_date, str):
+            try:
+                due_date = datetime.strptime(due_date, "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        if instance.status in ['PENDING', 'PARTIAL'] and due_date and due_date < date.today():
             ret['status'] = 'OVERDUE'
         return ret
 

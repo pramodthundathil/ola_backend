@@ -92,7 +92,7 @@ from .serializers import (
     StoreManagerListSerializer,
     SalespersonListSerializer
 )
-from .permissions import IsAdminUser, IsStoreManager
+from .permissions import IsAdminUser, IsStoreManager, CanListUsers
 
 
 import logging
@@ -288,7 +288,7 @@ def verify_otp_and_login(request):
         )
     
     # Generate JWT tokens
-    refresh = RefreshToken.for_user(user)
+    refresh = MyTokenObtainPairSerializer.get_token(user)
     access = refresh.access_token
     
     # Remove OTP from cache
@@ -771,14 +771,23 @@ def change_password(request):
 # ==================== ADMIN USER MANAGEMENT ====================
 class ListAllUsers(ListAPIView):
     """
-    Admin can view list of all registered users.
+    Authorized users can view list of all registered users.
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [CanListUsers]
     serializer_class = UserSerializer
     pagination_class = UserPagination
 
     def get_queryset(self):
+        user = self.request.user
         queryset = User.objects.all()
+        
+        # If store manager, they can only view staff (users) belonging to their store
+        if user.role == 'store_manager':
+            if user.store:
+                queryset = queryset.filter(store=user.store)
+            else:
+                queryset = queryset.none()
+
         # ---- Manual Filters ----
         role = self.request.query_params.get('role')
         store = self.request.query_params.get('store')

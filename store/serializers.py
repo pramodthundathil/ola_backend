@@ -1,6 +1,7 @@
 from rest_framework import serializers
-from .models import Region, Province, District, Corregimiento, Store, StorePerformance, StoreImage
+from .models import Region, Province, District, Corregimiento, Store, StorePerformance, StoreImage, StoreProductAvailability
 from home.models import CustomUser
+from products.serializers import ProductModelSerializer
 
 
 class RegionSerializer(serializers.ModelSerializer):
@@ -83,7 +84,7 @@ class StoreListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'code', 'region_name', 'province_name', 'district_name',
             'store_manager_name', 'sales_advisor_name', 'channel', 'phone', 'email',
-            'is_active', 'salespersons_count', 'created_at'
+            'is_active', 'salespersons_count', 'commercial_name', 'legal_representative', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -114,8 +115,9 @@ class StoreDetailSerializer(serializers.ModelSerializer):
             'sales_advisor', 'sales_advisor_details',
             'store_manager', 'store_manager_details',
             'phone', 'email', 'channel', 'ruc',
+            'commercial_name', 'legal_representative',
             'latitude', 'longitude', 'image', 'address', 'full_address',
-            'is_active', 'opening_date', 'monthly_target',
+            'is_active', 'opening_date', 'monthly_target', 'avail_all_models',
             'salespersons', 'salespersons_count',
             'created_at', 'updated_at', 'created_by', 'additional_images'
         ]
@@ -129,18 +131,22 @@ class StoreDetailSerializer(serializers.ModelSerializer):
 
 class StoreCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating stores."""
+    code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     
     class Meta:
         model = Store
         fields = [
             'name', 'code', 'region', 'province', 'district', 'corregimiento',
             'sales_advisor', 'store_manager', 'phone', 'email', 'channel', 'ruc',
+            'commercial_name', 'legal_representative',
             'latitude', 'longitude', 'image', 'address', 'is_active', 
-            'opening_date', 'monthly_target'
+            'opening_date', 'monthly_target', 'avail_all_models'
         ]
     
     def validate_code(self, value):
         """Ensure store code is unique."""
+        if not value:
+            return value
         if self.instance:
             if Store.objects.exclude(pk=self.instance.pk).filter(code=value).exists():
                 raise serializers.ValidationError("Store with this code already exists.")
@@ -304,3 +310,15 @@ class StorePerformanceSerializer(serializers.ModelSerializer):
     def get_month_display(self, obj):
         """Return formatted month."""
         return obj.month.strftime('%B %Y')
+
+
+class StoreProductAvailabilitySerializer(serializers.ModelSerializer):
+    product_details = ProductModelSerializer(source='product_model', read_only=True)
+    
+    class Meta:
+        model = StoreProductAvailability
+        fields = [
+            'id', 'store', 'product_model', 'product_details',
+            'in_stock', 'stock_qty', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'store', 'created_at', 'updated_at']

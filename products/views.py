@@ -460,6 +460,24 @@ class ProductModelListCreateView(APIView):
     )
     def get(self, request):
         products = ProductModel.objects.all().order_by('-created_at')
+        
+        # Filter products based on store availability for store roles
+        user = request.user
+        if user.is_authenticated and user.role in ['salesperson', 'sales_advisor', 'store_manager']:
+            from store.models import Store, StoreProductAvailability
+            store = None
+            if user.role == 'store_manager':
+                store = Store.objects.filter(store_manager=user).first()
+            else:
+                store = user.store
+            
+            if store and not store.avail_all_models:
+                available_product_ids = StoreProductAvailability.objects.filter(
+                    store=store,
+                    in_stock=True
+                ).values_list('product_model_id', flat=True)
+                products = products.filter(id__in=available_product_ids)
+
         paginator =ProductPagination()
         result_page = paginator.paginate_queryset(products, request)
         serializer = ProductModelSerializer(result_page, many=True, context={'request': request})        

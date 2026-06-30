@@ -168,7 +168,16 @@ class AutoFinancePlanView(APIView):
                 CreditApplication.objects.filter(
                     customer=customer, status__in=["PENDING_APPROVAL", "PRE_QUALIFIED"]
                 ).order_by("-created_at").first()
-            ) or CreditApplication.objects.create(customer=customer, device_price=0)
+            )
+            if not credit_app:
+                credit_app = CreditApplication.objects.create(
+                    customer=customer,
+                    sales_person=request.user,
+                    device_price=0
+                )
+            elif not credit_app.sales_person:
+                credit_app.sales_person = request.user
+                credit_app.save(update_fields=["sales_person"])
 
             # ----To get monthly income of customer---------
             document_number = customer.document_number
@@ -192,13 +201,9 @@ class AutoFinancePlanView(APIView):
                 )
             
             if monthly_income is None:
-                return Response(
-                    {
-                        "status": "error",
-                        "message": "Unable to fetch monthly income."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                # Fallback to TIER_F by assigning a default monthly income (e.g., $350.00 USD)
+                # so the credit check can proceed under TIER_F instead of raising a 400 Bad Request.
+                monthly_income = Decimal('350.00')
             # auto_plan, created = AutoFinancePlan.objects.get_or_create(
             #     credit_application=credit_app,
             #     defaults={
@@ -320,6 +325,50 @@ class AutoFinancePlanView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+def get_transient_plan_from_application(app_id):
+    from customer.models import CreditApplication
+    credit_app = CreditApplication.objects.filter(id=app_id).first()
+    if not credit_app:
+        return None
+        
+    # Check if there is an active plan already
+    from finance.models import FinancePlan
+    active_plan = FinancePlan.objects.filter(credit_application=credit_app).first()
+    if active_plan:
+        return active_plan
+
+    # Otherwise build transient FinancePlan
+    from finance.models import AutoFinancePlan
+    from finance.decision_engine import DecisionEngine
+    from decimal import Decimal
+    
+    latest_auto_plan = AutoFinancePlan.objects.filter(credit_application=credit_app).order_by("-id").first()
+    
+    plan_data = {
+        "id": credit_app.id,
+        "credit_application": credit_app,
+        "credit_score": latest_auto_plan.credit_score if latest_auto_plan else None,
+        "apc_score": latest_auto_plan.apc_score if latest_auto_plan else 550,
+        "risk_tier": latest_auto_plan.risk_tier if latest_auto_plan else "TIER_B",
+        "customer_monthly_income": 3000,
+        "payment_capacity_factor": latest_auto_plan.payment_capacity_factor if latest_auto_plan else Decimal("0.20"),
+        "maximum_allowed_installment": latest_auto_plan.maximum_allowed_installment if latest_auto_plan else Decimal("0.00"),
+        "minimum_down_payment_percentage": latest_auto_plan.minimum_down_payment_percentage if latest_auto_plan else Decimal("20.00"),
+        
+        "device": credit_app.device,
+        "device_price": credit_app.device_price or Decimal("0.00"),
+        "actual_down_payment": credit_app.initial_payment or Decimal("0.00"),
+        "selected_term": credit_app.number_of_installments or 6,
+        "installment_frequency_days": credit_app.installment_frequency_days or 30,
+        "status": "DRAFT",
+    }
+    
+    transient_plan = FinancePlan(**plan_data)
+    engine = DecisionEngine(transient_plan)
+    final_plan = engine.run(save=False)
+    final_plan.id = credit_app.id
+    return final_plan
+
 # --------------------------------------------------------
 # API: Create or Get Finance Plan List
 # --------------------------------------------------------
@@ -420,6 +469,25 @@ class FinancePlanAPIView(APIView):
                     "message": "AutoFinancePlan not found."
                 }, status=status.HTTP_404_NOT_FOUND)
 
+            # Save IMEI number to CreditApplication (skip placeholder "000000000000000")
+            imei = data.get("imei")
+            if imei and imei != "000000000000000":
+                if len(imei) == 15 and imei.isdigit():
+                    if finance_plan.credit_application:
+                        duplicate_imei_exists = CreditApplication.objects.filter(
+                            device_imei=imei
+                        ).exclude(id=finance_plan.credit_application.id).exists()
+                        
+                        if duplicate_imei_exists:
+                            return Response({
+                                "status": "error",
+                                "message": "This device IMEI is already enrolled in another application."
+                            }, status=status.HTTP_400_BAD_REQUEST)
+
+                        credit_app = finance_plan.credit_application
+                        credit_app.device_imei = imei
+                        credit_app.save(update_fields=["device_imei"])
+
             # --------------------------------------------------------
             # Get device price (from cache or DB)
             # --------------------------------------------------------
@@ -454,28 +522,38 @@ class FinancePlanAPIView(APIView):
             finance_plan_data["created_by"] = request.user
             finance_plan_data["store"] = getattr(request.user, "store", None)           
 
-            engine_input, created = FinancePlan.objects.update_or_create(
-                credit_application=finance_plan.credit_application,
-                defaults={
-                    **finance_plan_data,
-                    "created_by": request.user,
-                    "store": getattr(request.user, "store", None),
-                }
-            )
+            # Save selected term and details directly to CreditApplication
+            credit_app = finance_plan.credit_application
+            credit_app.device = device
+            credit_app.device_price = device_price
+            credit_app.initial_payment = data.get("actual_down_payment")
+            credit_app.number_of_installments = data["choosed_allowed_plans"]["selected_term"]
+            credit_app.installment_frequency_days = data["choosed_allowed_plans"]["installment_frequency_days"]
+            credit_app.save()
+
+            # Setup transient plan to compute calculations
+            engine_input = FinancePlan(**finance_plan_data)
             
              # Mark AutoPlan as finalized
             finance_plan.has_finance_plan = True
             finance_plan.save(update_fields=["has_finance_plan"])         
 
-            logger.info(f"[FinancePlanAPI] DecisionEngine input: {engine_input}")
+            logger.info(f"[FinancePlanAPI] DecisionEngine transient input: {engine_input}")
 
             # --------------------------------------------------------
             # Run Decision Engine
             # --------------------------------------------------------
             logger.info(f"[FinancePlanAPI] Running Decision Engine")
             engine = DecisionEngine(engine_input)
-            final_plan = engine.run()
-            final_plan.save()
+            final_plan = engine.run(save=False)
+            
+            # Save computations back to CreditApplication
+            credit_app.amount_to_finance = final_plan.amount_to_finance
+            credit_app.installment_amount = final_plan.monthly_installment
+            credit_app.total_amount = final_plan.total_amount_payable
+            credit_app.save()
+            
+            final_plan.id = credit_app.id
             
             #Audit Log          
             AuditLog.objects.create(
@@ -509,7 +587,7 @@ class FinancePlanAPIView(APIView):
             return Response({
             "status": "success",
             "message": "Finance Plan created successfully.",
-            "New":created,
+            "New": False,
             "data": {
                 **serialized_data,
                 "device_details": device_info
@@ -756,14 +834,17 @@ class FinancePlanAPIView(APIView):
                     credit_application__customer__created_by__store=user.store
                 )
             elif user_role == "sales_advisor":
-                # finance_qs = finance_qs.filter(
-                #     credit_application__customer__created_by__store__region=user.store.region
-                # )
-                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__sales_advisor=request.user)
+                finance_qs = finance_qs.filter(
+                    Q(credit_application__customer__created_by__store__sales_advisor=request.user) |
+                    Q(credit_application__customer__created_by__store__created_by=request.user) |
+                    Q(credit_application__customer__created_by=request.user)
+                ).distinct()
             elif user_role == "salesperson":
                 finance_qs = finance_qs.filter(
-                    credit_application__customer__created_by=user
-                )
+                    Q(credit_application__customer__created_by=user) |
+                    Q(credit_application__sales_person=user) |
+                    Q(created_by=user)
+                ).distinct()
             else:
                 customer = Customer.objects.filter(created_by=user).first()
                 if not customer:
@@ -862,15 +943,24 @@ class FinancePlanDetailAPIView(APIView):
             elif user_role == "store_manager":
                 finance_qs = finance_qs.filter(credit_application__customer__created_by__store=user.store)
             elif user_role == "sales_advisor":
-                # finance_qs = finance_qs.filter(credit_application__customer__created_by__store__region=user.store.region)
-                finance_qs = finance_qs.filter(credit_application__customer__created_by__store__sales_advisor=request.user)
+                finance_qs = finance_qs.filter(
+                    Q(credit_application__customer__created_by__store__sales_advisor=request.user) |
+                    Q(credit_application__customer__created_by__store__created_by=request.user) |
+                    Q(credit_application__customer__created_by=request.user)
+                ).distinct()
 
             elif user_role == "salesperson":
-                finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
+                finance_qs = finance_qs.filter(
+                    Q(credit_application__customer__created_by=user) |
+                    Q(credit_application__sales_person=user) |
+                    Q(created_by=user)
+                ).distinct()
             else:
                 # If the logged-in user is a customer
                 finance_qs = finance_qs.filter(credit_application__customer__created_by=user)
             plan = finance_qs.filter(id=plan_id).first()
+            if not plan:
+                plan = get_transient_plan_from_application(plan_id)
             if not plan:
                 return Response({
                     "status": "error",
@@ -899,6 +989,266 @@ class FinancePlanDetailAPIView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def patch(self, request, plan_id):
+        try:
+            plan = FinancePlan.objects.filter(id=plan_id).first()
+            credit_app = None
+            if plan:
+                credit_app = plan.credit_application
+            else:
+                from customer.models import CreditApplication
+                credit_app = CreditApplication.objects.filter(id=plan_id).first()
+
+            if not plan and not credit_app:
+                return Response({
+                    "status": "error",
+                    "message": "Finance plan not found."
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            imei = request.data.get("imei")
+            if imei:
+                if len(imei) != 15 or not imei.isdigit():
+                    return Response({
+                        "status": "error",
+                        "message": "IMEI must be exactly 15 digits."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                if credit_app:
+                    duplicate_imei_exists = CreditApplication.objects.filter(
+                        device_imei=imei
+                    ).exclude(id=credit_app.id).exists()
+                    
+                    if duplicate_imei_exists:
+                        return Response({
+                            "status": "error",
+                            "message": "This device IMEI is already enrolled in another application."
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
+                    credit_app.device_imei = imei
+                    credit_app.save(update_fields=["device_imei"])
+                    logger.info(f"[IMEI UPDATED] Updated IMEI to {imei} for CreditApplication ID={credit_app.id}")
+
+            serialized_plan = plan if plan else get_transient_plan_from_application(plan_id)
+            return Response({
+                "status": "success",
+                "message": "Finance plan updated successfully.",
+                "data": FinancePlanSerializer(serialized_plan).data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Error in patching Finance Plan")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class FinancePlanActivateAPIView(APIView):
+    """
+    POST: Activates a DRAFT FinancePlan, generating invoices and double-entry ledger entries.
+    """
+    permission_classes = [IsAuthenticatedUser]
+
+    @swagger_auto_schema(
+        operation_summary="Activate a Finance Plan",
+        operation_description="Updates the plan status to ACTIVE and generates invoices/ledgers for its draft installments.",
+        responses={200: "Plan activated successfully", 404: "Finance Plan not found", 400: "Invalid plan state"},
+        tags=["Finance"]
+    )
+    def post(self, request, plan_id):
+        try:
+            if request.user.role not in ["salesperson", "store_manager", "admin", "global_manager", "financial_manager"]:
+                return Response({
+                    "status": "error",
+                    "message": "Permission denied."
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            plan = FinancePlan.objects.filter(credit_application_id=plan_id).first()
+            if not plan:
+                plan = FinancePlan.objects.filter(id=plan_id).first()
+
+            if plan and plan.status == "ACTIVE":
+                return Response({
+                    "status": "success",
+                    "message": "Finance Plan is already active.",
+                    "data": FinancePlanSerializer(plan).data
+                }, status=status.HTTP_200_OK)
+
+            if not plan:
+                from customer.models import CreditApplication
+                credit_app = CreditApplication.objects.filter(id=plan_id).first()
+                if not credit_app:
+                    return Response({
+                        "status": "error",
+                        "message": f"Credit Application / Finance Plan with ID={plan_id} not found."
+                    }, status=status.HTTP_404_NOT_FOUND)
+
+                # Check if a FinancePlan already exists for this credit_app
+                plan = FinancePlan.objects.filter(credit_application=credit_app).first()
+                if plan:
+                    # Update existing plan
+                    plan.device = credit_app.device
+                    plan.device_price = credit_app.device_price or Decimal("0.00")
+                    plan.actual_down_payment = credit_app.initial_payment or Decimal("0.00")
+                    plan.selected_term = credit_app.number_of_installments or 6
+                    plan.installment_frequency_days = credit_app.installment_frequency_days or 30
+                    plan.status = "ACTIVE"
+                    plan.save()
+                    
+                    from finance.decision_engine import DecisionEngine
+                    engine = DecisionEngine(plan)
+                    plan = engine.run()
+                    plan.status = "ACTIVE"
+                    plan.save()
+                else:
+                    # Fetch AutoFinancePlan
+                    from finance.models import AutoFinancePlan
+                    latest_auto_plan = AutoFinancePlan.objects.filter(credit_application=credit_app).order_by("-id").first()
+                    if not latest_auto_plan:
+                        return Response({
+                            "status": "error",
+                            "message": "Pre-qualified Auto Finance Plan not found."
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
+                    # Create the FinancePlan directly in ACTIVE status
+                    from finance.decision_engine import DecisionEngine
+                    plan = FinancePlan.objects.create(
+                        credit_application=credit_app,
+                        credit_score=latest_auto_plan.credit_score,
+                        apc_score=latest_auto_plan.apc_score,
+                        risk_tier=latest_auto_plan.risk_tier or "TIER_A",
+                        customer_monthly_income=3000,
+                        payment_capacity_factor=latest_auto_plan.payment_capacity_factor or Decimal("0.20"),
+                        maximum_allowed_installment=latest_auto_plan.maximum_allowed_installment or Decimal("0.00"),
+                        minimum_down_payment_percentage=latest_auto_plan.minimum_down_payment_percentage or Decimal("0.00"),
+                        
+                        device=credit_app.device,
+                        device_price=credit_app.device_price or Decimal("0.00"),
+                        actual_down_payment=credit_app.initial_payment or Decimal("0.00"),
+                        selected_term=credit_app.number_of_installments or 6,
+                        installment_frequency_days=credit_app.installment_frequency_days or 30,
+                        status="ACTIVE",
+                        
+                        down_payment_percentage=Decimal("0.00"),
+                        amount_to_finance=credit_app.amount_to_finance or Decimal("0.00"),
+                        monthly_installment=credit_app.installment_amount or Decimal("0.00"),
+                        total_amount_payable=credit_app.total_amount or Decimal("0.00"),
+                        installment_to_income_ratio=Decimal("0.00"),
+                        created_by=request.user,
+                        store=getattr(request.user, "store", None),
+                    )
+                    
+                    engine = DecisionEngine(plan)
+                    plan = engine.run()
+                    plan.status = "ACTIVE"
+                    plan.save()
+
+                # Generate the EMISchedule if missing
+                if not plan.emi_schedule.exists():
+                    import datetime
+                    from .models import EMISchedule
+                    first_due = timezone.now().date() + datetime.timedelta(days=plan.installment_frequency_days)
+                    EMISchedule.generate_schedule(plan, first_due)
+
+            else:
+                plan.status = "ACTIVE"
+                plan.save(update_fields=["status"])
+                # Generate the EMISchedule if missing
+                if not plan.emi_schedule.exists():
+                    import datetime
+                    from .models import EMISchedule
+                    first_due = timezone.now().date() + datetime.timedelta(days=plan.installment_frequency_days)
+                    EMISchedule.generate_schedule(plan, first_due)
+
+            # Update credit application status to APPROVED
+            credit_app = plan.credit_application
+            credit_app.status = "APPROVED"
+            credit_app.save(update_fields=["status"])
+
+            # Update customer status to ACTIVE
+            customer = credit_app.customer
+            customer.status = "ACTIVE"
+            customer.save(update_fields=["status"])
+
+            # Generate and save the PDF agreement to the CreditApplication model
+            from django.core.files.base import ContentFile
+            from .services import ContractService
+            from customer.sms_utils import send_sms
+            from django.core.mail import EmailMessage
+            
+            pdf_data = None
+            filename = f"loan_agreement_{credit_app.id}.pdf"
+            try:
+                agreement_text = ContractService.generate_loan_agreement(plan)
+                pdf_data = ContractService.generate_pdf_from_text(agreement_text)
+                
+                credit_app.loan_agreement_pdf.save(filename, ContentFile(pdf_data), save=True)
+                logger.info(f"[FinancePlanActivateAPIView] Saved PDF for CreditApplication ID={credit_app.id}")
+            except Exception as e:
+                logger.exception("[FinancePlanActivateAPIView] Failed to generate/save loan agreement PDF")
+
+            # Send SMS to customer phone
+            if customer.phone_number:
+                try:
+                    sms_message = f"Hola {customer.first_name}, su financiamiento con Ola Credit ha sido activado con exito. Su equipo {plan.device.model_name if plan.device else 'dispositivo'} ha sido entregado."
+                    send_sms(customer.phone_number, sms_message)
+                    logger.info(f"[FinancePlanActivateAPIView] Sent SMS to {customer.phone_number}")
+                except Exception as sms_ex:
+                    logger.exception("[FinancePlanActivateAPIView] Failed to send activation SMS")
+
+            # Send Email with PDF attachment
+            if customer.email and pdf_data:
+                try:
+                    email_subject = "Ola Credit - Financiamiento Activado / Contrato de Credito"
+                    email_body = f"""Estimado(a) {customer.first_name} {customer.last_name},
+
+Nos complace informarle que su financiamiento con Ola Credit ha sido activado exitosamente y su dispositivo ha sido entregado.
+
+Adjunto a este correo encontrara el Contrato de Credito firmado correspondiente a su solicitud.
+
+Detalles del Financiamiento:
+- Dispositivo: {plan.device.brand.name if plan.device and plan.device.brand else ''} {plan.device.model_name if plan.device else 'N/A'}
+- Plazo: {plan.selected_term} Meses
+- Frecuencia: Cada {plan.installment_frequency_days} Dias
+- Cuota de pago: ${plan.monthly_installment} USD
+
+Gracias por confiar en Ola Credit.
+
+Atentamente,
+El equipo de Ola Credit Panama, S.A.
+"""
+                    email_message = EmailMessage(
+                        email_subject,
+                        email_body,
+                        to=[customer.email]
+                    )
+                    email_message.attach(filename, pdf_data, "application/pdf")
+                    email_message.send()
+                    logger.info(f"[FinancePlanActivateAPIView] Sent activation email to {customer.email}")
+                except Exception as email_ex:
+                    logger.exception("[FinancePlanActivateAPIView] Failed to send activation email")
+
+            AuditLog.objects.create(
+                user=request.user,
+                action_type="FINANCE_PLAN_ACTIVATED",
+                description=f"Finance plan ID={plan_id} activated.",
+                metadata={"plan_id": plan_id}
+            )
+
+            return Response({
+                "status": "success",
+                "message": "Finance Plan activated successfully.",
+                "data": FinancePlanSerializer(plan).data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("[FinancePlanActivateAPIView] Error activating Finance Plan.")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 # ============================================================
@@ -1412,11 +1762,11 @@ class EMIScheduleAPIView(APIView):
                 pass  # Full access
 
             elif role == "sales_advisor":
-                region = getattr(user, "region", None)
-                if region:
-                    emi_qs = emi_qs.filter(finance_plan__store__region=region)
-                else:
-                    return Response({"error": "Region not assigned to user"}, status=403)
+                emi_qs = emi_qs.filter(
+                    Q(finance_plan__store__sales_advisor=user) |
+                    Q(finance_plan__store__created_by=user) |
+                    Q(finance_plan__created_by=user)
+                ).distinct()
 
             elif role == "store_manager":
                 store = getattr(user, "store", None)
@@ -4088,12 +4438,19 @@ class InvoiceListAPIView(APIView):
     def post(self, request):
         data = request.data
         customer_id = data.get('customer_id')
-        due_date = data.get('due_date')
+        due_date_str = data.get('due_date')
         line_items_data = data.get('line_items', [])
         notes = data.get('notes', '')
 
-        if not customer_id or not due_date or not line_items_data:
+        if not customer_id or not due_date_str or not line_items_data:
             return Response({"error": "Missing required fields: customer_id, due_date, and line_items"}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from datetime import datetime
+        try:
+            due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return Response({"error": "Invalid date format. Expected YYYY-MM-DD"}, 
                             status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -4800,6 +5157,167 @@ class JournalEntryListCreateAPIView(APIView):
             return Response({"error": "GL Account not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FinanceConfigAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        from .models import RiskTier, LoanTerm, EMIConfiguration, EmployerRule, DecisionRule, InterestPlan
+        
+        risk_tiers = list(RiskTier.objects.filter(is_active=True).values())
+        loan_terms = list(LoanTerm.objects.filter(is_active=True).values())
+        emi_config = list(EMIConfiguration.objects.filter(is_active=True).values())
+        employer_rules = list(EmployerRule.objects.filter(is_active=True).values())
+        decision_rules = list(DecisionRule.objects.filter(is_active=True).values())
+        
+        # Add interest plans details for each loan term
+        for term in loan_terms:
+            plans = list(InterestPlan.objects.filter(loan_term_id=term['id'], is_active=True).values())
+            term['interest_plans'] = plans
+            
+        return Response({
+            "status": "success",
+            "data": {
+                "risk_tiers": risk_tiers,
+                "loan_terms": loan_terms,
+                "emi_config": emi_config,
+                "employer_rules": employer_rules,
+                "decision_rules": decision_rules
+            }
+        })
+
+
+class FinanceGeneratePlansAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request):
+        principal = request.data.get("principal")
+        risk_tier = request.data.get("risk_tier", "TIER_A")
+        
+        if principal is None:
+            return Response({
+                "status": "error",
+                "message": "principal is required."
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        from .services import FinancingEngineService
+        plans = FinancingEngineService.generate_emi_plans(Decimal(str(principal)), risk_tier)
+        return Response({
+            "status": "success",
+            "data": plans
+        })
+
+
+class FinanceContractsAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        plan_id = request.query_params.get("plan_id")
+        if not plan_id:
+            return Response({"status": "error", "message": "plan_id query param is required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        from .models import FinancePlan
+        plan = FinancePlan.objects.filter(id=plan_id).first()
+        if not plan:
+            plan = get_transient_plan_from_application(plan_id)
+            
+        if not plan:
+            return Response({"status": "error", "message": "Finance Plan not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        from .services import ContractService
+        loan_agreement = ContractService.generate_loan_agreement(plan)
+        payment_schedule = ContractService.generate_payment_schedule_text(plan)
+        downpayment_receipt = ContractService.generate_downpayment_receipt(plan)
+        delivery_form = ContractService.generate_delivery_form(plan)
+        
+        from .serializers import EMIScheduleSerializer
+        schedules = plan.emi_schedule.all().order_by('installment_number')
+        if not schedules.exists():
+            import datetime
+            from .models import LoanTerm, InterestPlan, EMISchedule
+            from django.utils import timezone
+            frequency_days = plan.installment_frequency_days or 30
+            term_months = plan.selected_term
+            principal = Decimal(str(plan.amount_to_finance))
+
+            if frequency_days == 30:
+                total_installments = term_months
+            elif frequency_days == 15:
+                total_installments = term_months * 2
+            elif frequency_days == 7:
+                total_installments = term_months * 4
+            elif frequency_days == 3:
+                total_installments = term_months * 8
+            else:
+                total_installments = int(term_months * 30 / frequency_days)
+
+            term_obj = LoanTerm.objects.filter(months=term_months).first()
+            plan_obj = InterestPlan.objects.filter(loan_term=term_obj, is_active=True).first()
+            multiplier = plan_obj.risk_multiplier if plan_obj else (term_obj.multiplier if term_obj else Decimal('1.2'))
+            if multiplier is None or multiplier <= 0:
+                multiplier = Decimal('1.2')
+
+            total_repayment = principal * Decimal(str(multiplier))
+            emi_amount = (total_repayment / Decimal(str(total_installments))).quantize(Decimal('0.01'))
+            first_due_date = timezone.now().date() + datetime.timedelta(days=frequency_days)
+
+            schedules_list = []
+            current_balance = total_repayment
+            for i in range(1, total_installments + 1):
+                due_date = first_due_date + datetime.timedelta(days=(i-1)*frequency_days)
+                current_balance -= emi_amount
+                s = EMISchedule(
+                    installment_number=i,
+                    due_date=due_date,
+                    installment_amount=emi_amount,
+                    principal=emi_amount,
+                    interest=Decimal('0.00'),
+                    balance=max(Decimal('0.00'), current_balance),
+                    status='UPCOMING'
+                )
+                schedules_list.append(s)
+            schedule_data = EMIScheduleSerializer(schedules_list, many=True).data
+        else:
+            schedule_data = EMIScheduleSerializer(schedules, many=True).data
+            
+        return Response({
+            "status": "success",
+            "data": {
+                "loan_agreement": loan_agreement,
+                "payment_schedule": payment_schedule,
+                "downpayment_receipt": downpayment_receipt,
+                "delivery_form": delivery_form,
+                "emi_schedule": schedule_data
+            }
+        })
+
+
+class FinanceContractsPDFView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        plan_id = request.query_params.get("plan_id")
+        if not plan_id:
+            return Response({"status": "error", "message": "plan_id query param is required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        from .models import FinancePlan
+        plan = FinancePlan.objects.filter(id=plan_id).first()
+        if not plan:
+            return Response({"status": "error", "message": "Finance Plan not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        from .services import ContractService
+        try:
+            agreement_text = ContractService.generate_loan_agreement(plan)
+            pdf_data = ContractService.generate_pdf_from_text(agreement_text)
+            
+            from django.http import HttpResponse
+            response = HttpResponse(pdf_data, content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="loan_agreement_{plan.id}.pdf"'
+            return response
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 

@@ -137,6 +137,20 @@ def fetch_credit_score_from_experian(customer):
         
         logger.info(f"[APCScore] Generated score {apc_score} for document {document_number}")
         
+        # Determine risk category and recommendation based on score
+        if apc_score >= 600:
+            risk_cat = "Low Risk (Tier A)"
+            rec = "Approved under standard down payment criteria."
+        elif apc_score >= 550:
+            risk_cat = "Medium Risk (Tier B)"
+            rec = "Requires manual confirmation of down payment."
+        elif apc_score >= 500:
+            risk_cat = "High Risk (Tier C)"
+            rec = "Requires higher down payment and manual override."
+        else:
+            risk_cat = "Very High Risk (Tier D)"
+            rec = "Credit score too low. Reject application."
+            
         return {
             "document_number": document_number,
             "apc_score": apc_score,
@@ -144,7 +158,12 @@ def fetch_credit_score_from_experian(customer):
             "score_valid_until": timezone.now() + timedelta(days=30),
             "updated_from_experian": True,
             "apc_status":'APPROVED' if apc_score>=500 else 'REJECTED',
-            }
+            "risk_category": risk_cat,
+            "existing_monthly_debt": Decimal('150.00'),
+            "existing_loans_count": 1 if apc_score < 700 else 0,
+            "late_payments_count": 2 if apc_score < 550 else 0,
+            "bureau_recommendation": rec
+        }
     except Exception as e:
             logger.exception("[APCScore] Error generating score")
             return {"error": "[APCScore] Error generating score"}
