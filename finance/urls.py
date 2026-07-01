@@ -67,4 +67,14 @@ urlpatterns = [
     path('payments-made/<int:pk>/', views.PaymentMadeDetailAPIView.as_view(), name='payments-made-detail'),
     path('credit-notes/', views.CreditNoteListCreateAPIView.as_view(), name='credit-notes-list-create'),
     path('journal-entries/', views.JournalEntryListCreateAPIView.as_view(), name='journal-entries-list-create'),
+    
+    # LOAN ACCOUNTING & LEDGER
+    path('disbursements/', views.LoanDisbursementAPIView.as_view(), name='loan-disbursements-list-create'),
+    path('disbursements/<int:pk>/reverse/', views.LoanDisbursementReverseAPIView.as_view(), name='loan-disbursement-reverse'),
+    path('settlements/', views.MerchantSettlementAPIView.as_view(), name='merchant-settlements-list'),
+    path('settlements/<int:pk>/pay/', views.MerchantSettlementPayAPIView.as_view(), name='merchant-settlement-pay'),
+    path('settlements/<int:pk>/cancel/', views.MerchantSettlementCancelAPIView.as_view(), name='merchant-settlement-cancel'),
+    path('merchant-ledger/<uuid:store_id>/', views.MerchantLedgerAPIView.as_view(), name='merchant-ledger'),
+    path('customer-loan-ledger/<int:plan_id>/', views.CustomerLoanLedgerAPIView.as_view(), name='customer-loan-ledger'),
+    path('loans/<int:plan_id>/manual-action/', views.LoanManualActionAPIView.as_view(), name='loan-manual-action'),
 ]

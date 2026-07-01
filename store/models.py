@@ -256,6 +256,22 @@ class Store(models.Model):
         related_name='created_stores',
         verbose_name='Created By'
     )
+    vendor = models.OneToOneField(
+        'finance.Vendor',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='store',
+        verbose_name='Linked Vendor'
+    )
+    accounting_code = models.ForeignKey(
+        'finance.AccountingCode',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='stores',
+        verbose_name='Accounting Code'
+    )
     
     class Meta:
         db_table = 'stores'
@@ -317,9 +333,47 @@ class Store(models.Model):
                 return code
 
     def save(self, *args, **kwargs):
-        """Override save to update store_manager's store_id."""
+        """Override save to update store_manager's store_id and auto-generate accounting code."""
         if not self.code:
             self.code = self.generate_unique_code()
+            
+        if not self.accounting_code:
+            from finance.models import AccountingCode
+            
+            # Find next unique code in 24xx series
+            codes = AccountingCode.objects.filter(code__startswith='24')
+            existing_numbers = []
+            for c in codes:
+                if len(c.code) == 4:
+                    try:
+                        existing_numbers.append(int(c.code))
+                    except ValueError:
+                        pass
+            
+            if not existing_numbers:
+                next_code = "2401"
+            else:
+                next_code = str(max(existing_numbers) + 1)
+            
+            # Fallback if next_code already exists
+            if AccountingCode.objects.filter(code=next_code).exists():
+                for i in range(2401, 10000):
+                    if not AccountingCode.objects.filter(code=str(i)).exists():
+                        next_code = str(i)
+                        break
+            
+            coa_name = f"Merchant Payable - {self.name} ({self.code})"
+            if len(coa_name) > 100:
+                coa_name = coa_name[:100]
+                
+            ac = AccountingCode.objects.create(
+                code=next_code,
+                name=coa_name,
+                category="LIABILITY",
+                is_active=True
+            )
+            self.accounting_code = ac
+
         super().save(*args, **kwargs)
         
         # Update store_manager's store_id

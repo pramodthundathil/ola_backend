@@ -34,6 +34,25 @@ def ensure_risk_tiers():
             }
         )
 
+def ensure_loan_terms():
+    """Ensure the exact loan terms and multipliers are synchronized in the database."""
+    terms_data = [
+        {"months": 4, "fortnights": 8, "multiplier": 1.70},
+        {"months": 6, "fortnights": 12, "multiplier": 1.80},
+        {"months": 8, "fortnights": 16, "multiplier": 2.20},
+    ]
+    for data in terms_data:
+        LoanTerm.objects.update_or_create(
+            months=data["months"],
+            defaults={
+                "fortnights": data["fortnights"],
+                "multiplier": Decimal(str(data["multiplier"])),
+                "is_active": True
+            }
+        )
+    # Deactivate any other terms
+    LoanTerm.objects.exclude(months__in=[4, 6, 8]).update(is_active=False)
+
 class AutoDecisionEngine:
     """
     Adapter class for temporary finance plan logic. Uses database configurations to
@@ -45,67 +64,66 @@ class AutoDecisionEngine:
 
     def run(self):
         ensure_risk_tiers()
+        ensure_loan_terms()
         
-        # 1. Determine Risk Tier
+        # Determine salary and score
         score_val = self.plan.credit_score.apc_score if self.plan.credit_score else None
+        salary_val = self.plan.customer_monthly_income
+        if salary_val is None:
+            salary_val = Decimal('350.00')
+            self.plan.customer_monthly_income = salary_val
+
+        # Check active loans for TIER_H
+        from finance.models import FinancePlan
+        has_active_loans = FinancePlan.objects.filter(
+            credit_application__customer=self.plan.customer,
+            status="ACTIVE"
+        ).exists()
         
-        risk_tier_obj = None
-        if score_val is not None:
-            risk_tier_obj = RiskTier.objects.filter(
-                min_score__lte=score_val,
-                max_score__gte=score_val,
-                is_active=True
-            ).first()
-            
-        if not risk_tier_obj:
-            if score_val is None:
-                risk_tier_obj = RiskTier.objects.filter(code='TIER_E', is_active=True).first()
+        # Assign risk tier
+        if has_active_loans:
+            risk_tier_code = 'TIER_H'
+        elif salary_val < Decimal('500.00'):
+            if score_val is not None and score_val >= 600:
+                risk_tier_code = 'TIER_F'
             else:
-                risk_tier_obj = RiskTier.objects.filter(code='TIER_D', is_active=True).first()
-                
-        if not risk_tier_obj:
-            risk_tier_obj = RiskTier.objects.filter(code='TIER_D').first()
+                risk_tier_code = 'TIER_D'
+        elif score_val is None:
+            risk_tier_code = 'TIER_E'
+        elif score_val >= 550:
+            risk_tier_code = 'TIER_A'
+        elif score_val >= 500:
+            risk_tier_code = 'TIER_B'
+        elif score_val >= 450:
+            risk_tier_code = 'TIER_C'
+        else:
+            risk_tier_code = 'TIER_D'
 
-        # If monthly income is None, default to Decimal('350.00')
-        if self.plan.customer_monthly_income is None:
-            self.plan.customer_monthly_income = Decimal('350.00')
-
-        # If income is below minimum salary or is the fallback default, override risk tier to TIER_F (No Salario)
-        min_salary = risk_tier_obj.min_salary if risk_tier_obj else Decimal('500.00')
-        if self.plan.customer_monthly_income < min_salary:
-            tier_f_obj = RiskTier.objects.filter(code='TIER_F', is_active=True).first()
-            if tier_f_obj:
-                risk_tier_obj = tier_f_obj
-
-        # Hard reject if TIER_F (No Salario) and score drops below 600
-        if risk_tier_obj and risk_tier_obj.code == 'TIER_F':
-            if score_val is None or score_val < 600:
-                risk_tier_obj = RiskTier.objects.filter(code='TIER_D').first()
-
-        self.plan.risk_tier = risk_tier_obj.code if risk_tier_obj else 'TIER_D'
+        risk_tier_obj = RiskTier.objects.filter(code=risk_tier_code).first()
+        self.plan.risk_tier = risk_tier_code
         self.plan.payment_capacity_factor = risk_tier_obj.max_debt_ratio_pct / Decimal('100.00') if risk_tier_obj else Decimal('0.20')
         self.plan.minimum_down_payment_percentage = risk_tier_obj.min_down_payment_pct if risk_tier_obj else Decimal('20.00')
         
-        # 2. Capacity Check
+        # Capacity check
         self.plan.maximum_allowed_installment = (
-            self.plan.customer_monthly_income * self.plan.payment_capacity_factor
+            salary_val * self.plan.payment_capacity_factor
         )
 
-        # 3. Allowed Terms and Multipliers from DB configurations
+        # Allowed terms
         allowed_plans = []
-        terms = LoanTerm.objects.filter(is_active=True).order_by('months')
-        for t in terms:
-            allowed_plans.append({
-                "months": t.months,
-                "interval_days": 30,  # default monthly
-                "multiple": float(t.multiplier)
-            })
-            allowed_plans.append({
-                "months": t.months,
-                "interval_days": 15,  # fortnightly
-                "multiple": float(t.multiplier)
-            })
-            
+        if risk_tier_code not in ['TIER_D', 'TIER_G', 'TIER_H']:
+            terms = LoanTerm.objects.filter(is_active=True).order_by('months')
+            for t in terms:
+                allowed_plans.append({
+                    "months": t.months,
+                    "interval_days": 30,
+                    "multiple": float(t.multiplier)
+                })
+                allowed_plans.append({
+                    "months": t.months,
+                    "interval_days": 15,
+                    "multiple": float(t.multiplier)
+                })
         self.plan.allowed_plans = allowed_plans
         self.plan.save()
         return self.plan
@@ -122,28 +140,48 @@ class DecisionEngine:
 
     def run(self, dynamic_adjustment=True, save=True):
         ensure_risk_tiers()
+        ensure_loan_terms()
         
         score_val = self.plan.apc_score
         customer = self.plan.credit_application.customer
+        salary_val = self.plan.customer_monthly_income
+        if salary_val is None:
+            salary_val = Decimal('350.00')
+            self.plan.customer_monthly_income = salary_val
+        
+        # Check active loans
+        from finance.models import FinancePlan
+        has_active_loans = FinancePlan.objects.filter(
+            credit_application__customer=customer,
+            status="ACTIVE"
+        ).exclude(id=self.plan.id).exists()
         
         # Gather references
-        references = list(PersonalReference.objects.filter(customer=customer))
+        references_count = PersonalReference.objects.filter(customer=customer).count()
         
-        # 1. Run eligibility rules from new services
-        eligibility = DecisionEngineService.evaluate_eligibility(
-            customer=customer,
-            income=self.plan.customer_monthly_income,
-            existing_obligations=Decimal('150.00'),  # standard panama average
-            score_val=score_val,
-            employer_name=getattr(customer, 'employer', None),
-            references=references,
-            exclude_application_id=self.plan.credit_application.id
-        )
-        
-        self.plan.risk_tier = eligibility['risk_tier']
-        
-        # Get matching RiskTier model parameters
-        tier_obj = RiskTier.objects.filter(code=self.plan.risk_tier).first()
+        # Assign risk tier
+        if has_active_loans:
+            risk_tier_code = 'TIER_H'
+        elif references_count < 2:
+            risk_tier_code = 'TIER_G'
+        elif salary_val < Decimal('500.00'):
+            if score_val is not None and score_val >= 600:
+                risk_tier_code = 'TIER_F'
+            else:
+                risk_tier_code = 'TIER_D'
+        elif score_val is None:
+            risk_tier_code = 'TIER_E'
+        elif score_val >= 550:
+            risk_tier_code = 'TIER_A'
+        elif score_val >= 500:
+            risk_tier_code = 'TIER_B'
+        elif score_val >= 450:
+            risk_tier_code = 'TIER_C'
+        else:
+            risk_tier_code = 'TIER_D'
+
+        self.plan.risk_tier = risk_tier_code
+        tier_obj = RiskTier.objects.filter(code=risk_tier_code).first()
         
         if tier_obj:
             self.plan.payment_capacity_factor = tier_obj.max_debt_ratio_pct / Decimal('100.00')
@@ -157,147 +195,74 @@ class DecisionEngine:
         # 2. Computations
         self.plan.is_high_end_device = self.plan.device_price > Decimal('300.00')
         
-        # Calculate pricing details
-        self.plan.cash_price = (self.plan.device.minimum_price_to_sell if (self.plan.device and self.plan.device.minimum_price_to_sell is not None) else self.plan.device_price)
-        self.plan.selling_price = (self.plan.device.maximum_price if (self.plan.device and self.plan.device.maximum_price is not None) else self.plan.device_price)
+        selling_price = self.plan.device_price or Decimal('0.00')
+        self.plan.selling_price = selling_price
+        self.plan.total_price = selling_price
         
-        # Compute total price including fees/insurance/accessories/warranty
-        insurance = self.plan.insurance or Decimal('0.00')
-        accessories = self.plan.accessories or Decimal('0.00')
-        warranty = self.plan.warranty or Decimal('0.00')
-        selling_price = self.plan.selling_price or Decimal('0.00')
+        # Down Payment = Device Price * Tier Down Payment %
+        dp_pct = self.plan.minimum_down_payment_percentage / Decimal('100.00')
+        required_dp = (selling_price * dp_pct).quantize(Decimal('0.01'), rounding=ROUND_UP)
         
-        self.plan.total_price = Decimal(str(selling_price)) + Decimal(str(insurance)) + Decimal(str(accessories)) + Decimal(str(warranty))
-        self.plan.amount_to_finance = self.plan.total_price - Decimal(str(self.plan.actual_down_payment or Decimal('0.00')))
-        
-        # Capacity validation (direct max debt cap formula: max_emi_allowed = Endeudamiento × Salario)
-        self.plan.max_emi_allowed = self.plan.customer_monthly_income * self.plan.payment_capacity_factor
-        self.plan.available_capacity = self.plan.customer_monthly_income - Decimal('150.00')  # less existing obligations
+        actual_dp = self.plan.actual_down_payment or Decimal('0.00')
+        if actual_dp < required_dp:
+            actual_dp = required_dp
+        self.plan.actual_down_payment = actual_dp
+        self.plan.down_payment_percentage = (actual_dp / selling_price * Decimal('100.00')).quantize(Decimal('0.01')) if selling_price > 0 else Decimal('0.00')
 
-        # 3. Calculate EMI
-        term_obj = LoanTerm.objects.filter(months=self.plan.selected_term).first()
-        multiplier = term_obj.multiplier if term_obj else None
+        # Loan Principal = Device Price - Down Payment
+        self.plan.amount_to_finance = selling_price - actual_dp
         
-        plan_obj = InterestPlan.objects.filter(loan_term=term_obj, is_active=True).first()
-        if plan_obj and plan_obj.risk_multiplier:
-            multiplier = plan_obj.risk_multiplier
-            
-        res = FinancingEngineService.calculate_emi(
-            principal=self.plan.amount_to_finance,
-            term_months=self.plan.selected_term,
-            rate_pct=Decimal('10.00'),  # 10% default flat rate
-            method='FLAT',
-            multiplier=multiplier
-        )
+        # Payment Capacity (Cuota) = Salary * Debt Ratio
+        self.plan.max_emi_allowed = salary_val * self.plan.payment_capacity_factor
         
-        freq_days = self.plan.installment_frequency_days or 30
+        # Maximum Financing = Payment Capacity * Selected Months
+        selected_term = self.plan.selected_term or 8
+        max_financing = self.plan.max_emi_allowed * Decimal(str(selected_term))
+        
+        # Multiplier
+        term_obj = LoanTerm.objects.filter(months=selected_term).first()
+        multiplier = term_obj.multiplier if term_obj else Decimal('1.00')
+        
+        # Total Financing = Loan Principal * Multiplier
+        total_financing = self.plan.amount_to_finance * multiplier
+        self.plan.total_amount_payable = actual_dp + total_financing
+        
+        # Biweekly Installment = Total Financing / (Months * 2)
+        freq_days = self.plan.installment_frequency_days or 15
         if freq_days == 30:
-            total_installments = self.plan.selected_term
+            total_installments = selected_term
         elif freq_days == 15:
-            total_installments = self.plan.selected_term * 2
+            total_installments = selected_term * 2
         elif freq_days == 7:
-            total_installments = self.plan.selected_term * 4
-        elif freq_days == 3:
-            total_installments = self.plan.selected_term * 8
+            total_installments = selected_term * 4
         else:
-            total_installments = int(self.plan.selected_term * 30 / freq_days)
-
-        if multiplier is None or multiplier <= 0:
-            multiplier = Decimal('1.2')
-        total_repayment = self.plan.amount_to_finance * Decimal(str(multiplier))
-        
-        # Save actual per-installment amount in monthly_installment field
-        self.plan.monthly_installment = (total_repayment / Decimal(str(total_installments))).quantize(Decimal('0.01'), rounding=ROUND_UP)
-        self.plan.total_amount_payable = self.plan.actual_down_payment + total_repayment
-        
-        # Check Capacity limits based on monthly equivalent emi
-        monthly_emi = res['monthly_emi'].quantize(Decimal('1'), rounding=ROUND_UP)
-        self.plan.installment_to_income_ratio = (monthly_emi / self.plan.customer_monthly_income) * Decimal('100.00')
-        self.plan.payment_capacity_passed = monthly_emi <= self.plan.max_emi_allowed
-
-        # 4. Final approval decision and counter-offer cure lever logic
-        if not self.plan.payment_capacity_passed:
-            # Lever 1: Check if another Loan Term Naturally Passes
-            passing_terms = []
-            all_terms = LoanTerm.objects.filter(is_active=True).order_by('months')
-            for t in all_terms:
-                t_mult = t.multiplier
-                t_plan = InterestPlan.objects.filter(loan_term=t, is_active=True).first()
-                if t_plan and t_plan.risk_multiplier:
-                    t_mult = t_plan.risk_multiplier
-                    
-                t_res = FinancingEngineService.calculate_emi(
-                    principal=self.plan.amount_to_finance,
-                    term_months=t.months,
-                    rate_pct=Decimal('10.00'),
-                    method='FLAT',
-                    multiplier=t_mult
-                )
-                t_emi = t_res['monthly_emi'].quantize(Decimal('1'), rounding=ROUND_UP)
-                if t_emi <= self.plan.max_emi_allowed:
-                    passing_terms.append(t.months)
+            total_installments = selected_term * 2
             
-            if passing_terms:
-                self.plan.conditions_met = True
-                self.plan.requires_adjustment = True
-                self.plan.score_status = 'CONDITIONAL'
-                self.plan.adjustment_notes = f"EMI exceeds cap. Approved counter-offer terms: {', '.join(map(str, passing_terms))} months."
-            else:
-                # Lever 2: Solve for Down Payment Cure Strategy
-                if multiplier and multiplier > 0:
-                    monto_max_fin = (self.plan.max_emi_allowed * self.plan.selected_term) / Decimal(str(multiplier))
-                    monto_max_fin = monto_max_fin.quantize(Decimal('0.01'))
-                    
-                    abono_req = self.plan.total_price - monto_max_fin
-                    abono_pct_req = (abono_req / self.plan.total_price) * Decimal('100.00')
-                    
-                    max_cure_limit = Decimal('55.00') if self.plan.risk_tier == 'TIER_C' else Decimal('50.00')
-                    
-                    if abono_pct_req <= max_cure_limit:
-                        self.plan.conditions_met = True
-                        self.plan.requires_adjustment = True
-                        self.plan.score_status = 'CONDITIONAL'
-                        self.plan.adjustment_notes = f"Approved counter-offer with increased down payment of ${abono_req:.2f} ({abono_pct_req:.1f}%)."
-                        
-                        # Gather other cured term combinations for choices
-                        other_cures = []
-                        for t in all_terms:
-                            if t.months == self.plan.selected_term:
-                                continue
-                            t_mult = t.multiplier
-                            t_plan = InterestPlan.objects.filter(loan_term=t, is_active=True).first()
-                            if t_plan and t_plan.risk_multiplier:
-                                t_mult = t_plan.risk_multiplier
-                            if t_mult and t_mult > 0:
-                                t_max_fin = (self.plan.max_emi_allowed * t.months) / Decimal(str(t_mult))
-                                t_abono = self.plan.total_price - t_max_fin
-                                t_abono_pct = (t_abono / self.plan.total_price) * Decimal('100.00')
-                                t_max_limit = Decimal('55.00') if self.plan.risk_tier == 'TIER_C' else Decimal('50.00')
-                                if t_abono_pct <= t_max_limit:
-                                    other_cures.append(f"{t.months}mo with ${t_abono:.2f} DP")
-                        if other_cures:
-                            self.plan.adjustment_notes += f" Alternatives: {', '.join(other_cures)}."
-                    else:
-                        self.plan.conditions_met = False
-                        self.plan.score_status = 'REJECTED'
-                        self.plan.adjustment_notes = f"EMI exceeds cap. Down payment cure of {abono_pct_req:.1f}% exceeds max allowed threshold."
-                else:
-                    self.plan.conditions_met = False
-                    self.plan.score_status = 'REJECTED'
-                    self.plan.adjustment_notes = "EMI exceeds allowed capacity (no valid term multiplier found)"
+        self.plan.monthly_installment = (total_financing / Decimal(str(total_installments))).quantize(Decimal('0.01'), rounding=ROUND_UP)
+        self.plan.installment_to_income_ratio = (self.plan.monthly_installment / salary_val * Decimal('100.00')).quantize(Decimal('0.01')) if salary_val > 0 else Decimal('0.00')
+
+        # Approval Rule: Total Financing <= Maximum Financing
+        self.plan.payment_capacity_passed = total_financing <= max_financing
+        
+        # Check eligibility and tier restriction
+        is_approved = self.plan.payment_capacity_passed and (risk_tier_code not in ['TIER_D', 'TIER_G', 'TIER_H'])
+        self.plan.conditions_met = is_approved
+        
+        if is_approved:
+            self.plan.score_status = 'APPROVED'
+            self.plan.adjustment_notes = ""
         else:
-            self.plan.conditions_met = eligibility['eligible']
-            
-            # Map approval levels based on Risk Tier
-            if tier_obj:
-                level = tier_obj.approval_level
-                if level == 'AUTO' and eligibility['eligible']:
-                    self.plan.score_status = 'APPROVED'
-                else:
-                    self.plan.score_status = 'CONDITIONAL'
-                    self.plan.adjustment_notes = f'Requires approval level: {level}'
-            else:
-                self.plan.score_status = 'REJECTED'
+            self.plan.score_status = 'REJECTED'
+            reasons = []
+            if not self.plan.payment_capacity_passed:
+                reasons.append(f"Total financing (${total_financing:.2f}) exceeds maximum financing capacity (${max_financing:.2f}).")
+            if risk_tier_code == 'TIER_D':
+                reasons.append("Rejected due to low credit score (Tier D).")
+            elif risk_tier_code == 'TIER_G':
+                reasons.append("Rejected due to missing personal references.")
+            elif risk_tier_code == 'TIER_H':
+                reasons.append("Rejected due to existing active customer status.")
+            self.plan.adjustment_notes = " ".join(reasons)
 
         if save:
             self.plan.save()

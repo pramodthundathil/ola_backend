@@ -1,6 +1,6 @@
 from datetime import date
 from rest_framework import serializers
-from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan,FinanceMultiple
+from .models import FinancePlan, EMISchedule, PaymentRecord, AutoFinancePlan,FinanceMultiple, LoanDisbursement, CustomerLoanLedgerEntry, MerchantLedgerEntry, MerchantSettlement
 from products.serializers import ProductModelSerializer
 from products.models import ProductModel
 
@@ -740,6 +740,14 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
             return f"Credit Note {obj.credit_note.credit_note_number}"
         elif obj.journal_entry:
             return f"Journal {obj.journal_entry.reference_number}"
+        elif obj.disbursement:
+            return f"Disbursement {obj.disbursement.disbursement_number}"
+        elif obj.settlement:
+            return f"Settlement {obj.settlement.settlement_number}"
+        elif obj.customer_loan_ledger_entry:
+            return f"Cust Loan Entry {obj.customer_loan_ledger_entry.id}"
+        elif obj.merchant_ledger_entry:
+            return f"Merch Entry {obj.merchant_ledger_entry.id}"
         return "N/A"
 
 
@@ -832,3 +840,52 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     class Meta:
         model = JournalEntry
         fields = '__all__'
+
+
+class LoanDisbursementSerializer(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+    store_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LoanDisbursement
+        fields = '__all__'
+
+    def get_customer_name(self, obj):
+        c = obj.finance_plan.customer
+        return f"{c.first_name} {c.last_name}" if c else "N/A"
+
+    def get_store_name(self, obj):
+        s = obj.finance_plan.store
+        return s.name if s else "N/A"
+
+
+class CustomerLoanLedgerEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomerLoanLedgerEntry
+        fields = '__all__'
+
+
+class MerchantSettlementSerializer(serializers.ModelSerializer):
+    store_name = serializers.SerializerMethodField()
+    bank_account_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MerchantSettlement
+        fields = '__all__'
+
+    def get_store_name(self, obj):
+        return obj.store.name if obj.store else "N/A"
+
+    def get_bank_account_name(self, obj):
+        return obj.bank_account.account_name if obj.bank_account else "N/A"
+
+
+class MerchantLedgerEntrySerializer(serializers.ModelSerializer):
+    store_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MerchantLedgerEntry
+        fields = '__all__'
+
+    def get_store_name(self, obj):
+        return obj.store.name if obj.store else "N/A"

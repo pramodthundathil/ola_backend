@@ -10,7 +10,7 @@ class DeviceEnrollmentCustomer(models.Model):
     
     Integrations:
     - Samsung KNOX for Samsung devices
-    - NuovoPay for other Android devices
+    - Equality for other Android devices
     """
     
     ENROLLMENT_STATUS_CHOICES = [
@@ -23,7 +23,7 @@ class DeviceEnrollmentCustomer(models.Model):
     
     LOCKING_SYSTEM_CHOICES = [
         ('KNOX', 'Samsung KNOX'),
-        ('NUOVOPAY', 'NuovoPay'),
+        ('EQUALITY', 'Equality'),
         ('NONE', 'None'),
     ]
 
@@ -70,7 +70,7 @@ class DeviceEnrollmentCustomer(models.Model):
         max_length=100,
         null=True,
         blank=True,
-        help_text="Reference ID from KNOX or NuovoPay"
+        help_text="Reference ID from KNOX or Equality"
     )
     is_locked = models.BooleanField(default=False)
     lock_applied_at = models.DateTimeField(null=True, blank=True)
@@ -112,7 +112,7 @@ class DeviceEnrollmentCustomer(models.Model):
             self.locking_system = 'NONE'
         else:
             # All other Android devices
-            self.locking_system = 'NUOVOPAY'
+            self.locking_system = 'EQUALITY'
         
         return self.locking_system
     

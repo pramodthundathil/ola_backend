@@ -500,7 +500,7 @@ class FinancePlanAPIView(APIView):
                 "credit_score": finance_plan.credit_score,
                 "apc_score": finance_plan.apc_score,
                 "risk_tier": finance_plan.risk_tier or "",
-                "customer_monthly_income": 3000,
+                "customer_monthly_income": finance_plan.customer_monthly_income or Decimal("350.00"),
                 "payment_capacity_factor": finance_plan.payment_capacity_factor or Decimal("0.00"),
                 "maximum_allowed_installment": finance_plan.maximum_allowed_installment or Decimal("0.00"),
                 "minimum_down_payment_percentage": finance_plan.minimum_down_payment_percentage or Decimal("0.00"),
@@ -1029,6 +1029,82 @@ class FinancePlanDetailAPIView(APIView):
                     credit_app.save(update_fields=["device_imei"])
                     logger.info(f"[IMEI UPDATED] Updated IMEI to {imei} for CreditApplication ID={credit_app.id}")
 
+                # DeviceEnrollmentCustomer logic
+                plan_obj = plan if plan else get_transient_plan_from_application(plan_id)
+                if plan_obj:
+                    # Save the plan to database if it does not exist yet (as transient plan is not saved during POST)
+                    if not FinancePlan.objects.filter(id=plan_obj.id).exists():
+                        plan_obj.status = "DRAFT"
+                        plan_obj.created_by = request.user
+                        plan_obj.store = getattr(request.user, "store", None)
+                        plan_obj.save(force_insert=True)
+                        plan = plan_obj
+                    
+                    from customer_device.models import DeviceEnrollmentCustomer
+                    
+                    # Check for duplicate IMEI in DeviceEnrollmentCustomer
+                    duplicate_enrollment_exists = DeviceEnrollmentCustomer.objects.filter(
+                        imei=imei
+                    ).exclude(finance_plan=plan_obj).exists()
+                    
+                    if duplicate_enrollment_exists:
+                        return Response({
+                            "status": "error",
+                            "message": "This device IMEI is already enrolled in another application."
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
+                    customer = plan_obj.credit_application.customer
+                    device_model = plan_obj.device
+                    if not device_model:
+                        return Response({
+                            "status": "error",
+                            "message": "Finance plan must have a device associated with it to enroll IMEI."
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
+                    device_brand_name = device_model.brand.name if device_model.brand else "Unknown"
+
+                    enrollment = DeviceEnrollmentCustomer.objects.filter(finance_plan=plan_obj).first()
+                    
+                    should_enroll = False
+                    if not enrollment:
+                        enrollment = DeviceEnrollmentCustomer(
+                            finance_plan=plan_obj,
+                            customer=customer,
+                            imei=imei,
+                            device_brand_name=device_brand_name,
+                            device_model=device_model,
+                            enrollment_status='NOT_STARTED'
+                        )
+                        enrollment.determine_locking_system()
+                        enrollment.save()
+                        should_enroll = True
+                    elif enrollment.imei != imei:
+                        enrollment.imei = imei
+                        enrollment.device_brand_name = device_brand_name
+                        enrollment.device_model = device_model
+                        enrollment.enrollment_status = 'NOT_STARTED'
+                        enrollment.determine_locking_system()
+                        enrollment.save()
+                        should_enroll = True
+                    
+                    if should_enroll:
+                        from customer_device.views import DeviceEnrollmentAPIView
+                        view = DeviceEnrollmentAPIView()
+                        enrollment_result = view._initiate_enrollment(enrollment, customer)
+                        
+                        if enrollment_result.get('success'):
+                            enrollment.enrollment_status = 'QR_GENERATED'
+                            enrollment.enrollment_qr_code = enrollment_result.get('qr_code', '')
+                            enrollment.enrollment_link = enrollment_result.get('enrollment_link', '')
+                            enrollment.locking_system_id = enrollment_result.get('enrollment_id', '')
+                            enrollment.save()
+                            logger.info(f"[DeviceEnrollment] Enrolled IMEI {imei} on patch (success)")
+                        else:
+                            enrollment.enrollment_status = 'FAILED'
+                            enrollment.enrollment_failed_reason = enrollment_result.get('error', 'Unknown error')
+                            enrollment.save()
+                            logger.error(f"[DeviceEnrollment] Enrollment failed for IMEI {imei} on patch: {enrollment_result.get('error')}")
+
             serialized_plan = plan if plan else get_transient_plan_from_application(plan_id)
             return Response({
                 "status": "success",
@@ -1170,6 +1246,39 @@ class FinancePlanActivateAPIView(APIView):
             customer = credit_app.customer
             customer.status = "ACTIVE"
             customer.save(update_fields=["status"])
+
+            # Ensure DeviceEnrollmentCustomer is created at loan activation/disbursal if it has an IMEI and not already present
+            if credit_app.device_imei:
+                from customer_device.models import DeviceEnrollmentCustomer
+                enrollment = DeviceEnrollmentCustomer.objects.filter(finance_plan=plan).first()
+                if not enrollment:
+                    device_model = plan.device
+                    device_brand_name = device_model.brand.name if device_model and device_model.brand else "Unknown"
+                    
+                    enrollment = DeviceEnrollmentCustomer.objects.create(
+                        finance_plan=plan,
+                        customer=customer,
+                        imei=credit_app.device_imei,
+                        device_brand_name=device_brand_name,
+                        device_model=device_model,
+                        enrollment_status='NOT_STARTED'
+                    )
+                    # determine_locking_system is automatically run on save()
+                    
+                    # Initiate enrollment
+                    from customer_device.views import DeviceEnrollmentAPIView
+                    view = DeviceEnrollmentAPIView()
+                    enrollment_result = view._initiate_enrollment(enrollment, customer)
+                    if enrollment_result.get('success'):
+                        enrollment.enrollment_status = 'QR_GENERATED'
+                        enrollment.enrollment_qr_code = enrollment_result.get('qr_code', '')
+                        enrollment.enrollment_link = enrollment_result.get('enrollment_link', '')
+                        enrollment.locking_system_id = enrollment_result.get('enrollment_id', '')
+                        enrollment.save()
+                    else:
+                        enrollment.enrollment_status = 'FAILED'
+                        enrollment.enrollment_failed_reason = enrollment_result.get('error', 'Unknown error')
+                        enrollment.save()
 
             # Generate and save the PDF agreement to the CreditApplication model
             from django.core.files.base import ContentFile
@@ -4315,7 +4424,7 @@ class YappyIPNView(APIView):
 # ACCOUNTING VIEWS (OLA CARS STYLE)
 # ========================================
 
-from .models import AccountingCode, Invoice, PaymentReceived, LedgerEntry, Tax, BankAccount, Vendor, Expense, Bill, PaymentMade, CreditNote, JournalEntry
+from .models import AccountingCode, Invoice, PaymentReceived, LedgerEntry, Tax, BankAccount, Vendor, Expense, Bill, PaymentMade, CreditNote, JournalEntry, LoanDisbursement, CustomerLoanLedgerEntry, MerchantSettlement, MerchantLedgerEntry
 from .serializers import (
     AccountingCodeSerializer,
     InvoiceSerializer,
@@ -4328,7 +4437,11 @@ from .serializers import (
     BillSerializer,
     PaymentMadeSerializer,
     CreditNoteSerializer,
-    JournalEntrySerializer
+    JournalEntrySerializer,
+    LoanDisbursementSerializer,
+    CustomerLoanLedgerEntrySerializer,
+    MerchantSettlementSerializer,
+    MerchantLedgerEntrySerializer
 )
 from .signals import seed_default_accounting_codes
 
@@ -5317,6 +5430,243 @@ class FinanceContractsPDFView(APIView):
             return response
         except Exception as e:
             return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class LoanDisbursementAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        
+        finance_plan_id = request.query_params.get("finance_plan_id")
+        qs = LoanDisbursement.objects.all().select_related('finance_plan__credit_application__customer', 'finance_plan__store')
+        if finance_plan_id:
+            qs = qs.filter(finance_plan_id=finance_plan_id)
+        
+        serializer = LoanDisbursementSerializer(qs, many=True)
+        return Response({"status": "success", "data": serializer.data})
+
+    def post(self, request):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        
+        plan_id = request.data.get("finance_plan_id")
+        amount = request.data.get("amount")
+        description = request.data.get("description")
+
+        if not plan_id or not amount:
+            return Response({"status": "error", "message": "finance_plan_id and amount are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from finance.accounting_services import AccountingEngineService
+            disb = AccountingEngineService.disburse_loan(plan_id, amount, description)
+            return Response({
+                "status": "success", 
+                "message": "Loan disbursed successfully.",
+                "data": LoanDisbursementSerializer(disb).data
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class LoanDisbursementReverseAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request, pk):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            from finance.accounting_services import AccountingEngineService
+            disb = AccountingEngineService.reverse_disbursement(pk)
+            return Response({
+                "status": "success",
+                "message": "Disbursement reversed successfully.",
+                "data": LoanDisbursementSerializer(disb).data
+            })
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MerchantSettlementAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        store_id = request.query_params.get("store_id")
+        status_filter = request.query_params.get("status")
+        
+        qs = MerchantSettlement.objects.all().select_related('store', 'finance_plan__credit_application__customer', 'bank_account')
+        if store_id:
+            qs = qs.filter(store_id=store_id)
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        serializer = MerchantSettlementSerializer(qs, many=True)
+        return Response({"status": "success", "data": serializer.data})
+
+
+class MerchantSettlementPayAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request, pk):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        bank_account_id = request.data.get("bank_account_id")
+        payment_reference = request.data.get("payment_reference")
+        date_str = request.data.get("date")
+
+        if not bank_account_id or not payment_reference:
+            return Response({"status": "error", "message": "bank_account_id and payment_reference are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        date_val = None
+        if date_str:
+            try:
+                import datetime
+                date_val = timezone.make_aware(datetime.datetime.strptime(date_str, "%Y-%m-%d"))
+            except ValueError:
+                pass
+
+        try:
+            from finance.accounting_services import AccountingEngineService
+            settlement = AccountingEngineService.settle_merchant(pk, bank_account_id, payment_reference, date_val)
+            return Response({
+                "status": "success",
+                "message": "Merchant settlement payment processed.",
+                "data": MerchantSettlementSerializer(settlement).data
+            })
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MerchantSettlementCancelAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request, pk):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            from finance.accounting_services import AccountingEngineService
+            settlement = AccountingEngineService.cancel_settlement(pk)
+            return Response({
+                "status": "success",
+                "message": "Settlement cancelled successfully.",
+                "data": MerchantSettlementSerializer(settlement).data
+            })
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MerchantLedgerAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request, store_id):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        from store.models import Store
+        store = Store.objects.filter(id=store_id).first()
+        if not store:
+            return Response({"status": "error", "message": "Store not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        ledger_entries = MerchantLedgerEntry.objects.filter(store=store).select_related('finance_plan__credit_application__customer').order_by('-entry_date', '-id')
+        last_entry = ledger_entries.first()
+        outstanding_balance = last_entry.outstanding_balance if last_entry else Decimal('0.00')
+
+        return Response({
+            "status": "success",
+            "data": {
+                "store": {
+                    "id": store.id,
+                    "name": store.name,
+                    "code": store.code,
+                    "outstanding_balance": str(outstanding_balance)
+                },
+                "entries": MerchantLedgerEntrySerializer(ledger_entries, many=True).data
+            }
+        })
+
+
+class CustomerLoanLedgerAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request, plan_id):
+        if request.user.role not in ["admin", "global_manager", "financial_manager", "salesperson", "store_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        from .models import FinancePlan
+        plan = FinancePlan.objects.filter(id=plan_id).first()
+        if not plan:
+            return Response({"status": "error", "message": "Finance Plan not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        ledger_entries = CustomerLoanLedgerEntry.objects.filter(finance_plan=plan).order_by('-entry_date', '-id')
+        last_entry = ledger_entries.first()
+        
+        balances = {
+            "outstanding_principal": str(last_entry.outstanding_principal) if last_entry else "0.00",
+            "outstanding_interest": str(last_entry.outstanding_interest) if last_entry else "0.00",
+            "outstanding_penalties": str(last_entry.outstanding_penalties) if last_entry else "0.00",
+            "outstanding_balance": str(last_entry.outstanding_balance) if last_entry else "0.00",
+        }
+
+        disbursed_total = sum(d.amount for d in LoanDisbursement.objects.filter(finance_plan=plan, status='COMPLETED'))
+
+        return Response({
+            "status": "success",
+            "data": {
+                "finance_plan_id": plan.id,
+                "amount_to_finance": str(plan.amount_to_finance),
+                "total_disbursed": str(disbursed_total),
+                "balances": balances,
+                "entries": CustomerLoanLedgerEntrySerializer(ledger_entries, many=True).data
+            }
+        })
+
+
+class LoanManualActionAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request, plan_id):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        action_type = request.data.get("action_type") # CHARGE_INTEREST, CHARGE_PENALTY, WRITE_OFF
+        amount = request.data.get("amount")
+        description = request.data.get("description")
+
+        if not action_type:
+            return Response({"status": "error", "message": "action_type is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from finance.accounting_services import AccountingEngineService
+            if action_type == 'CHARGE_INTEREST':
+                if not amount:
+                    return Response({"status": "error", "message": "amount is required."}, status=status.HTTP_400_BAD_REQUEST)
+                entry = AccountingEngineService.charge_interest_or_penalty(plan_id, amount, 'INTEREST', description)
+                msg = "Interest charged successfully."
+            elif action_type == 'CHARGE_PENALTY':
+                if not amount:
+                    return Response({"status": "error", "message": "amount is required."}, status=status.HTTP_400_BAD_REQUEST)
+                entry = AccountingEngineService.charge_interest_or_penalty(plan_id, amount, 'PENALTY', description)
+                msg = "Penalty charged successfully."
+            elif action_type == 'WRITE_OFF':
+                entry = AccountingEngineService.write_off_loan(plan_id, description)
+                msg = "Loan written off successfully."
+            else:
+                return Response({"status": "error", "message": "Invalid action_type."}, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({
+                "status": "success",
+                "message": msg,
+                "data": CustomerLoanLedgerEntrySerializer(entry).data
+            })
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 

@@ -262,3 +262,169 @@ class TestDraftAndActivePlanLogic:
         # Verify notifications called
         assert mock_send_sms.called is True
         assert mock_email_send.called is True
+
+    def test_patch_transient_plan_imei_auto_enrollment(self, setup_data):
+        from products.models import ProductCategory, Brand, ProductModel
+        from customer_device.models import DeviceEnrollmentCustomer
+
+        # 1. Setup brand and product
+        cat = ProductCategory.objects.create(name="Mobile Phones")
+        brand = Brand.objects.create(name="Xiaomi", category=cat)
+        device = ProductModel.objects.create(
+            brand=brand, 
+            model_name="Redmi Note 12",
+            suggested_price=Decimal("250.00"),
+            minimum_price_to_sell=Decimal("200.00")
+        )
+
+        # Associate device and details with credit application
+        credit_app = setup_data["credit_app"]
+        credit_app.device = device
+        credit_app.device_price = Decimal("250.00")
+        credit_app.initial_payment = Decimal("50.00")
+        credit_app.number_of_installments = 6
+        credit_app.installment_frequency_days = 30
+        credit_app.amount_to_finance = Decimal("200.00")
+        credit_app.save()
+
+        client = APIClient()
+        client.force_authenticate(user=setup_data["user"])
+
+        # Patch IMEI to the transient plan
+        patch_url = reverse("finance-plan-detail", kwargs={"plan_id": credit_app.id})
+        res = client.patch(patch_url, {"imei": "987654321012345"}, format="json")
+        
+        assert res.status_code == status.HTTP_200_OK
+        assert res.data["status"] == "success"
+
+        # Check that FinancePlan was saved in DB
+        assert FinancePlan.objects.filter(id=credit_app.id).exists() is True
+        plan = FinancePlan.objects.get(id=credit_app.id)
+        assert plan.status == "DRAFT"
+
+        # Check that DeviceEnrollmentCustomer was created
+        assert DeviceEnrollmentCustomer.objects.filter(finance_plan=plan).exists() is True
+        enrollment = DeviceEnrollmentCustomer.objects.get(finance_plan=plan)
+        assert enrollment.imei == "987654321012345"
+        assert enrollment.locking_system == "EQUALITY"
+        assert enrollment.enrollment_status == "QR_GENERATED"
+        assert enrollment.locking_system_id == "EQ-987654321012345"
+
+    def test_patch_transient_plan_imei_samsung_knox_enrollment(self, setup_data):
+        from products.models import ProductCategory, Brand, ProductModel
+        from customer_device.models import DeviceEnrollmentCustomer
+
+        cat = ProductCategory.objects.create(name="Mobile Phones")
+        brand = Brand.objects.create(name="Samsung", category=cat)
+        device = ProductModel.objects.create(
+            brand=brand, 
+            model_name="Galaxy S24",
+            suggested_price=Decimal("800.00"),
+            minimum_price_to_sell=Decimal("700.00")
+        )
+
+        credit_app = setup_data["credit_app"]
+        credit_app.device = device
+        credit_app.device_price = Decimal("800.00")
+        credit_app.initial_payment = Decimal("160.00")
+        credit_app.number_of_installments = 6
+        credit_app.installment_frequency_days = 30
+        credit_app.amount_to_finance = Decimal("640.00")
+        credit_app.save()
+
+        client = APIClient()
+        client.force_authenticate(user=setup_data["user"])
+
+        # Patch IMEI to the transient plan
+        patch_url = reverse("finance-plan-detail", kwargs={"plan_id": credit_app.id})
+        
+        # Mock KNOXService.enroll_device to return successful mock response
+        with patch('customer_device.knox_service.KNOXService.enroll_device') as mock_enroll:
+            mock_enroll.return_value = {
+                'success': True,
+                'enrollment_id': 'KNOX-S24-12345',
+                'qr_code': 'https://samsungknox.com/qr/12345',
+                'enrollment_link': 'https://samsungknox.com/enroll/12345',
+                'error': None
+            }
+            res = client.patch(patch_url, {"imei": "111112222233333"}, format="json")
+            
+            assert res.status_code == status.HTTP_200_OK
+            assert res.data["status"] == "success"
+
+        # Check that DeviceEnrollmentCustomer was created
+        plan = FinancePlan.objects.get(id=credit_app.id)
+        enrollment = DeviceEnrollmentCustomer.objects.get(finance_plan=plan)
+        assert enrollment.imei == "111112222233333"
+        assert enrollment.locking_system == "KNOX"
+        assert enrollment.enrollment_status == "QR_GENERATED"
+
+    @patch('customer.sms_utils.send_sms')
+    @patch('django.core.mail.EmailMessage.send')
+    def test_activation_disbursal_creates_device_enrollment(self, mock_email_send, mock_send_sms, setup_data):
+        from products.models import ProductCategory, Brand, ProductModel
+        from customer_device.models import DeviceEnrollmentCustomer
+
+        # 1. Setup brand and product
+        cat = ProductCategory.objects.create(name="Mobile Phones")
+        brand = Brand.objects.create(name="Samsung", category=cat)
+        device = ProductModel.objects.create(
+            brand=brand, 
+            model_name="Galaxy S24",
+            suggested_price=Decimal("800.00"),
+            minimum_price_to_sell=Decimal("700.00")
+        )
+
+        credit_app = setup_data["credit_app"]
+        credit_app.device = device
+        credit_app.device_price = Decimal("800.00")
+        credit_app.initial_payment = Decimal("160.00")
+        credit_app.number_of_installments = 6
+        credit_app.installment_frequency_days = 30
+        credit_app.amount_to_finance = Decimal("640.00")
+        credit_app.device_imei = "555556666677777"
+        credit_app.save()
+
+        plan = FinancePlan.objects.create(
+            credit_application=credit_app,
+            credit_score=credit_app.customer.credit_scores.first(),
+            apc_score=600,
+            risk_tier="TIER_A",
+            device=device,
+            device_price=Decimal("800.00"),
+            actual_down_payment=Decimal("160.00"),
+            selected_term=6,
+            installment_frequency_days=30,
+            monthly_installment=Decimal("120.00"),
+            total_amount_payable=Decimal("720.00"),
+            customer_monthly_income=Decimal("1500.00"),
+            payment_capacity_factor=Decimal("0.20"),
+            maximum_allowed_installment=Decimal("300.00"),
+            minimum_down_payment_percentage=Decimal("20.00"),
+            amount_to_finance=Decimal("640.00"),
+            created_by=setup_data["user"],
+            status="DRAFT"
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=setup_data["user"])
+
+        # Test activation / disbursal
+        activate_url = reverse("finance-plan-activate", kwargs={"plan_id": plan.id})
+        
+        with patch('customer_device.knox_service.KNOXService.enroll_device') as mock_enroll:
+            mock_enroll.return_value = {
+                'success': True,
+                'enrollment_id': 'KNOX-ACT-999',
+                'qr_code': 'https://samsungknox.com/qr/999',
+                'enrollment_link': 'https://samsungknox.com/enroll/999',
+                'error': None
+            }
+            res = client.post(activate_url)
+            assert res.status_code == status.HTTP_200_OK
+
+        # Verify DeviceEnrollmentCustomer was created automatically
+        assert DeviceEnrollmentCustomer.objects.filter(finance_plan=plan).exists() is True
+        enrollment = DeviceEnrollmentCustomer.objects.get(finance_plan=plan)
+        assert enrollment.imei == "555556666677777"
+        assert enrollment.locking_system == "KNOX"

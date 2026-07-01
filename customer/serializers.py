@@ -17,6 +17,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     registration_status = serializers.SerializerMethodField()
     next_step_label = serializers.SerializerMethodField()
     next_step_url = serializers.SerializerMethodField()
+    salary = serializers.SerializerMethodField()
+    employer = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -28,6 +30,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             'last_name', 
             'email', 
             'phone_number', 
+            'employer',
+            'salary',
             'status',
             'otp_verified',
             'latitude',
@@ -88,6 +92,38 @@ class CustomerSerializer(serializers.ModelSerializer):
     def get_apc_score(self, obj):
         latest_score = obj.credit_scores.order_by('-created_at').first()
         return latest_score.apc_score if latest_score else None
+
+    def get_salary(self, obj):
+        from customer.models import CustomerIncome
+        income_obj = CustomerIncome.objects.filter(document_id=obj.document_number).first()
+        if income_obj:
+            return float(income_obj.monthly_income)
+        # Fallback to SQLite cache database
+        from customer.utils import get_customer_monthly_income
+        val = get_customer_monthly_income(obj.document_number)
+        return float(val) if val else 0.0
+
+    def get_employer(self, obj):
+        from customer.models import CustomerIncome
+        income_obj = CustomerIncome.objects.filter(document_id=obj.document_number).first()
+        if income_obj:
+            return income_obj.employer
+        # Fallback to SQLite cache database
+        from django.conf import settings
+        import sqlite3
+        db_path = getattr(settings, "EXCEL_CACHE_DB", None)
+        if db_path:
+            try:
+                conn = sqlite3.connect(db_path, timeout=5)
+                cur = conn.cursor()
+                cur.execute("SELECT employer FROM income_data WHERE TRIM(document_id)=? LIMIT 1", (str(obj.document_number).strip(),))
+                row = cur.fetchone()
+                conn.close()
+                if row:
+                    return row[0] or ""
+            except Exception:
+                pass
+        return ""
 
     def _get_registration_details(self, obj):
         if hasattr(obj, '_cached_registration_details'):
@@ -159,11 +195,22 @@ class CustomerSerializer(serializers.ModelSerializer):
         # Map status dynamically on each customer based on latest_app.current_step
         step = latest_app.current_step
         
+        has_disbursement = False
+        if latest_app.status == "APPROVED" and latest_app.device_imei:
+            from finance.models import LoanDisbursement
+            if hasattr(latest_app, 'finance_plan') and latest_app.finance_plan:
+                has_disbursement = LoanDisbursement.objects.filter(
+                    finance_plan=latest_app.finance_plan,
+                    status='COMPLETED'
+                ).exists()
+
         if latest_app.status == "APPROVED":
             if not latest_app.device_imei:
                 status_str = "Device Enrollment Pending"
-            else:
+            elif has_disbursement:
                 status_str = "Disbursed"
+            else:
+                status_str = "Approved"
         elif step == 1 or step == 2:
             status_str = "APC Checked"
         elif step == 3:
@@ -181,11 +228,18 @@ class CustomerSerializer(serializers.ModelSerializer):
         else:
             status_str = "APC Checked"
 
-        res = {
-            "status": status_str,
-            "next_step_label": "Resume",
-            "next_step_url": "/sellerPortal/createApplicant"
-        }
+        if status_str in ["Approved", "Disbursed"]:
+            res = {
+                "status": status_str,
+                "next_step_label": "Completed",
+                "next_step_url": None
+            }
+        else:
+            res = {
+                "status": status_str,
+                "next_step_label": "Resume",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
         
         obj._cached_registration_details = res
         return res

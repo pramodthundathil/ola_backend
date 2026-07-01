@@ -52,6 +52,7 @@ class Customer(models.Model):
         ('ACTIVE', 'Active'),
         ('INACTIVE', 'Inactive'),
         ('BLOCKED', 'Blocked'),
+        ('DRAFT', 'Draft'),
     ]
     
     
@@ -66,7 +67,7 @@ class Customer(models.Model):
     email = models.EmailField()
     phone_number = models.CharField(max_length=20)
     
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     
     # Salesperson who created this customer
     latitude = models.DecimalField(max_digits=10, decimal_places=6, null=True, blank=True)
@@ -880,7 +881,7 @@ class DeviceEnrollment(models.Model):
     
     Integrations:
     - Samsung KNOX for Samsung devices
-    - NuovoPay for other Android devices
+    - Equality for other Android devices
     """
     
     ENROLLMENT_STATUS_CHOICES = [
@@ -893,7 +894,7 @@ class DeviceEnrollment(models.Model):
     
     LOCKING_SYSTEM_CHOICES = [
         ('KNOX', 'Samsung KNOX'),
-        ('NUOVOPAY', 'NuovoPay'),
+        ('EQUALITY', 'Equality'),
         ('NONE', 'None'),
     ]
     
@@ -932,7 +933,7 @@ class DeviceEnrollment(models.Model):
         max_length=100,
         null=True,
         blank=True,
-        help_text="Reference ID from KNOX or NuovoPay"
+        help_text="Reference ID from KNOX or Equality"
     )
     is_locked = models.BooleanField(default=False)
     lock_applied_at = models.DateTimeField(null=True, blank=True)
@@ -966,7 +967,7 @@ class DeviceEnrollment(models.Model):
         if 'samsung' in self.device_brand.lower():
             self.locking_system = 'KNOX'
         else:
-            self.locking_system = 'NUOVOPAY'
+            self.locking_system = 'EQUALITY'
         return self.locking_system
 
 

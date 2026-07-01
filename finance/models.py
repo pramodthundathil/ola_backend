@@ -1269,6 +1269,47 @@ class BankAccount(models.Model):
         db_table = 'bank_accounts'
         ordering = ['account_name']
 
+    def save(self, *args, **kwargs):
+        if not self.accounting_code:
+            # Auto-generate a corresponding accounting code (Chart of Account) for this bank
+            acc_suffix = self.account_number[-4:] if len(self.account_number) >= 4 else self.account_number
+            coa_name = f"{self.bank_name} - {self.account_name} ({acc_suffix})"
+            if len(coa_name) > 100:
+                coa_name = coa_name[:100]
+
+            # Find next unique code in 11xx series (Cash & Bank category is ASSET)
+            codes = AccountingCode.objects.filter(code__startswith='11')
+            existing_numbers = []
+            for c in codes:
+                if len(c.code) == 4:
+                    try:
+                        existing_numbers.append(int(c.code))
+                    except ValueError:
+                        pass
+
+            if not existing_numbers:
+                next_code = "1101"
+            else:
+                next_code = str(max(existing_numbers) + 1)
+
+            # Fallback if next_code exceeds "1199" or already exists
+            if int(next_code) > 1199 or AccountingCode.objects.filter(code=next_code).exists():
+                for i in range(1101, 10000):
+                    if not AccountingCode.objects.filter(code=str(i)).exists():
+                        next_code = str(i)
+                        break
+
+            # Create the accounting code
+            ac = AccountingCode.objects.create(
+                code=next_code,
+                name=coa_name,
+                category="ASSET",
+                is_active=True
+            )
+            self.accounting_code = ac
+
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.account_name} - {self.bank_name} ({self.account_number})"
 
@@ -1463,16 +1504,114 @@ class PaymentReceived(models.Model):
 
                 total_applied += applied_amount
 
-                # Credit Accounts Receivable (Asset Decreases) for the applied amount
-                if ar_code:
-                    LedgerEntry.objects.create(
-                        payment_received=self,
-                        accounting_code=ar_code,
+                # Check if this invoice is linked to a finance plan that has been disbursed
+                has_loan_ledger = False
+                if invoice.finance_plan:
+                    has_loan_ledger = CustomerLoanLedgerEntry.objects.filter(finance_plan=invoice.finance_plan).exists()
+
+                if has_loan_ledger:
+                    # Retrieve last subledger entry to calculate portions
+                    last_cust_entry = CustomerLoanLedgerEntry.objects.filter(finance_plan=invoice.finance_plan).order_by('-entry_date', '-id').first()
+                    
+                    # Allocate payment to penalty first, then interest, then principal
+                    rem = applied_amount
+                    penalty_portion = min(rem, last_cust_entry.outstanding_penalties)
+                    rem -= penalty_portion
+                    interest_portion = min(rem, last_cust_entry.outstanding_interest)
+                    rem -= interest_portion
+                    principal_portion = rem
+
+                    op_p = max(Decimal('0.00'), last_cust_entry.outstanding_principal - principal_portion)
+                    op_i = max(Decimal('0.00'), last_cust_entry.outstanding_interest - interest_portion)
+                    op_pen = max(Decimal('0.00'), last_cust_entry.outstanding_penalties - penalty_portion)
+                    op_bal = op_p + op_i + op_pen
+
+                    # Subledger Entry
+                    cust_ledger = CustomerLoanLedgerEntry.objects.create(
+                        finance_plan=invoice.finance_plan,
+                        customer=invoice.finance_plan.customer,
+                        entry_type='EMI_PAYMENT',
                         type='CREDIT',
                         amount=applied_amount,
-                        description=f"AR cleared for invoice {invoice.invoice_number} via payment {self.payment_number}",
+                        principal_amount=principal_portion,
+                        interest_amount=interest_portion,
+                        penalty_amount=penalty_portion,
+                        outstanding_principal=op_p,
+                        outstanding_interest=op_i,
+                        outstanding_penalties=op_pen,
+                        outstanding_balance=op_bal,
+                        reference_number=self.payment_number,
+                        description=f"Repayment: Principal={principal_portion}, Interest={interest_portion}, Penalty={penalty_portion}",
                         entry_date=self.payment_date
                     )
+
+                    # Credit legs:
+                    # 1. Customer Loan Receivable (1300)
+                    if principal_portion > 0:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            customer_loan_ledger_entry=cust_ledger,
+                            accounting_code=AccountingCode.objects.get(code="1300"),
+                            type='CREDIT',
+                            amount=principal_portion,
+                            description=f"Principal loan receivable reduction for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
+                            entry_date=self.payment_date
+                        )
+                    
+                    # 2. Interest Revenue (4200)
+                    if interest_portion > 0:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            customer_loan_ledger_entry=cust_ledger,
+                            accounting_code=AccountingCode.objects.get(code="4200"),
+                            type='CREDIT',
+                            amount=interest_portion,
+                            description=f"Interest revenue recognized for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
+                            entry_date=self.payment_date
+                        )
+
+                    # 3. Penalty Revenue (4300)
+                    if penalty_portion > 0:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            customer_loan_ledger_entry=cust_ledger,
+                            accounting_code=AccountingCode.objects.get(code="4300"),
+                            type='CREDIT',
+                            amount=penalty_portion,
+                            description=f"Penalty revenue recognized for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
+                            entry_date=self.payment_date
+                        )
+
+                    # Check Closure
+                    if op_bal <= 0:
+                        invoice.finance_plan.status = "CLOSED"
+                        invoice.finance_plan.save(update_fields=['status'])
+                        
+                        CustomerLoanLedgerEntry.objects.create(
+                            finance_plan=invoice.finance_plan,
+                            customer=invoice.finance_plan.customer,
+                            entry_type='CLOSURE',
+                            type='CREDIT',
+                            amount=Decimal('0.00'),
+                            outstanding_principal=Decimal('0.00'),
+                            outstanding_interest=Decimal('0.00'),
+                            outstanding_penalties=Decimal('0.00'),
+                            outstanding_balance=Decimal('0.00'),
+                            description="Loan marked as CLOSED. Fully settled.",
+                            entry_date=timezone.now()
+                        )
+
+                else:
+                    # Credit Accounts Receivable (Asset Decreases) for the applied amount
+                    if ar_code:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            accounting_code=ar_code,
+                            type='CREDIT',
+                            amount=applied_amount,
+                            description=f"AR cleared for invoice {invoice.invoice_number} via payment {self.payment_number}",
+                            entry_date=self.payment_date
+                        )
 
                 # Dispatch to financing logic
                 if invoice.emi_schedule:
@@ -1529,6 +1668,12 @@ class LedgerEntry(models.Model):
     credit_note = models.ForeignKey('CreditNote', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
     journal_entry = models.ForeignKey('JournalEntry', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
     
+    # Traceability additions
+    disbursement = models.ForeignKey('LoanDisbursement', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    settlement = models.ForeignKey('MerchantSettlement', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    customer_loan_ledger_entry = models.ForeignKey('CustomerLoanLedgerEntry', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+    merchant_ledger_entry = models.ForeignKey('MerchantLedgerEntry', on_delete=models.CASCADE, null=True, blank=True, related_name='ledger_entries')
+
     accounting_code = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='ledger_entries')
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -1542,6 +1687,144 @@ class LedgerEntry(models.Model):
 
     def __str__(self):
         return f"{self.type} of {self.amount} on {self.accounting_code.code} ({self.entry_date})"
+
+
+class LoanDisbursement(models.Model):
+    """
+    Tracks disbursements made against a financing plan
+    """
+    STATUS_CHOICES = [
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    finance_plan = models.ForeignKey(FinancePlan, on_delete=models.CASCADE, related_name='disbursements')
+    disbursement_number = models.CharField(max_length=50, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    disbursed_at = models.DateTimeField(default=timezone.now)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='COMPLETED')
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'loan_disbursements'
+        ordering = ['-disbursed_at', '-id']
+
+    def __str__(self):
+        return f"Disbursement {self.disbursement_number} of {self.amount} for Plan {self.finance_plan_id}"
+
+
+class CustomerLoanLedgerEntry(models.Model):
+    """
+    Subledger tracking detailed loan balances and transactions independently
+    """
+    TYPE_CHOICES = [
+        ('DEBIT', 'Debit'),
+        ('CREDIT', 'Credit'),
+    ]
+    ENTRY_TYPE_CHOICES = [
+        ('DISBURSEMENT', 'Disbursement'),
+        ('EMI_PAYMENT', 'EMI Payment'),
+        ('INTEREST_ACCRUAL', 'Interest Accrual'),
+        ('PENALTY_CHARGED', 'Penalty Charged'),
+        ('WRITE_OFF', 'Write Off'),
+        ('REVERSAL', 'Reversal'),
+        ('CLOSURE', 'Loan Closure'),
+    ]
+    finance_plan = models.ForeignKey(FinancePlan, on_delete=models.CASCADE, related_name='loan_ledger_entries')
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='loan_ledger_entries')
+    
+    entry_type = models.CharField(max_length=30, choices=ENTRY_TYPE_CHOICES)
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    # Balance components in this transaction
+    principal_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    interest_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    penalty_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    
+    # Cumulative balances after this transaction
+    outstanding_principal = models.DecimalField(max_digits=10, decimal_places=2)
+    outstanding_interest = models.DecimalField(max_digits=10, decimal_places=2)
+    outstanding_penalties = models.DecimalField(max_digits=10, decimal_places=2)
+    outstanding_balance = models.DecimalField(max_digits=10, decimal_places=2) # Principal + Interest + Penalty
+    
+    reference_number = models.CharField(max_length=50, blank=True, null=True)
+    description = models.TextField()
+    entry_date = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'customer_loan_ledger_entries'
+        ordering = ['-entry_date', '-id']
+
+    def __str__(self):
+        return f"{self.entry_type} - {self.type} of {self.amount} (Bal: {self.outstanding_balance}) for Plan {self.finance_plan_id}"
+
+
+class MerchantSettlement(models.Model):
+    """
+    Tracks settlements created for stores (merchants) representing what is payable to them
+    """
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('PAID', 'Paid'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    store = models.ForeignKey('store.Store', on_delete=models.CASCADE, related_name='settlements')
+    finance_plan = models.ForeignKey(FinancePlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='settlements')
+    settlement_number = models.CharField(max_length=50, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    
+    payment_reference = models.CharField(max_length=100, blank=True, null=True)
+    settled_at = models.DateTimeField(blank=True, null=True)
+    bank_account = models.ForeignKey(BankAccount, on_delete=models.SET_NULL, null=True, blank=True, related_name='settlements')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'merchant_settlements'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Settlement {self.settlement_number} - {self.store.name} ({self.status})"
+
+
+class MerchantLedgerEntry(models.Model):
+    """
+    Subledger tracking detailed merchant payable balances and settlement history
+    """
+    TYPE_CHOICES = [
+        ('DEBIT', 'Debit'), # Reduces Payable liability
+        ('CREDIT', 'Credit'), # Increases Payable liability
+    ]
+    ENTRY_TYPE_CHOICES = [
+        ('SETTLEMENT_CREATION', 'Settlement Creation'),
+        ('SETTLEMENT_PAYMENT', 'Settlement Payment'),
+        ('CANCELLATION', 'Cancellation'),
+    ]
+    store = models.ForeignKey('store.Store', on_delete=models.CASCADE, related_name='merchant_ledger_entries')
+    finance_plan = models.ForeignKey(FinancePlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='merchant_ledger_entries')
+    settlement = models.ForeignKey(MerchantSettlement, on_delete=models.SET_NULL, null=True, blank=True, related_name='merchant_ledger_entries')
+    
+    entry_type = models.CharField(max_length=30, choices=ENTRY_TYPE_CHOICES)
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    payment_reference = models.CharField(max_length=100, blank=True, null=True)
+    outstanding_balance = models.DecimalField(max_digits=10, decimal_places=2) # Rolling outstanding store payable balance
+    
+    description = models.TextField()
+    entry_date = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'merchant_ledger_entries'
+        ordering = ['-entry_date', '-id']
+
+    def __str__(self):
+        return f"Merchant {self.store.name} - {self.entry_type} of {self.amount} (Bal: {self.outstanding_balance})"
 
 
 class Vendor(models.Model):

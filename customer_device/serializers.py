@@ -74,6 +74,42 @@ class DeviceEnrollmentSerializer(serializers.ModelSerializer):
         source='finance_plan.id', 
         read_only=True
     )
+    finance_plan_status = serializers.CharField(
+        source='finance_plan.status', 
+        read_only=True
+    )
+    device_price = serializers.DecimalField(
+        source='finance_plan.device_price',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    amount_to_finance = serializers.DecimalField(
+        source='finance_plan.amount_to_finance',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    actual_down_payment = serializers.DecimalField(
+        source='finance_plan.actual_down_payment',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    selected_term = serializers.IntegerField(
+        source='finance_plan.selected_term',
+        read_only=True
+    )
+    monthly_installment = serializers.DecimalField(
+        source='finance_plan.monthly_installment',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    risk_tier = serializers.CharField(
+        source='finance_plan.risk_tier',
+        read_only=True
+    )
     
     # Device details
     device_name = serializers.SerializerMethodField()
@@ -109,6 +145,13 @@ class DeviceEnrollmentSerializer(serializers.ModelSerializer):
             'customer_document',
             'customer_phone',
             'finance_plan_id',
+            'finance_plan_status',
+            'device_price',
+            'amount_to_finance',
+            'actual_down_payment',
+            'selected_term',
+            'monthly_installment',
+            'risk_tier',
             'imei',
             'device_brand_name',
             'device_brand',
@@ -160,7 +203,7 @@ class DeviceEnrollmentSerializer(serializers.ModelSerializer):
         return (
             obj.enrollment_status == 'COMPLETED' and
             not obj.is_locked and
-            obj.locking_system in ['KNOX', 'NUOVOPAY']
+            obj.locking_system in ['KNOX', 'EQUALITY']
         )
     
     def get_enrollment_days_ago(self, obj):
@@ -181,6 +224,8 @@ class DeviceEnrollmentUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = DeviceEnrollmentCustomer
         fields = [
+            'imei',
+            'locking_system',
             'enrollment_status',
             'enrollment_qr_code',
             'enrollment_link',

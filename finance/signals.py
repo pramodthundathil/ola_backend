@@ -64,3 +64,32 @@ def create_emi_schedule(sender, instance, created, **kwargs):
 
     except Exception as e:
         logger.exception(f"[EMI ERROR] Failed to generate EMI schedule or invoices for FinancePlan ID={instance.id}: {e}")
+
+
+@receiver(post_save, sender='store.Store')
+def create_store_vendor(sender, instance, created, **kwargs):
+    if created:
+        from finance.models import Vendor
+        vendor_name = instance.name
+        if len(vendor_name) > 100:
+            vendor_name = vendor_name[:100]
+            
+        if Vendor.objects.filter(name=vendor_name).exists():
+            vendor_name = f"{vendor_name} ({instance.code})"
+            if len(vendor_name) > 100:
+                vendor_name = vendor_name[:100]
+
+        vendor, _ = Vendor.objects.get_or_create(
+            name=vendor_name,
+            defaults={
+                "contact_name": instance.legal_representative or instance.name,
+                "email": instance.email,
+                "phone": instance.phone,
+                "tax_id": instance.ruc,
+                "is_active": True
+            }
+        )
+        
+        instance.vendor = vendor
+        instance.save(update_fields=['vendor'])
+        logger.info(f"[Store Signal] Linked Vendor ID={vendor.id} to Store ID={instance.id}")

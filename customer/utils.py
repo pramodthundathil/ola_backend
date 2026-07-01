@@ -225,6 +225,14 @@ def get_customer_monthly_income(document_id):
     if not document_id:
         return None
 
+    try:
+        from customer.models import CustomerIncome
+        income_obj = CustomerIncome.objects.filter(document_id=str(document_id).strip()).first()
+        if income_obj:
+            return income_obj.monthly_income
+    except Exception as e:
+        logger.warning(f"Error checking CustomerIncome model: {e}")
+
     db_path = getattr(settings, "EXCEL_CACHE_DB", None)
     if not db_path:
         logger.error("EXCEL_CACHE_DB not configured in settings.")
@@ -282,6 +290,8 @@ class CustomerFilter:
         # ------ APPLY FILTERS ----------
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+        else:
+            queryset = queryset.filter(status__in=['ACTIVE', 'INACTIVE'])
 
         if document_type:
             queryset = queryset.filter(document_type=document_type)

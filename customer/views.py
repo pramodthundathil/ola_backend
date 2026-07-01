@@ -612,6 +612,74 @@ class CustomerManagementView(APIView):
             if serializer.is_valid():
                 updated_customer = serializer.save()
                 
+                # Activate customer if name details are entered
+                if updated_customer.status == 'DRAFT' and updated_customer.first_name and updated_customer.last_name:
+                    updated_customer.status = 'ACTIVE'
+                    updated_customer.save(update_fields=['status'])
+                
+                # Sync manually entered salary and employer to CustomerIncome and SQLite cache
+                salary = request.data.get("salary")
+                employer = request.data.get("employer")
+                if salary is not None or employer is not None:
+                    from customer.models import CustomerIncome
+                    from decimal import Decimal
+                    defaults = {}
+                    if salary is not None:
+                        defaults["monthly_income"] = Decimal(str(salary))
+                    if employer is not None:
+                        defaults["employer"] = str(employer)
+                    
+                    CustomerIncome.objects.update_or_create(
+                        document_id=updated_customer.document_number,
+                        defaults=defaults
+                    )
+                    
+                    # Also update SQLite cache database
+                    from django.conf import settings
+                    import sqlite3
+                    db_path = getattr(settings, "EXCEL_CACHE_DB", None)
+                    if db_path:
+                        try:
+                            conn = sqlite3.connect(db_path, timeout=5)
+                            cur = conn.cursor()
+                            cur.execute("SELECT 1 FROM income_data WHERE TRIM(document_id)=?", (str(updated_customer.document_number).strip(),))
+                            exists = cur.fetchone()
+                            if exists:
+                                if salary is not None and employer is not None:
+                                    cur.execute("UPDATE income_data SET monthly_income=?, employer=? WHERE TRIM(document_id)=?", 
+                                                (float(salary), str(employer), str(updated_customer.document_number).strip()))
+                                elif salary is not None:
+                                    cur.execute("UPDATE income_data SET monthly_income=? WHERE TRIM(document_id)=?", 
+                                                (float(salary), str(updated_customer.document_number).strip()))
+                                elif employer is not None:
+                                    cur.execute("UPDATE income_data SET employer=? WHERE TRIM(document_id)=?", 
+                                                (str(employer), str(updated_customer.document_number).strip()))
+                            else:
+                                cur.execute("INSERT INTO income_data (document_id, employer, monthly_income) VALUES (?, ?, ?)", 
+                                            (str(updated_customer.document_number).strip(), str(employer or ""), float(salary or 0)))
+                            conn.commit()
+                            conn.close()
+                        except Exception as e:
+                            logger.warning(f"Error updating SQLite income cache: {e}")
+                    
+                    # Recalculate AutoFinancePlan if salary changed
+                    if salary is not None:
+                        from finance.models import AutoFinancePlan
+                        from finance.decision_engine import AutoDecisionEngine
+                        auto_plan = AutoFinancePlan.objects.filter(
+                            customer=updated_customer,
+                            has_finance_plan=False
+                        ).order_by("-id").first()
+                        if auto_plan:
+                            auto_plan.customer_monthly_income = Decimal(str(salary))
+                            auto_plan.save(update_fields=["customer_monthly_income"])
+                            try:
+                                engine = AutoDecisionEngine(auto_plan)
+                                engine.run()
+                                logger.info(f"[AutoPlanRecalculated] Salary updated to {salary} for auto plan {auto_plan.id}")
+                            except Exception as e:
+                                logger.warning(f"Error recalculating auto plan: {e}")
+                
 
                 if otp_valid is False:
                     message = "OTP verification failed."
