@@ -1638,28 +1638,109 @@ class CustomerIncomeFileView(APIView):
                 except Exception as e:
                     logger.warning(f"Could not remove existing EXCEL_CACHE_DB file: {e}")
 
-            df = pd.read_excel(file_path)
+            # Check if it is a .xlsx file to use memory-efficient streaming
+            if file_path.lower().endswith('.xlsx'):
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+                sheet = wb.active
+                
+                header = None
+                rows_to_insert = []
+                chunk_size = 10000
+                
+                conn = sqlite3.connect(settings.EXCEL_CACHE_DB)
+                cur = conn.cursor()
+                cur.execute("DROP TABLE IF EXISTS income_data")
+                cur.execute("""
+                    CREATE TABLE income_data (
+                        document_id TEXT,
+                        employer TEXT,
+                        monthly_income REAL
+                    )
+                """)
+                conn.commit()
+                
+                for row in sheet.iter_rows(values_only=True):
+                    if not header:
+                        # Find the headers
+                        header = [str(cell).strip().upper() if cell is not None else "" for cell in row]
+                        try:
+                            cedula_idx = header.index('CEDULA')
+                            salario_idx = header.index('SALARIO')
+                        except ValueError:
+                            wb.close()
+                            raise DRFValidationError("Missing required columns in Excel sheet. 'CEDULA' and 'SALARIO' are required.")
+                        
+                        patrono_idx = header.index('PATRONO') if 'PATRONO' in header else None
+                        continue
+                    
+                    # Ensure the row has enough elements
+                    if len(row) <= max(cedula_idx, salario_idx, patrono_idx or 0):
+                        continue
+                        
+                    cedula = row[cedula_idx]
+                    salario = row[salario_idx]
+                    patrono = row[patrono_idx] if patrono_idx is not None else None
+                    
+                    if cedula is None:
+                        continue
+                    
+                    # Convert salary to float safely
+                    try:
+                        salary_val = float(salario) if salario is not None else 0.0
+                    except (ValueError, TypeError):
+                        salary_val = 0.0
+                        
+                    rows_to_insert.append((str(cedula).strip(), str(patrono or "").strip(), salary_val))
+                    
+                    if len(rows_to_insert) >= chunk_size:
+                        cur.executemany(
+                            "INSERT INTO income_data (document_id, employer, monthly_income) VALUES (?, ?, ?)",
+                            rows_to_insert
+                        )
+                        conn.commit()
+                        rows_to_insert = []
+                
+                if rows_to_insert:
+                    cur.executemany(
+                        "INSERT INTO income_data (document_id, employer, monthly_income) VALUES (?, ?, ?)",
+                        rows_to_insert
+                    )
+                    conn.commit()
+                
+                wb.close()
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_document_id ON income_data (document_id)")
+                conn.commit()
+                try:
+                    conn.execute("VACUUM")
+                except Exception:
+                    pass
+                conn.close()
+            else:
+                # Fallback to pandas for non-.xlsx files (e.g. .xls)
+                df = pd.read_excel(file_path)
+                
+                required_cols = {'CEDULA', 'SALARIO'}
+                df_cols = set(df.columns)
+                missing = required_cols - df_cols
+                if missing:
+                    raise DRFValidationError(f"Missing required columns in Excel sheet: {', '.join(missing)}")
 
-            # Validate columns
-            required_cols = {'CEDULA', 'SALARIO'}
-            df_cols = set(df.columns)
-            missing = required_cols - df_cols
-            if missing:
-                raise DRFValidationError(f"Missing required columns in Excel sheet: {', '.join(missing)}")
+                df = df.rename(columns={
+                    'CEDULA': 'document_id',
+                    'PATRONO': 'employer',
+                    'SALARIO': 'monthly_income'
+                })
 
-            df = df.rename(columns={
-                'CEDULA': 'document_id',
-                'PATRONO': 'employer',
-                'SALARIO': 'monthly_income'
-            })
-
-            conn = sqlite3.connect(settings.EXCEL_CACHE_DB)
-            df.to_sql('income_data', conn, index=False, if_exists='replace')
-            try:
-                conn.execute("VACUUM")
-            except Exception:
-                pass
-            conn.close()
+                conn = sqlite3.connect(settings.EXCEL_CACHE_DB)
+                df.to_sql('income_data', conn, index=False, if_exists='replace')
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_document_id ON income_data (document_id)")
+                try:
+                    conn.execute("VACUUM")
+                except Exception:
+                    pass
+                conn.close()
+                
         except DRFValidationError:
             raise
         except Exception as e:
