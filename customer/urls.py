@@ -29,6 +29,9 @@ urlpatterns = [
     path('veriff/webhook/', views.VeriffWebhookAPIView.as_view(), name='veriff-webhook'),
     path("<int:customer_id>/verification-status/", views.VerificationStatusAPIView.as_view()),
     path('credit-application/step/', views.CreditApplicationStepView.as_view(), name='credit-app-step'),
+    path('notifications/', views.NotificationListAPIView.as_view(), name='notifications-list'),
+    path('notifications/<int:pk>/read/', views.NotificationMarkReadAPIView.as_view(), name='notification-mark-read'),
+    path('credit-application/status/', views.CreditApplicationStatusUpdateView.as_view(), name='credit-app-status-update'),
 ]
 
 

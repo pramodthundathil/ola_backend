@@ -15,7 +15,8 @@ from finance.models import (
     MerchantLedgerEntry,
     Vendor,
     PaymentReceived,
-    PaymentMade
+    PaymentMade,
+    Bill
 )
 
 logger = logging.getLogger(__name__)
@@ -24,21 +25,25 @@ def ensure_chart_accounts():
     """
     Ensures that standard chart of account codes required for loan processing exist.
     """
-    # 1300 - Customer Loan Receivable (Asset)
-    AccountingCode.objects.get_or_create(
-        code="1300",
-        defaults={"name": "Customer Loan Receivable", "category": "ASSET", "is_active": True}
-    )
-    # 4300 - Penalty Revenue (Revenue)
-    AccountingCode.objects.get_or_create(
-        code="4300",
-        defaults={"name": "Penalty Revenue", "category": "REVENUE", "is_active": True}
-    )
-    # 6200 - Bad Debt Write-off Expense (Expense)
-    AccountingCode.objects.get_or_create(
-        code="6200",
-        defaults={"name": "Bad Debt Write-off Expense", "category": "EXPENSE", "is_active": True}
-    )
+    from finance.models import AccountingCode
+    DEFAULT_CODES = [
+        {"code": "1100", "name": "Cash & Bank", "category": "ASSET"},
+        {"code": "1200", "name": "EMI Receivable - Customer", "category": "ASSET"},
+        {"code": "1300", "name": "Customer Loan Receivable", "category": "ASSET"},
+        {"code": "2100", "name": "Accounts Payable", "category": "LIABILITY"},
+        {"code": "2500", "name": "Installment Due (Principal) / Loan Installment Payable", "category": "LIABILITY"},
+        {"code": "4200", "name": "Interest Income", "category": "REVENUE"},
+        {"code": "4300", "name": "Penalty Income", "category": "REVENUE"},
+        {"code": "6200", "name": "Bad Debt Write-off Expense", "category": "EXPENSE"},
+    ]
+    for item in DEFAULT_CODES:
+        ac, created = AccountingCode.objects.get_or_create(
+            code=item["code"],
+            defaults={"name": item["name"], "category": item["category"], "is_active": True}
+        )
+        if not created and ac.name != item["name"]:
+            ac.name = item["name"]
+            ac.save(update_fields=["name"])
 
 
 class AccountingEngineService:
@@ -95,6 +100,14 @@ class AccountingEngineService:
             status='COMPLETED',
             description=description or f"Disbursement of {amount} for plan {plan.id}"
         )
+
+        # Update FinancePlan model status fields directly
+        plan.disbursement_status = 'DISBURSED'
+        plan.disbursed_at = disbursement.disbursed_at
+        plan.save(update_fields=['disbursement_status', 'disbursed_at'])
+
+        # Transition related EMI schedules from DRAFT to UPCOMING
+        plan.emi_schedule.filter(status='DRAFT').update(status='UPCOMING')
 
         # Accounts
         ar_loan_code = AccountingCode.objects.get(code="1300")
@@ -168,13 +181,67 @@ class AccountingEngineService:
             status='PENDING'
         )
 
+        # Create connected Bill
+        vendor = getattr(store, 'vendor', None)
+        if not vendor:
+            vendor_name = store.name
+            if len(vendor_name) > 100:
+                vendor_name = vendor_name[:100]
+            if Vendor.objects.filter(name=vendor_name).exists():
+                vendor_name = f"{vendor_name} ({store.code})"
+                if len(vendor_name) > 100:
+                    vendor_name = vendor_name[:100]
+            vendor, _ = Vendor.objects.get_or_create(
+                name=vendor_name,
+                defaults={
+                    "contact_name": getattr(store, 'legal_representative', None) or store.name,
+                    "email": store.email,
+                    "phone": store.phone,
+                    "tax_id": getattr(store, 'ruc', None),
+                    "is_active": True
+                }
+            )
+            store.vendor = vendor
+            store.save(update_fields=['vendor'])
+
+        bill_num = f"BILL-SET-{plan.id}-{timestamp}"
+        line_items_data = [{
+            "name": f"Settlement payable for Store {store.name}",
+            "qty": 1,
+            "unit_price": float(amount),
+            "expense_account_id": store.accounting_code.id if store.accounting_code else None,
+            "tax_rate_id": None,
+            "tax_rate": 0.00,
+            "tax_amount": 0.00,
+            "total": float(amount)
+        }]
+
+        bill = Bill.objects.create(
+            bill_number=bill_num,
+            vendor=vendor,
+            bill_date=timezone.now().date(),
+            due_date=timezone.now().date(),
+            subtotal=amount,
+            tax_amount=Decimal('0.00'),
+            total_amount=amount,
+            balance=amount,
+            amount_paid=Decimal('0.00'),
+            status='PENDING',
+            line_items=line_items_data,
+            notes=f"Connected bill for merchant settlement {settlement_num}"
+        )
+        bill.generate_ledger_entries()
+
+        settlement.bill = bill
+        settlement.save(update_fields=['bill'])
+
         last_merch_entry = MerchantLedgerEntry.objects.filter(store=store).order_by('-entry_date', '-id').first()
         if not last_merch_entry:
             om_bal = amount
         else:
             om_bal = last_merch_entry.outstanding_balance + amount
 
-        merch_ledger = MerchantLedgerEntry.objects.create(
+        merch_ledger = merch_ledger = MerchantLedgerEntry.objects.create(
             store=store,
             finance_plan=plan,
             settlement=settlement,
@@ -185,6 +252,13 @@ class AccountingEngineService:
             description=f"Settlement creation for loan disbursement {disb_num}",
             entry_date=timezone.now()
         )
+
+        # Link bill's ledger entries to settlement and merch_ledger
+        for le in LedgerEntry.objects.filter(bill=bill):
+            le.settlement = settlement
+            if le.type == 'DEBIT':
+                le.merchant_ledger_entry = merch_ledger
+            le.save(update_fields=['settlement', 'merchant_ledger_entry'])
 
         # Link trace entries back to GL
         le_dr.customer_loan_ledger_entry = cust_ledger
@@ -242,40 +316,8 @@ class AccountingEngineService:
             payment_date=(date_val or timezone.now()).date(),
             payment_method='BANK_TRANSFER',
             paid_from=bank_gl_code,
-            bills=[],
+            bills=[{"bill_id": settlement.bill.id, "amount_applied": float(amount)}] if settlement.bill else [],
             notes=f"Merchant settlement payment to Store={store.name} Ref={payment_reference}"
-        )
-
-        # Journal Entry
-        payment_num_str = f"STPY-{settlement.settlement_number}"
-        journal = JournalEntry.objects.create(
-            reference_number=payment_num_str,
-            entry_date=(date_val or timezone.now()).date(),
-            description=f"Merchant settlement payment to Store={store.name} Ref={payment_reference}"
-        )
-
-        # Debit: Store Payable GL (reduces liability)
-        le_dr = LedgerEntry.objects.create(
-            journal_entry=journal,
-            settlement=settlement,
-            payment_made=payment_made,
-            accounting_code=ap_merchant_code,
-            type='DEBIT',
-            amount=amount,
-            description=f"Merchant payable cleared for settlement {settlement.settlement_number}",
-            entry_date=date_val or timezone.now()
-        )
-
-        # Credit: Bank Account GL (reduces asset)
-        le_cr = LedgerEntry.objects.create(
-            journal_entry=journal,
-            settlement=settlement,
-            payment_made=payment_made,
-            accounting_code=bank_gl_code,
-            type='CREDIT',
-            amount=amount,
-            description=f"Settlement payment disbursed from Bank={bank_acc.bank_name}",
-            entry_date=date_val or timezone.now()
         )
 
         # Update Merchant Subledger
@@ -295,13 +337,55 @@ class AccountingEngineService:
             entry_date=date_val or timezone.now()
         )
 
-        # Link trace entries
-        le_dr.merchant_ledger_entry = merch_ledger
-        le_dr.save(update_fields=['merchant_ledger_entry'])
+        if settlement.bill:
+            payment_made.process_payment()
+            # Update the created ledger entries with settlement and merchant_ledger_entry references
+            for le in LedgerEntry.objects.filter(payment_made=payment_made):
+                le.settlement = settlement
+                if le.type == 'DEBIT':
+                    le.merchant_ledger_entry = merch_ledger
+                le.save(update_fields=['settlement', 'merchant_ledger_entry'])
+        else:
+            # Legacy logic
+            # Journal Entry
+            payment_num_str = f"STPY-{settlement.settlement_number}"
+            journal = JournalEntry.objects.create(
+                reference_number=payment_num_str,
+                entry_date=(date_val or timezone.now()).date(),
+                description=f"Merchant settlement payment to Store={store.name} Ref={payment_reference}"
+            )
+
+            # Debit: Store Payable GL (reduces liability)
+            le_dr = LedgerEntry.objects.create(
+                journal_entry=journal,
+                settlement=settlement,
+                payment_made=payment_made,
+                accounting_code=ap_merchant_code,
+                type='DEBIT',
+                amount=amount,
+                description=f"Merchant payable cleared for settlement {settlement.settlement_number}",
+                entry_date=date_val or timezone.now()
+            )
+
+            # Credit: Bank Account GL (reduces asset)
+            le_cr = LedgerEntry.objects.create(
+                journal_entry=journal,
+                settlement=settlement,
+                payment_made=payment_made,
+                accounting_code=bank_gl_code,
+                type='CREDIT',
+                amount=amount,
+                description=f"Settlement payment disbursed from Bank={bank_acc.bank_name}",
+                entry_date=date_val or timezone.now()
+            )
+
+            # Link trace entries
+            le_dr.merchant_ledger_entry = merch_ledger
+            le_dr.save(update_fields=['merchant_ledger_entry'])
         
-        # Update Bank Account Balance
-        bank_acc.current_balance -= amount
-        bank_acc.save(update_fields=['current_balance'])
+        # Update Bank Account Balance (only for legacy flow, since process_payment handles it otherwise)
+        if not settlement.bill:
+            bank_acc.recalculate_balance()
 
         logger.info(f"Settled merchant store={store.name} for amount={amount}. Bank={bank_acc.account_name}")
         return settlement
@@ -372,9 +456,33 @@ class AccountingEngineService:
             entry_date=payment.payment_date
         )
 
-        # Credit legs:
-        # 1. Customer Loan Receivable (1300) - decreases asset
+        # Credit EMI Receivable (1200) - Asset decreases by the total applied amount
+        LedgerEntry.objects.create(
+            journal_entry=journal,
+            payment_received=payment,
+            customer_loan_ledger_entry=cust_ledger,
+            accounting_code=AccountingCode.objects.get(code="1200"),
+            type='CREDIT',
+            amount=total_applied,
+            description=f"EMI Receivable reduction for plan ID={plan.id} via payment {payment.payment_number}",
+            entry_date=payment.payment_date
+        )
+
+        # Principal Allocation clearing logic:
         if principal_portion > 0:
+            # Debit: Principal Due (2500)
+            LedgerEntry.objects.create(
+                journal_entry=journal,
+                payment_received=payment,
+                customer_loan_ledger_entry=cust_ledger,
+                accounting_code=AccountingCode.objects.get(code="2500"),
+                type='DEBIT',
+                amount=principal_portion,
+                description=f"Principal allocation from clearing account for plan ID={plan.id}",
+                entry_date=payment.payment_date
+            )
+
+            # Credit: Customer Loan Receivable (1300) - reduces outstanding loan principal
             LedgerEntry.objects.create(
                 journal_entry=journal,
                 payment_received=payment,
@@ -383,32 +491,6 @@ class AccountingEngineService:
                 type='CREDIT',
                 amount=principal_portion,
                 description=f"Principal loan receivable reduction for plan ID={plan.id}",
-                entry_date=payment.payment_date
-            )
-
-        # 2. Interest Revenue (4200) - increases revenue
-        if interest_portion > 0:
-            LedgerEntry.objects.create(
-                journal_entry=journal,
-                payment_received=payment,
-                customer_loan_ledger_entry=cust_ledger,
-                accounting_code=AccountingCode.objects.get(code="4200"),
-                type='CREDIT',
-                amount=interest_portion,
-                description=f"Interest revenue recognized for plan ID={plan.id}",
-                entry_date=payment.payment_date
-            )
-
-        # 3. Penalty Revenue (4300) - increases revenue
-        if penalty_portion > 0:
-            LedgerEntry.objects.create(
-                journal_entry=journal,
-                payment_received=payment,
-                customer_loan_ledger_entry=cust_ledger,
-                accounting_code=AccountingCode.objects.get(code="4300"),
-                type='CREDIT',
-                amount=penalty_portion,
-                description=f"Penalty revenue recognized for plan ID={plan.id}",
                 entry_date=payment.payment_date
             )
 

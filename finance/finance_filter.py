@@ -36,6 +36,7 @@ class FinancePlanFilter:
             "selected_term": "selected_term",
             "installment_frequency_days": "installment_frequency_days",
             "score_status": "score_status",
+            "disbursement_status": "disbursement_status",
         }
 
         for param, field in mappings.items():

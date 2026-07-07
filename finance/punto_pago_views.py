@@ -12,7 +12,7 @@ from drf_yasg import openapi
 from django.db.models import Sum
 
 from customer.models import Customer
-from finance.models import FinancePlan, EMISchedule, PaymentRecord
+from finance.models import FinancePlan, EMISchedule, PaymentRecord, Invoice, PaymentReceived, AccountingCode, BankAccount, EMIConfiguration
 from finance.serializers import PuntoPagoVerifyRequestSerializer, PuntoPagoProcessRequestSerializer
 
 logger = logging.getLogger(__name__)
@@ -126,18 +126,13 @@ class PuntoPagoAccountVerifyAPIView(APIView):
                 "message": f"Customer not found with identification: {identification}"
             }, status=status.HTTP_404_NOT_FOUND)
 
-        # Retrieve active finance plans
-        active_plans = FinancePlan.objects.filter(
-            credit_application__customer=customer,
-            is_active=True
+        # Sum outstanding balance for unpaid generated invoices
+        unpaid_invoices = Invoice.objects.filter(
+            customer=customer,
+            status__in=['PENDING', 'PARTIAL', 'OVERDUE']
         )
-
-        # Sum outstanding balance for unpaid EMI schedules
-        unpaid_emis = EMISchedule.objects.filter(
-            finance_plan__in=active_plans
-        ).exclude(status='PAID')
         
-        total_debt = unpaid_emis.aggregate(total=Sum('balance_remaining'))['total'] or Decimal('0.00')
+        total_debt = unpaid_invoices.aggregate(total=Sum('balance'))['total'] or Decimal('0.00')
         
         customer_name = f"{customer.first_name} {customer.last_name}".strip()
         
@@ -216,6 +211,22 @@ class PuntoPagoPaymentProcessAPIView(APIView):
                 "message": "Payment already registered"
             }, status=status.HTTP_200_OK)
 
+        # Check PaymentReceived for double safety
+        existing_received = PaymentReceived.objects.filter(
+            transaction_reference=payment_reference,
+            payment_method='PUNTO_PAGO'
+        ).first()
+        if existing_received:
+            first_rec = PaymentRecord.objects.filter(payment_received=existing_received).first()
+            pid = f"PAY-{first_rec.id}" if first_rec else f"PAY-{existing_received.id}"
+            logger.info(f"[PuntoPagoProcess] Payment already processed for reference (PaymentReceived): {payment_reference}")
+            return Response({
+                "success": True,
+                "payment_id": pid,
+                "status": "PAID",
+                "message": "Payment already registered"
+            }, status=status.HTTP_200_OK)
+
         # Fetch customer
         customer = Customer.objects.filter(document_number=identification).first()
         if not customer:
@@ -236,58 +247,98 @@ class PuntoPagoPaymentProcessAPIView(APIView):
                 "message": "No active financing plan found for this customer."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Allocate payment across unpaid EMIs sequentially (FIFO)
-        unpaid_emis = EMISchedule.objects.filter(
-            finance_plan__in=active_plans
-        ).exclude(status='PAID').order_by('due_date', 'id')
+        # Retrieve linked BankAccount from dynamic settings or fallback to settings
+        bank_account = None
+        config = EMIConfiguration.objects.filter(is_active=True).first()
+        if config and config.punto_pago_bank_account:
+            bank_account = config.punto_pago_bank_account
 
-        if not unpaid_emis.exists():
+        if not bank_account:
+            pp_bank_acc_num = getattr(settings, 'PUNTO_PAGO_BANK_ACCOUNT_NUMBER', '1234567890')
+            bank_account = BankAccount.objects.filter(account_number=pp_bank_acc_num).first()
+            if not bank_account:
+                # Create standard BankAccount dynamically if not found
+                bank_account = BankAccount.objects.create(
+                    bank_name="Punto Pago Settlement Bank",
+                    account_number=pp_bank_acc_num,
+                    account_holder_name="Ola Credit",
+                    initial_balance=Decimal('0.00'),
+                    status="ACTIVE",
+                    account_name="Punto Pago Account"
+                )
+
+        deposited_to = bank_account.accounting_code
+        if not deposited_to:
             return Response({
                 "success": False,
-                "message": "No pending EMI schedules found."
+                "message": "Punto Pago bank account is not linked to any accounting code."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        created_payments = []
+        # Retrieve generated unpaid invoices sequentially (oldest/due date first)
+        unpaid_invoices = Invoice.objects.filter(
+            customer=customer,
+            status__in=['PENDING', 'PARTIAL', 'OVERDUE']
+        ).order_by('due_date', 'id')
+
+        invoices_list = []
         remaining_amount = amount
+        for inv in unpaid_invoices:
+            if remaining_amount <= 0:
+                break
+            needed = inv.balance
+            if needed <= 0:
+                continue
+            pay_amount = min(remaining_amount, needed)
+            invoices_list.append({
+                'invoice_id': inv.id,
+                'amount_applied': float(pay_amount)
+            })
+            remaining_amount -= pay_amount
+
+        # Generate unique PR number
+        import random
+        date_str = timezone.now().strftime("%Y%m%d")
+        rand_str = str(random.randint(1000, 9999))
+        payment_number = f"PR-{date_str}-{rand_str}"
+        while PaymentReceived.objects.filter(payment_number=payment_number).exists():
+            rand_str = str(random.randint(1000, 9999))
+            payment_number = f"PR-{date_str}-{rand_str}"
+
+        payment_notes = (
+            f"Payment received via Punto Pago (Ref: {payment_reference}). "
+            f"Deposited to bank account {bank_account.bank_name} - A/C: {bank_account.account_number} ({deposited_to.name})"
+        )
 
         try:
+            created_payments = []
             with transaction.atomic():
-                for emi in unpaid_emis:
-                    if remaining_amount <= 0:
-                        break
+                # 1. Create PaymentReceived
+                payment = PaymentReceived.objects.create(
+                    payment_number=payment_number,
+                    customer=customer,
+                    amount_received=amount,
+                    payment_date=timezone.now(),
+                    payment_method='PUNTO_PAGO',
+                    transaction_reference=payment_reference,
+                    deposited_to=deposited_to,
+                    invoices=invoices_list,
+                    notes=payment_notes
+                )
+                # 2. Process payment (updates Invoice balance & status, creates segments, ledger entries)
+                payment.process_payment(user=None)
 
-                    needed = emi.installment_amount - emi.amount_paid
-                    if needed <= 0:
-                        continue
+                # Fetch all PaymentRecords created during process_payment
+                created_payments = list(PaymentRecord.objects.filter(payment_received=payment).order_by('id'))
 
-                    pay_amount = min(remaining_amount, needed)
-                    emi.amount_paid += pay_amount
-                    emi.update_status()
-                    if emi.status == 'PAID':
-                        emi.paid_date = timezone.now().date()
-                    emi.save()
-
-                    # Record payment segment
-                    payment_segment = PaymentRecord.objects.create(
-                        finance_plan=emi.finance_plan,
-                        emi_schedule=emi,
-                        payment_type="EMI",
-                        payment_method="PUNTO_PAGO",
-                        payment_amount=pay_amount,
-                        payment_date=timezone.now(),
-                        payment_status="COMPLETED",
-                        transaction_reference=payment_reference,
-                        notes=f"Payment segment allocated to EMI {emi.installment_number} via Punto Pago (Ref: {payment_reference})"
-                    )
-                    created_payments.append(payment_segment)
-                    remaining_amount -= pay_amount
-
-                # Handle overpayment/excess
+                # 3. Handle remaining amount / excess overpaid amount as an advance PaymentRecord
                 if remaining_amount > 0:
-                    last_emi = unpaid_emis.last() or EMISchedule.objects.filter(finance_plan__in=active_plans).last()
+                    last_invoice = unpaid_invoices.last()
+                    last_emi = last_invoice.emi_schedule if last_invoice else EMISchedule.objects.filter(finance_plan__in=active_plans).last()
+                    
                     extra_payment = PaymentRecord.objects.create(
                         finance_plan=active_plans.first(),
                         emi_schedule=last_emi,
+                        payment_received=payment,
                         payment_type="EMI",
                         payment_method="PUNTO_PAGO",
                         payment_amount=remaining_amount,
@@ -297,10 +348,26 @@ class PuntoPagoPaymentProcessAPIView(APIView):
                         notes=f"Excess payment segment received via Punto Pago (Ref: {payment_reference})"
                     )
                     created_payments.append(extra_payment)
-                    logger.info(f"[PuntoPagoProcess] Excess amount of {remaining_amount} credited to last EMI/plan.")
+                    logger.info(f"[PuntoPagoProcess] Excess amount of {remaining_amount} logged as advance.")
 
-            # Get main payment ID (from first created record segment)
-            main_payment_id = f"PAY-{created_payments[0].id}" if created_payments else "PAY-UNKNOWN"
+                # If no invoices were cleared at all, created_payments is empty, create a single advance PaymentRecord
+                if not created_payments:
+                    last_emi = EMISchedule.objects.filter(finance_plan__in=active_plans).last()
+                    single_payment = PaymentRecord.objects.create(
+                        finance_plan=active_plans.first(),
+                        emi_schedule=last_emi,
+                        payment_received=payment,
+                        payment_type="EMI",
+                        payment_method="PUNTO_PAGO",
+                        payment_amount=amount,
+                        payment_date=timezone.now(),
+                        payment_status="COMPLETED",
+                        transaction_reference=payment_reference,
+                        notes=f"Advance payment received via Punto Pago (Ref: {payment_reference})"
+                    )
+                    created_payments.append(single_payment)
+
+            main_payment_id = f"PAY-{created_payments[0].id}"
 
             logger.info(f"[PuntoPagoProcess] Payment processed successfully. Reference: {payment_reference}, Main ID: {main_payment_id}")
 

@@ -24,6 +24,7 @@ from .serializers import (
      CreditConfigSerializer,
      PersonalReferenceSerializer,
      CustomerIncomeFileSerializer,
+     CreditApplicationAsCustomerSerializer,
      )
 from .utils import fetch_credit_score_from_experian
 from .sms_utils import send_sms
@@ -192,6 +193,147 @@ class CustomerManagementView(APIView):
             customer_id = request.query_params.get('id')
             search_query = request.query_params.get('search', '').strip()
 
+            # For salesperson, store manager, and sales advisor, return CreditApplications representing loan accounts / drafts
+            if request.user.role in ['salesperson', 'store_manager', 'sales_advisor']:
+                app_qs = CreditApplication.objects.select_related(
+                    "customer",
+                    "customer__created_by",
+                    "customer__created_by__store",
+                    "sales_person",
+                    "sales_person__store",
+                    "device",
+                    "device__brand",
+                    "finance_plan",
+                    "finance_plan__store",
+                ).order_by("-created_at")
+
+                # Filter salesperson to their corresponding loans/applications only
+                if request.user.role == 'salesperson':
+                    app_qs = app_qs.filter(sales_person=request.user)
+                
+                # Filter store manager to store they belong to or chose
+                elif request.user.role == 'store_manager':
+                    store_id = request.query_params.get("store_id")
+                    if store_id:
+                        app_qs = app_qs.filter(
+                            Q(finance_plan__store_id=store_id) | 
+                            Q(sales_person__store_id=store_id)
+                        )
+                    elif request.user.store:
+                        app_qs = app_qs.filter(
+                            Q(finance_plan__store=request.user.store) | 
+                            Q(sales_person__store=request.user.store)
+                        )
+                    else:
+                        app_qs = app_qs.none()
+
+                # Filter sales advisor to stores they are associated with
+                elif request.user.role == 'sales_advisor':
+                    app_qs = app_qs.filter(
+                        Q(finance_plan__store__sales_advisor=request.user) |
+                        Q(sales_person__store__sales_advisor=request.user)
+                    ).distinct()
+
+                # ------------ SINGLE CUSTOMER IN LATEST APP CONTEXT ------------
+                if customer_id:
+                    app = app_qs.filter(customer_id=customer_id).first()
+                    if not app:
+                        return Response({
+                            "status": "error",
+                            "message": "Application/Customer not found or restricted",
+                        }, status=status.HTTP_404_NOT_FOUND)
+
+                    serializer = CreditApplicationAsCustomerSerializer(app, context={'request': request})
+                    return Response({
+                        "status": "success",
+                        "message": "Data fetched successfully.",
+                        "data": serializer.data
+                    })
+
+                # Apply Filters
+                status_filter = request.query_params.get("status")
+                document_type = request.query_params.get("document_type")
+                created_by = request.query_params.get("created_by")
+                created_from = request.query_params.get("created_from")
+                created_to = request.query_params.get("created_to")
+                region_id = request.query_params.get("region_id")
+                province_id = request.query_params.get("province_id")
+                district_id = request.query_params.get("district_id")
+                corregimiento_id = request.query_params.get("corregimiento_id")
+                registration_status = request.query_params.get("registration_status")
+
+                if status_filter:
+                    if status_filter == 'DRAFT':
+                        app_qs = app_qs.exclude(status='APPROVED')
+                    else:
+                        app_qs = app_qs.filter(customer__status=status_filter)
+                
+                if registration_status:
+                    if registration_status == "Approved":
+                        app_qs = app_qs.filter(status="APPROVED", device_imei__isnull=False).exclude(finance_plan__disbursements__status="COMPLETED")
+                    elif registration_status == "Disbursed":
+                        app_qs = app_qs.filter(status="APPROVED", device_imei__isnull=False, finance_plan__disbursements__status="COMPLETED")
+                    elif registration_status == "Pending Approval":
+                        app_qs = app_qs.filter(status="PENDING_APPROVAL")
+                    elif registration_status == "Rejected":
+                        app_qs = app_qs.filter(status="REJECTED")
+
+                if document_type:
+                    app_qs = app_qs.filter(customer__document_type=document_type)
+                
+                if created_by:
+                    app_qs = app_qs.filter(customer__created_by_id=created_by)
+
+                if created_from:
+                    app_qs = app_qs.filter(created_at__date__gte=created_from)
+
+                if created_to:
+                    app_qs = app_qs.filter(created_at__date__lte=created_to)
+
+                if region_id:
+                    app_qs = app_qs.filter(finance_plan__store__region_id=region_id)
+
+                if province_id:
+                    app_qs = app_qs.filter(finance_plan__store__province_id=province_id)
+
+                if district_id:
+                    app_qs = app_qs.filter(finance_plan__store__district_id=district_id)
+
+                if corregimiento_id:
+                    app_qs = app_qs.filter(finance_plan__store__corregimiento_id=corregimiento_id)
+
+                # Apply Search
+                if search_query:
+                    app_qs = app_qs.filter(
+                        Q(customer__first_name__icontains=search_query) |
+                        Q(customer__last_name__icontains=search_query) |
+                        Q(customer__email__icontains=search_query) |
+                        Q(customer__document_number__icontains=search_query) |
+                        Q(customer__phone_number__icontains=search_query) |
+                        Q(device_imei__icontains=search_query)
+                    )
+
+                if request.query_params.get('count_only') == 'true':
+                    count = app_qs.distinct().count()
+                    return Response({
+                        "status": "success",
+                        "count": count
+                    }, status=status.HTTP_200_OK)
+
+                # Pagination
+                paginator = self.pagination_class()
+                paginated_qs = paginator.paginate_queryset(app_qs.distinct(), request)
+                serializer = CreditApplicationAsCustomerSerializer(paginated_qs, many=True, context={'request': request})
+                paginated_response = paginator.get_paginated_response(serializer.data)
+                paginated_data = paginated_response.data
+
+                return Response({
+                    "status": "success",
+                    "message": "Loan accounts fetched successfully.",
+                    "data": paginated_data
+                }, status=status.HTTP_200_OK)
+
+            # For other roles, use standard Customer queryset list
             queryset = (
                 Customer.objects
                 .select_related(
@@ -210,11 +352,6 @@ class CustomerManagementView(APIView):
                 .order_by("-created_at")
             )
 
-            if request.user.role == 'salesperson':
-                queryset = queryset.filter(
-                    Q(created_by=request.user) | Q(credit_applications__sales_person=request.user)
-                ).distinct()
-
             # ------------ SINGLE CUSTOMER ------------
 
             if customer_id:
@@ -226,7 +363,7 @@ class CustomerManagementView(APIView):
                         "message": "Customer not found",
                     }, status=status.HTTP_404_NOT_FOUND)
 
-                serializer = CustomerSerializer(customer)
+                serializer = CustomerSerializer(customer, context={'request': request})
                 return Response({
                     "status": "success",
                     "message": "Data fetched successfully.",
@@ -246,12 +383,17 @@ class CustomerManagementView(APIView):
                     Q(document_number__icontains=search_query) |
                     Q(phone_number__icontains=search_query)
                 )
-            
-            # ------------ PAGINATION ------------
+            if request.query_params.get('count_only') == 'true':
+                count = queryset.count()
+                return Response({
+                    "status": "success",
+                    "count": count
+                }, status=status.HTTP_200_OK)
 
+            # ------------ PAGINATION ------------
             paginator = self.pagination_class()
             paginated_qs = paginator.paginate_queryset(queryset, request)
-            serializer = CustomerSerializer(paginated_qs, many=True)
+            serializer = CustomerSerializer(paginated_qs, many=True, context={'request': request})
 
             paginated_response = paginator.get_paginated_response(serializer.data)
             paginated_data = paginated_response.data
@@ -2431,3 +2573,80 @@ class CreditApplicationStepView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ========================================
+#  NOTIFICATION AND STATUS UPDATE VIEWS
+# ========================================
+
+from .models import Notification
+from .serializers import NotificationSerializer
+
+class NotificationListAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        notifications = Notification.objects.filter(user=request.user)
+        serializer = NotificationSerializer(notifications, many=True)
+        return Response({
+            "status": "success",
+            "data": serializer.data
+        })
+
+    def post(self, request):
+        Notification.objects.filter(user=request.user).update(is_read=True)
+        return Response({
+            "status": "success",
+            "message": "All notifications marked as read."
+        })
+
+
+class NotificationMarkReadAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request, pk):
+        try:
+            notification = Notification.objects.get(id=pk, user=request.user)
+            notification.is_read = True
+            notification.save(update_fields=["is_read"])
+            return Response({
+                "status": "success",
+                "message": "Notification marked as read."
+            })
+        except Notification.DoesNotExist:
+            return Response({"status": "error", "message": "Notification not found."}, status=status.HTTP_404_NOT_FOUND)
+
+
+class CreditApplicationStatusUpdateView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def patch(self, request):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        app_id = request.data.get("application_id")
+        new_status = request.data.get("status")
+
+        if not app_id or not new_status:
+            return Response({"status": "error", "message": "application_id and status are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            app = CreditApplication.objects.get(id=app_id)
+            if new_status not in [c[0] for c in CreditApplication.STATUS_CHOICES]:
+                return Response({"status": "error", "message": f"Invalid status value. Must be one of {[c[0] for c in CreditApplication.STATUS_CHOICES]}"}, status=status.HTTP_400_BAD_REQUEST)
+
+            app.status = new_status
+            app.save(update_fields=["status"])
+            return Response({
+                "status": "success",
+                "message": "Application status updated successfully.",
+                "data": {
+                    "application_id": app.id,
+                    "status": app.status
+                }
+            })
+        except CreditApplication.DoesNotExist:
+            return Response({"status": "error", "message": "Credit application not found."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

@@ -367,6 +367,16 @@ class FinancePlan(models.Model):
     status = models.CharField(max_length=20, choices=[("DRAFT", "Draft"), ("ACTIVE", "Active"), ("CLOSED", "Closed")], default="DRAFT") 
     is_active = models.BooleanField(default=True) 
 
+    # Disbursement tracking and direct account details
+    loan_account_number = models.CharField(max_length=50, unique=True, null=True, blank=True, help_text="Unique Loan Account Number")
+    disbursement_status = models.CharField(
+        max_length=20, 
+        choices=[('PENDING', 'Pending'), ('DISBURSED', 'Disbursed')], 
+        default='PENDING',
+        help_text="Direct disbursement status of the loan"
+    )
+    disbursed_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp of loan disbursement")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -646,6 +656,9 @@ class FinancePlan(models.Model):
         # Set allowed terms
         rules = self.get_tier_rules()
         self.allowed_terms = rules['allowed_terms']
+
+        if not self.loan_account_number and self.credit_application_id:
+            self.loan_account_number = f"OLA-LN-{self.credit_application_id:06d}"
         
         super().save(*args, **kwargs)
 
@@ -665,6 +678,7 @@ class EMISchedule(models.Model):
     """
     
     STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
         ('UPCOMING', 'Upcoming'),
         ('DUE', 'Due'),
         ('PAID', 'Paid'),
@@ -707,7 +721,7 @@ class EMISchedule(models.Model):
         help_text="Remaining balance for this installment"
     )
     
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UPCOMING')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     paid_date = models.DateField(null=True, blank=True)
     days_overdue = models.IntegerField(default=0)
     
@@ -779,12 +793,13 @@ class EMISchedule(models.Model):
     
     
     @classmethod
-    def generate_schedule(cls, finance_plan, first_due_date):
+    def generate_schedule(cls, finance_plan, first_due_date, save=True):
         """
         Generate EMI schedule for any frequency (3, 7, 10, 15, 30 days) using IRR declining-balance amortization.
         """
         from decimal import Decimal, ROUND_HALF_UP
         
+        initial_status = 'DRAFT' if finance_plan.disbursement_status != 'DISBURSED' else 'UPCOMING'
         schedules = []
         frequency_days = finance_plan.installment_frequency_days or 30  # Default 30 days
         term_months = finance_plan.selected_term
@@ -802,13 +817,22 @@ class EMISchedule(models.Model):
         else:
             total_installments = int(term_months * 30 / frequency_days)
 
-        # 2. Grab interest/fee parameters
+        # 2. Grab interest/fee parameters and multiplier
+        from finance.models import FinanceMultiple
+        multiple_obj = FinanceMultiple.objects.filter(
+            term_months=term_months,
+            interval_days=frequency_days,
+            is_active=True
+        ).first()
+        multiplier = multiple_obj.multiple if multiple_obj else None
+
         term_obj = LoanTerm.objects.filter(months=term_months).first()
         plan_obj = InterestPlan.objects.filter(loan_term=term_obj, is_active=True).first()
         
-        multiplier = plan_obj.risk_multiplier if plan_obj else (term_obj.multiplier if term_obj else None)
-        if multiplier is None or multiplier <= 0:
-            multiplier = Decimal('1.2')  # default fallback
+        if not multiplier:
+            multiplier = plan_obj.risk_multiplier if plan_obj else (term_obj.multiplier if term_obj else None)
+            if multiplier is None or multiplier <= 0:
+                multiplier = Decimal('1.2')  # default fallback
             
         proc_fee = plan_obj.processing_fee if plan_obj else Decimal('15.00')
         ins_fee = plan_obj.insurance_fee if plan_obj else Decimal('20.00')
@@ -818,36 +842,23 @@ class EMISchedule(models.Model):
         total_interest = total_repayment - principal
         emi_amount = (total_repayment / Decimal(str(total_installments))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
-        # 4. Solve for Tasa_quincenal (IRR of biweekly cash flows)
-        n_biweekly = term_months * 2
+        # 4. Solve for r_periodic (IRR of periodic cash flows) using exact total_installments directly
         low = Decimal('0.0')
         high = Decimal('2.0')
-        target = Decimal(n_biweekly) / Decimal(str(multiplier))
+        target = Decimal(total_installments) / Decimal(str(multiplier))
         for _ in range(100):
             r_temp = (low + high) / Decimal('2.0')
             if r_temp > 0:
-                val = (1 - (1 + r_temp)**(-n_biweekly)) / r_temp
+                val = (1 - (1 + r_temp)**(-total_installments)) / r_temp
             else:
-                val = Decimal(n_biweekly)
+                val = Decimal(total_installments)
             if val > target:
                 low = r_temp
             else:
                 high = r_temp
-        tasa_quincenal = (low + high) / Decimal('2.0')
+        r_periodic = (low + high) / Decimal('2.0')
 
-        # 5. Scale interest rate according to the cadence
-        if frequency_days == 30:
-            r_periodic = tasa_quincenal * Decimal('2.0')
-        elif frequency_days == 15:
-            r_periodic = tasa_quincenal
-        elif frequency_days == 7:
-            r_periodic = tasa_quincenal / Decimal('2.0')
-        elif frequency_days == 3:
-            r_periodic = tasa_quincenal / Decimal('4.0')
-        else:
-            r_periodic = tasa_quincenal * (Decimal(str(frequency_days)) / Decimal('15.0'))
-
-        # 6. Amortize
+        # 5. Amortize
         running_balance = principal
         running_principal_sum = Decimal('0.00')
         running_emi_sum = Decimal('0.00')
@@ -893,11 +904,13 @@ class EMISchedule(models.Model):
                     interest=int_amount,
                     insurance=inst_insurance,
                     fees=inst_fees,
-                    balance=current_balance
+                    balance=current_balance,
+                    status=initial_status
                 )
             )
 
-        cls.objects.bulk_create(schedules)
+        if save:
+            cls.objects.bulk_create(schedules)
         return schedules
 
 
@@ -1310,6 +1323,29 @@ class BankAccount(models.Model):
 
         super().save(*args, **kwargs)
 
+    def recalculate_balance(self):
+        """
+        Recalculates the current balance of the bank account based on the ledger entries.
+        """
+        if not self.accounting_code:
+            return self.initial_balance
+
+        from .models import LedgerEntry
+        from django.db.models import Sum
+        from decimal import Decimal
+
+        debits = LedgerEntry.objects.filter(accounting_code=self.accounting_code, type='DEBIT').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        credits = LedgerEntry.objects.filter(accounting_code=self.accounting_code, type='CREDIT').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+        if self.accounting_code.category == 'LIABILITY':
+            calculated_balance = self.initial_balance + credits - debits
+        else:
+            calculated_balance = self.initial_balance + debits - credits
+
+        self.current_balance = calculated_balance
+        self.save(update_fields=['current_balance'])
+        return self.current_balance
+
     def __str__(self):
         return f"{self.account_name} - {self.bank_name} ({self.account_number})"
 
@@ -1341,6 +1377,9 @@ class Invoice(models.Model):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     balance = models.DecimalField(max_digits=10, decimal_places=2)
+    principal_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    interest_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    penalty_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     invoice_type = models.CharField(max_length=20, choices=INVOICE_TYPE_CHOICES, default='PLAN')
     line_items = models.JSONField(default=list, blank=True, help_text="Split items for manual invoices")
@@ -1359,85 +1398,183 @@ class Invoice(models.Model):
 
     def generate_ledger_entries(self):
         """
-        Generates double-entry ledger records for the invoice
-        Debit Accounts Receivable (1200), Credit Sales/Rental Income (4100), Credit Tax Payable (2300)
+        Generates double-entry ledger records for the invoice.
+        For PLAN type invoices:
+        - Debit EMI Receivable (1200) for total_amount.
+        - Credit Principal Due (2500) for principal_amount.
+        - Credit Interest Income (4200) for interest_amount.
+        - Credit Penalty Income (4300) for penalty_amount.
         """
-        # Find Accounting Codes
-        ar_code = AccountingCode.objects.filter(code="1200").first()
-        sales_code = AccountingCode.objects.filter(code="4100").first()
-        tax_code = AccountingCode.objects.filter(code="2300").first()
+        if self.invoice_type == 'PLAN':
+            # Find Accounting Codes
+            emi_rec_code = AccountingCode.objects.filter(code="1200").first()
+            principal_due_code = AccountingCode.objects.filter(code="2500").first()
+            interest_inc_code = AccountingCode.objects.filter(code="4200").first()
+            penalty_inc_code = AccountingCode.objects.filter(code="4300").first()
 
-        if not ar_code:
-            return
+            if not emi_rec_code:
+                return
 
-        # Leg 1: Debit Accounts Receivable (Asset Increases)
-        LedgerEntry.objects.create(
-            invoice=self,
-            accounting_code=ar_code,
-            type='DEBIT',
-            amount=self.total_amount,
-            description=f"Invoice {self.invoice_number} generated for {self.customer.first_name} {self.customer.last_name}",
-            entry_date=self.generated_at
-        )
+            # Leg 1: Debit EMI Receivable (Asset Increases)
+            LedgerEntry.objects.create(
+                invoice=self,
+                accounting_code=emi_rec_code,
+                type='DEBIT',
+                amount=self.total_amount,
+                description=f"EMI Receivable recognized for plan invoice {self.invoice_number}",
+                entry_date=self.generated_at
+            )
 
-        if self.invoice_type == 'MANUAL' and self.line_items:
-            for item in self.line_items:
-                # Find custom account code if selected, fallback to standard sales account
-                account_id = item.get('sales_account_id')
-                custom_sales_code = None
-                if account_id:
-                    custom_sales_code = AccountingCode.objects.filter(id=account_id).first()
-                if not custom_sales_code:
-                    custom_sales_code = sales_code
+            # Leg 2: Credit Principal Due (Clearing Increases)
+            if principal_due_code and self.principal_amount > 0:
+                LedgerEntry.objects.create(
+                    invoice=self,
+                    accounting_code=principal_due_code,
+                    type='CREDIT',
+                    amount=self.principal_amount,
+                    description=f"Principal portion billed for plan invoice {self.invoice_number}",
+                    entry_date=self.generated_at
+                )
 
-                qty = Decimal(str(item.get('qty', 1)))
-                unit_price = Decimal(str(item.get('unit_price', 0)))
-                line_subtotal = qty * unit_price
+            # Leg 3: Credit Interest Income (Revenue Increases)
+            if interest_inc_code and self.interest_amount > 0:
+                LedgerEntry.objects.create(
+                    invoice=self,
+                    accounting_code=interest_inc_code,
+                    type='CREDIT',
+                    amount=self.interest_amount,
+                    description=f"Interest revenue recognized for plan invoice {self.invoice_number}",
+                    entry_date=self.generated_at
+                )
 
-                # Leg 2: Credit custom Sales account (Revenue Increases)
-                if custom_sales_code and line_subtotal > 0:
+            # Leg 4: Credit Penalty Income (Revenue Increases)
+            if penalty_inc_code and self.penalty_amount > 0:
+                LedgerEntry.objects.create(
+                    invoice=self,
+                    accounting_code=penalty_inc_code,
+                    type='CREDIT',
+                    amount=self.penalty_amount,
+                    description=f"Penalty revenue recognized for plan invoice {self.invoice_number}",
+                    entry_date=self.generated_at
+                )
+
+            # Update Customer Loan Subledger to record accruals
+            if self.finance_plan:
+                last_cust_entry = CustomerLoanLedgerEntry.objects.filter(finance_plan=self.finance_plan).order_by('-entry_date', '-id').first()
+                if last_cust_entry:
+                    if self.interest_amount > 0:
+                        last_cust_entry = CustomerLoanLedgerEntry.objects.create(
+                            finance_plan=self.finance_plan,
+                            customer=self.customer,
+                            entry_type='INTEREST_ACCRUAL',
+                            type='DEBIT',
+                            amount=self.interest_amount,
+                            principal_amount=Decimal('0.00'),
+                            interest_amount=self.interest_amount,
+                            penalty_amount=Decimal('0.00'),
+                            outstanding_principal=last_cust_entry.outstanding_principal,
+                            outstanding_interest=last_cust_entry.outstanding_interest + self.interest_amount,
+                            outstanding_penalties=last_cust_entry.outstanding_penalties,
+                            outstanding_balance=last_cust_entry.outstanding_balance + self.interest_amount,
+                            reference_number=self.invoice_number,
+                            description=f"Accrued interest on invoice {self.invoice_number}",
+                            entry_date=self.generated_at
+                        )
+                    if self.penalty_amount > 0:
+                        last_cust_entry = CustomerLoanLedgerEntry.objects.create(
+                            finance_plan=self.finance_plan,
+                            customer=self.customer,
+                            entry_type='PENALTY_CHARGED',
+                            type='DEBIT',
+                            amount=self.penalty_amount,
+                            principal_amount=Decimal('0.00'),
+                            interest_amount=Decimal('0.00'),
+                            penalty_amount=self.penalty_amount,
+                            outstanding_principal=last_cust_entry.outstanding_principal,
+                            outstanding_interest=last_cust_entry.outstanding_interest,
+                            outstanding_penalties=last_cust_entry.outstanding_penalties + self.penalty_amount,
+                            outstanding_balance=last_cust_entry.outstanding_balance + self.penalty_amount,
+                            reference_number=self.invoice_number,
+                            description=f"Charged penalty on invoice {self.invoice_number}",
+                            entry_date=self.generated_at
+                        )
+        else:
+            # Find Accounting Codes
+            ar_code = AccountingCode.objects.filter(code="1200").first()
+            sales_code = AccountingCode.objects.filter(code="4100").first()
+            tax_code = AccountingCode.objects.filter(code="2300").first()
+
+            if not ar_code:
+                return
+
+            # Leg 1: Debit Accounts Receivable (Asset Increases)
+            LedgerEntry.objects.create(
+                invoice=self,
+                accounting_code=ar_code,
+                type='DEBIT',
+                amount=self.total_amount,
+                description=f"Invoice {self.invoice_number} generated for {self.customer.first_name} {self.customer.last_name}",
+                entry_date=self.generated_at
+            )
+
+            if self.line_items:
+                for item in self.line_items:
+                    # Find custom account code if selected, fallback to standard sales account
+                    account_id = item.get('sales_account_id')
+                    custom_sales_code = None
+                    if account_id:
+                        custom_sales_code = AccountingCode.objects.filter(id=account_id).first()
+                    if not custom_sales_code:
+                        custom_sales_code = sales_code
+
+                    qty = Decimal(str(item.get('qty', 1)))
+                    unit_price = Decimal(str(item.get('unit_price', 0)))
+                    line_subtotal = qty * unit_price
+
+                    # Leg 2: Credit custom Sales account (Revenue Increases)
+                    if custom_sales_code and line_subtotal > 0:
+                        LedgerEntry.objects.create(
+                            invoice=self,
+                            accounting_code=custom_sales_code,
+                            type='CREDIT',
+                            amount=line_subtotal,
+                            description=f"Revenue recognized for {item.get('name', 'Line Item')} in manual invoice {self.invoice_number}",
+                            entry_date=self.generated_at
+                        )
+
+                    # Leg 3: Credit Tax Payable (Liability Increases)
+                    line_tax = Decimal(str(item.get('tax_amount', 0)))
+                    if line_tax > 0 and tax_code:
+                        LedgerEntry.objects.create(
+                            invoice=self,
+                            accounting_code=tax_code,
+                            type='CREDIT',
+                            amount=line_tax,
+                            description=f"Tax liability recorded for {item.get('name', 'Line Item')} in manual invoice {self.invoice_number}",
+                            entry_date=self.generated_at
+                        )
+            else:
+                # Leg 2: Credit Sales/Rental Income (Revenue Increases)
+                if sales_code:
                     LedgerEntry.objects.create(
                         invoice=self,
-                        accounting_code=custom_sales_code,
+                        accounting_code=sales_code,
                         type='CREDIT',
-                        amount=line_subtotal,
-                        description=f"Revenue recognized for {item.get('name', 'Line Item')} in manual invoice {self.invoice_number}",
+                        amount=self.base_amount,
+                        description=f"Revenue recognized for invoice {self.invoice_number}",
                         entry_date=self.generated_at
                     )
 
                 # Leg 3: Credit Tax Payable (Liability Increases)
-                line_tax = Decimal(str(item.get('tax_amount', 0)))
-                if line_tax > 0 and tax_code:
+                if self.tax_amount > 0 and tax_code:
                     LedgerEntry.objects.create(
                         invoice=self,
                         accounting_code=tax_code,
                         type='CREDIT',
-                        amount=line_tax,
-                        description=f"Tax liability recorded for {item.get('name', 'Line Item')} in manual invoice {self.invoice_number}",
+                        amount=self.tax_amount,
+                        description=f"Tax liability recorded for invoice {self.invoice_number}",
                         entry_date=self.generated_at
                     )
-        else:
-            # Leg 2: Credit Sales/Rental Income (Revenue Increases)
-            if sales_code:
-                LedgerEntry.objects.create(
-                    invoice=self,
-                    accounting_code=sales_code,
-                    type='CREDIT',
-                    amount=self.base_amount,
-                    description=f"Revenue recognized for invoice {self.invoice_number}",
-                    entry_date=self.generated_at
-                )
-
-            # Leg 3: Credit Tax Payable (Liability Increases)
-            if self.tax_amount > 0 and tax_code:
-                LedgerEntry.objects.create(
-                    invoice=self,
-                    accounting_code=tax_code,
-                    type='CREDIT',
-                    amount=self.tax_amount,
-                    description=f"Tax liability recorded for invoice {self.invoice_number}",
-                    entry_date=self.generated_at
-                )
 
 
 class PaymentReceived(models.Model):
@@ -1504,108 +1641,112 @@ class PaymentReceived(models.Model):
 
                 total_applied += applied_amount
 
-                # Check if this invoice is linked to a finance plan that has been disbursed
-                has_loan_ledger = False
-                if invoice.finance_plan:
-                    has_loan_ledger = CustomerLoanLedgerEntry.objects.filter(finance_plan=invoice.finance_plan).exists()
+                # Check if this invoice is PLAN type and is linked to a finance plan
+                if invoice.invoice_type == 'PLAN' and invoice.finance_plan:
+                    # 1. Credit EMI Receivable (1200) for applied_amount
+                    emi_rec_code = AccountingCode.objects.filter(code="1200").first()
+                    if emi_rec_code:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            invoice=invoice,
+                            accounting_code=emi_rec_code,
+                            type='CREDIT',
+                            amount=applied_amount,
+                            description=f"EMI Receivable reduction for plan invoice {invoice.invoice_number} via payment {self.payment_number}",
+                            entry_date=self.payment_date
+                        )
 
-                if has_loan_ledger:
                     # Retrieve last subledger entry to calculate portions
                     last_cust_entry = CustomerLoanLedgerEntry.objects.filter(finance_plan=invoice.finance_plan).order_by('-entry_date', '-id').first()
                     
-                    # Allocate payment to penalty first, then interest, then principal
-                    rem = applied_amount
-                    penalty_portion = min(rem, last_cust_entry.outstanding_penalties)
-                    rem -= penalty_portion
-                    interest_portion = min(rem, last_cust_entry.outstanding_interest)
-                    rem -= interest_portion
-                    principal_portion = rem
+                    if last_cust_entry:
+                        # Allocate payment to penalty first, then interest, then principal
+                        rem = applied_amount
+                        penalty_portion = min(rem, last_cust_entry.outstanding_penalties)
+                        rem -= penalty_portion
+                        interest_portion = min(rem, last_cust_entry.outstanding_interest)
+                        rem -= interest_portion
+                        principal_portion = rem
 
-                    op_p = max(Decimal('0.00'), last_cust_entry.outstanding_principal - principal_portion)
-                    op_i = max(Decimal('0.00'), last_cust_entry.outstanding_interest - interest_portion)
-                    op_pen = max(Decimal('0.00'), last_cust_entry.outstanding_penalties - penalty_portion)
-                    op_bal = op_p + op_i + op_pen
+                        op_p = max(Decimal('0.00'), last_cust_entry.outstanding_principal - principal_portion)
+                        op_i = max(Decimal('0.00'), last_cust_entry.outstanding_interest - interest_portion)
+                        op_pen = max(Decimal('0.00'), last_cust_entry.outstanding_penalties - penalty_portion)
+                        op_bal = op_p + op_i + op_pen
 
-                    # Subledger Entry
-                    cust_ledger = CustomerLoanLedgerEntry.objects.create(
-                        finance_plan=invoice.finance_plan,
-                        customer=invoice.finance_plan.customer,
-                        entry_type='EMI_PAYMENT',
-                        type='CREDIT',
-                        amount=applied_amount,
-                        principal_amount=principal_portion,
-                        interest_amount=interest_portion,
-                        penalty_amount=penalty_portion,
-                        outstanding_principal=op_p,
-                        outstanding_interest=op_i,
-                        outstanding_penalties=op_pen,
-                        outstanding_balance=op_bal,
-                        reference_number=self.payment_number,
-                        description=f"Repayment: Principal={principal_portion}, Interest={interest_portion}, Penalty={penalty_portion}",
-                        entry_date=self.payment_date
-                    )
-
-                    # Credit legs:
-                    # 1. Customer Loan Receivable (1300)
-                    if principal_portion > 0:
-                        LedgerEntry.objects.create(
-                            payment_received=self,
-                            customer_loan_ledger_entry=cust_ledger,
-                            accounting_code=AccountingCode.objects.get(code="1300"),
-                            type='CREDIT',
-                            amount=principal_portion,
-                            description=f"Principal loan receivable reduction for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
-                            entry_date=self.payment_date
-                        )
-                    
-                    # 2. Interest Revenue (4200)
-                    if interest_portion > 0:
-                        LedgerEntry.objects.create(
-                            payment_received=self,
-                            customer_loan_ledger_entry=cust_ledger,
-                            accounting_code=AccountingCode.objects.get(code="4200"),
-                            type='CREDIT',
-                            amount=interest_portion,
-                            description=f"Interest revenue recognized for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
-                            entry_date=self.payment_date
-                        )
-
-                    # 3. Penalty Revenue (4300)
-                    if penalty_portion > 0:
-                        LedgerEntry.objects.create(
-                            payment_received=self,
-                            customer_loan_ledger_entry=cust_ledger,
-                            accounting_code=AccountingCode.objects.get(code="4300"),
-                            type='CREDIT',
-                            amount=penalty_portion,
-                            description=f"Penalty revenue recognized for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
-                            entry_date=self.payment_date
-                        )
-
-                    # Check Closure
-                    if op_bal <= 0:
-                        invoice.finance_plan.status = "CLOSED"
-                        invoice.finance_plan.save(update_fields=['status'])
-                        
-                        CustomerLoanLedgerEntry.objects.create(
+                        # Subledger Entry
+                        cust_ledger = CustomerLoanLedgerEntry.objects.create(
                             finance_plan=invoice.finance_plan,
                             customer=invoice.finance_plan.customer,
-                            entry_type='CLOSURE',
+                            entry_type='EMI_PAYMENT',
                             type='CREDIT',
-                            amount=Decimal('0.00'),
-                            outstanding_principal=Decimal('0.00'),
-                            outstanding_interest=Decimal('0.00'),
-                            outstanding_penalties=Decimal('0.00'),
-                            outstanding_balance=Decimal('0.00'),
-                            description="Loan marked as CLOSED. Fully settled.",
-                            entry_date=timezone.now()
+                            amount=applied_amount,
+                            principal_amount=principal_portion,
+                            interest_amount=interest_portion,
+                            penalty_amount=penalty_portion,
+                            outstanding_principal=op_p,
+                            outstanding_interest=op_i,
+                            outstanding_penalties=op_pen,
+                            outstanding_balance=op_bal,
+                            reference_number=self.payment_number,
+                            description=f"Repayment: Principal={principal_portion}, Interest={interest_portion}, Penalty={penalty_portion}",
+                            entry_date=self.payment_date
                         )
 
+                        # Principal Allocation legs (clearing account structure):
+                        # 1. Debit Principal Due (2500)
+                        if principal_portion > 0:
+                            principal_due_code = AccountingCode.objects.filter(code="2500").first()
+                            if principal_due_code:
+                                LedgerEntry.objects.create(
+                                    payment_received=self,
+                                    customer_loan_ledger_entry=cust_ledger,
+                                    invoice=invoice,
+                                    accounting_code=principal_due_code,
+                                    type='DEBIT',
+                                    amount=principal_portion,
+                                    description=f"Principal allocation from clearing account for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
+                                    entry_date=self.payment_date
+                                )
+                        
+                        # 2. Credit Customer Loan Receivable (1300)
+                        if principal_portion > 0:
+                            loan_rec_code = AccountingCode.objects.filter(code="1300").first()
+                            if loan_rec_code:
+                                LedgerEntry.objects.create(
+                                    payment_received=self,
+                                    customer_loan_ledger_entry=cust_ledger,
+                                    invoice=invoice,
+                                    accounting_code=loan_rec_code,
+                                    type='CREDIT',
+                                    amount=principal_portion,
+                                    description=f"Principal loan receivable reduction for plan ID={invoice.finance_plan.id} via payment {self.payment_number}",
+                                    entry_date=self.payment_date
+                                )
+
+                        # Check Closure
+                        if op_bal <= 0:
+                            invoice.finance_plan.status = "CLOSED"
+                            invoice.finance_plan.save(update_fields=['status'])
+                            
+                            CustomerLoanLedgerEntry.objects.create(
+                                finance_plan=invoice.finance_plan,
+                                customer=invoice.finance_plan.customer,
+                                entry_type='CLOSURE',
+                                type='CREDIT',
+                                amount=Decimal('0.00'),
+                                outstanding_principal=Decimal('0.00'),
+                                outstanding_interest=Decimal('0.00'),
+                                outstanding_penalties=Decimal('0.00'),
+                                outstanding_balance=Decimal('0.00'),
+                                description="Loan marked as CLOSED. Fully settled.",
+                                entry_date=timezone.now()
+                            )
                 else:
-                    # Credit Accounts Receivable (Asset Decreases) for the applied amount
+                    # Credit Accounts Receivable (1200) (Asset Decreases) for the applied amount
                     if ar_code:
                         LedgerEntry.objects.create(
                             payment_received=self,
+                            invoice=invoice,
                             accounting_code=ar_code,
                             type='CREDIT',
                             amount=applied_amount,
@@ -1626,7 +1767,7 @@ class PaymentReceived(models.Model):
                         payment_date=self.payment_date,
                         payment_status='COMPLETED',
                         transaction_reference=self.transaction_reference or self.payment_number,
-                        receipt_number=self.payment_number,
+                        receipt_number=f"{self.payment_number}-{invoice.id}",
                         processed_by=user,
                         notes=self.notes or f"Paid via Invoice Payment {self.payment_number}"
                     )
@@ -1780,6 +1921,7 @@ class MerchantSettlement(models.Model):
     payment_reference = models.CharField(max_length=100, blank=True, null=True)
     settled_at = models.DateTimeField(blank=True, null=True)
     bank_account = models.ForeignKey(BankAccount, on_delete=models.SET_NULL, null=True, blank=True, related_name='settlements')
+    bill = models.ForeignKey('Bill', on_delete=models.SET_NULL, null=True, blank=True, related_name='settlements')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1926,7 +2068,10 @@ class Bill(models.Model):
         import datetime
         ap_code = AccountingCode.objects.filter(code="2100").first() # Accounts Payable
         if not ap_code:
-            return
+            ap_code, _ = AccountingCode.objects.get_or_create(
+                code="2100",
+                defaults={"name": "Accounts Payable", "category": "LIABILITY", "is_active": True}
+            )
 
         date_val = self.bill_date
         if isinstance(date_val, str):
@@ -1935,9 +2080,19 @@ class Bill(models.Model):
             date_val = date_val.date()
         dt = timezone.make_aware(datetime.datetime.combine(date_val, datetime.time.min))
 
+        journal_ref = f"JR-{self.bill_number}"
+        journal, _ = JournalEntry.objects.get_or_create(
+            reference_number=journal_ref,
+            defaults={
+                'entry_date': date_val,
+                'description': f"Journal Entry for Bill {self.bill_number}"
+            }
+        )
+
         # Credit leg: Accounts Payable (Liability Increases)
         LedgerEntry.objects.create(
             bill=self,
+            journal_entry=journal,
             accounting_code=ap_code,
             type='CREDIT',
             amount=self.total_amount,
@@ -1963,6 +2118,7 @@ class Bill(models.Model):
             if expense_code and line_subtotal > 0:
                 LedgerEntry.objects.create(
                     bill=self,
+                    journal_entry=journal,
                     accounting_code=expense_code,
                     type='DEBIT',
                     amount=line_subtotal,
@@ -1976,6 +2132,7 @@ class Bill(models.Model):
             if line_tax > 0 and tax_code:
                 LedgerEntry.objects.create(
                     bill=self,
+                    journal_entry=journal,
                     accounting_code=tax_code,
                     type='DEBIT',
                     amount=line_tax,
@@ -2006,6 +2163,11 @@ class PaymentMade(models.Model):
     def process_payment(self):
         import datetime
         ap_code = AccountingCode.objects.filter(code="2100").first() # Accounts Payable
+        if not ap_code:
+            ap_code, _ = AccountingCode.objects.get_or_create(
+                code="2100",
+                defaults={"name": "Accounts Payable", "category": "LIABILITY", "is_active": True}
+            )
         date_val = self.payment_date
         if isinstance(date_val, str):
             date_val = datetime.datetime.strptime(date_val[:10], "%Y-%m-%d").date()
@@ -2013,9 +2175,19 @@ class PaymentMade(models.Model):
             date_val = date_val.date()
         dt = timezone.make_aware(datetime.datetime.combine(date_val, datetime.time.min))
 
+        journal_ref = f"JR-{self.payment_number}"
+        journal, _ = JournalEntry.objects.get_or_create(
+            reference_number=journal_ref,
+            defaults={
+                'entry_date': date_val,
+                'description': f"Journal Entry for Payment Made {self.payment_number}"
+            }
+        )
+
         # Credit leg: Bank/Cash (Asset Decreases)
-        LedgerEntry.objects.create(
+        le_cr = LedgerEntry.objects.create(
             payment_made=self,
+            journal_entry=journal,
             accounting_code=self.paid_from,
             type='CREDIT',
             amount=self.amount_paid,
@@ -2044,9 +2216,11 @@ class PaymentMade(models.Model):
                 total_applied += applied_amount
 
                 # Debit leg: Accounts Payable (Liability Decreases)
+                le_dr = None
                 if ap_code:
-                    LedgerEntry.objects.create(
+                    le_dr = LedgerEntry.objects.create(
                         payment_made=self,
+                        journal_entry=journal,
                         accounting_code=ap_code,
                         type='DEBIT',
                         amount=applied_amount,
@@ -2054,8 +2228,50 @@ class PaymentMade(models.Model):
                         entry_date=dt
                     )
 
+                # Sync status to connected MerchantSettlement if fully paid
+                if bill.status == 'PAID':
+                    for settlement in bill.settlements.filter(status='PENDING'):
+                        settlement.status = 'PAID'
+                        settlement.payment_reference = self.payment_number
+                        settlement.settled_at = timezone.now()
+                        bank_acc = BankAccount.objects.filter(accounting_code=self.paid_from).first()
+                        if bank_acc:
+                            settlement.bank_account = bank_acc
+                        settlement.save()
+
+                        # Update Merchant Subledger
+                        store = settlement.store
+                        last_merch_entry = MerchantLedgerEntry.objects.filter(store=store).order_by('-entry_date', '-id').first()
+                        om_bal = (last_merch_entry.outstanding_balance if last_merch_entry else Decimal('0.00')) - applied_amount
+
+                        merch_ledger = MerchantLedgerEntry.objects.create(
+                            store=store,
+                            finance_plan=settlement.finance_plan,
+                            settlement=settlement,
+                            entry_type='SETTLEMENT_PAYMENT',
+                            type='DEBIT',
+                            amount=applied_amount,
+                            payment_reference=self.payment_number,
+                            outstanding_balance=om_bal,
+                            description=f"Settlement payment cleared via Bill Payment {self.payment_number}",
+                            entry_date=timezone.now()
+                        )
+                        
+                        if le_dr:
+                            le_dr.settlement = settlement
+                            le_dr.merchant_ledger_entry = merch_ledger
+                            le_dr.save(update_fields=['settlement', 'merchant_ledger_entry'])
+                        
+                        le_cr.settlement = settlement
+                        le_cr.save(update_fields=['settlement'])
+
             except Bill.DoesNotExist:
                 pass
+
+        # Update Bank Account balance if this is paid from a bank account
+        bank_acc = BankAccount.objects.filter(accounting_code=self.paid_from).first()
+        if bank_acc:
+            bank_acc.recalculate_balance()
 
 
 class CreditNote(models.Model):
@@ -2254,11 +2470,46 @@ class EMIConfiguration(models.Model):
     insurance_fee_default = models.DecimalField(max_digits=10, decimal_places=2, default=20.00)
     tax_rate_pct = models.DecimalField(max_digits=5, decimal_places=2, default=7.00, help_text="ITBMS Tax in %")
     is_active = models.BooleanField(default=True)
+    punto_pago_bank_account = models.ForeignKey(
+        'BankAccount',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='punto_pago_configs',
+        help_text="Bank account linked to Punto Pago payments"
+    )
+    western_union_bank_account = models.ForeignKey(
+        'BankAccount',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='western_union_configs',
+        help_text="Bank account linked to Western Union payments"
+    )
 
     class Meta:
         db_table = 'finance_emi_configurations'
 
     def __str__(self):
         return f"EMI Config: {self.method}"
+
+
+class UncategorizedBankEntry(models.Model):
+    bank_account = models.ForeignKey(BankAccount, on_delete=models.CASCADE, related_name='uncategorized_entries')
+    entry_date = models.DateField()
+    description = models.TextField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    type = models.CharField(max_length=10, choices=[('DEBIT', 'Debit'), ('CREDIT', 'Credit')])
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    is_mapped = models.BooleanField(default=False)
+    invoice = models.ForeignKey('Invoice', on_delete=models.SET_NULL, null=True, blank=True, related_name='mapped_bank_entries')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'uncategorized_bank_entries'
+        ordering = ['-entry_date', '-id']
+
+    def __str__(self):
+        return f"{self.type} of {self.amount} on {self.entry_date} ({self.description[:30]})"
 
 

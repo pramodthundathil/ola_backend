@@ -47,6 +47,7 @@ class FinancePlanSerializer(serializers.ModelSerializer):
     store_details = serializers.SerializerMethodField()
     sales_person_details = serializers.SerializerMethodField()
     customer_details = serializers.SerializerMethodField()
+    emi_schedule = serializers.SerializerMethodField()
     
     class Meta:
         model = FinancePlan
@@ -125,6 +126,9 @@ class FinancePlanSerializer(serializers.ModelSerializer):
                 "longitude": float(c.longitude) if c.longitude else None,
             }
         return None
+
+    def get_emi_schedule(self, obj):
+        return EMIScheduleSerializer(obj.emi_schedule.all(), many=True).data
     
 
 # --------------------------------------------------------
@@ -166,6 +170,7 @@ class AutoFinancePlanCreateSerializer(serializers.Serializer):
 # EMI Schedule Serializer
 # ------------------------------
 class EMIScheduleSerializer(serializers.ModelSerializer):
+    amount = serializers.DecimalField(source='installment_amount', max_digits=10, decimal_places=2, read_only=True)
     class Meta:
         model = EMISchedule
         fields = '__all__'
@@ -698,6 +703,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
 class PaymentReceivedSerializer(serializers.ModelSerializer):
     customer_name = serializers.SerializerMethodField()
     deposited_to_name = serializers.SerializerMethodField()
+    invoice_details = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentReceived
@@ -708,6 +714,27 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
 
     def get_deposited_to_name(self, obj):
         return f"{obj.deposited_to.code} - {obj.deposited_to.name}"
+
+    def get_invoice_details(self, obj):
+        details = []
+        if not obj.invoices:
+            return details
+        invoice_ids = [item.get('invoice_id') for item in obj.invoices if item.get('invoice_id')]
+        if not invoice_ids:
+            return details
+        from .models import Invoice
+        invoices_map = {inv.id: inv for inv in Invoice.objects.filter(id__in=invoice_ids)}
+        for item in obj.invoices:
+            inv_id = item.get('invoice_id')
+            applied = item.get('amount_applied', 0)
+            inv = invoices_map.get(inv_id)
+            if inv:
+                details.append({
+                    'id': inv.id,
+                    'invoice_number': inv.invoice_number,
+                    'amount_applied': float(applied)
+                })
+        return details
 
 
 class LedgerEntrySerializer(serializers.ModelSerializer):
@@ -868,6 +895,8 @@ class CustomerLoanLedgerEntrySerializer(serializers.ModelSerializer):
 class MerchantSettlementSerializer(serializers.ModelSerializer):
     store_name = serializers.SerializerMethodField()
     bank_account_name = serializers.SerializerMethodField()
+    bill_number = serializers.SerializerMethodField()
+    bill_status = serializers.SerializerMethodField()
 
     class Meta:
         model = MerchantSettlement
@@ -879,6 +908,12 @@ class MerchantSettlementSerializer(serializers.ModelSerializer):
     def get_bank_account_name(self, obj):
         return obj.bank_account.account_name if obj.bank_account else "N/A"
 
+    def get_bill_number(self, obj):
+        return obj.bill.bill_number if obj.bill else None
+
+    def get_bill_status(self, obj):
+        return obj.bill.status if obj.bill else None
+
 
 class MerchantLedgerEntrySerializer(serializers.ModelSerializer):
     store_name = serializers.SerializerMethodField()
@@ -889,3 +924,11 @@ class MerchantLedgerEntrySerializer(serializers.ModelSerializer):
 
     def get_store_name(self, obj):
         return obj.store.name if obj.store else "N/A"
+
+
+from .models import UncategorizedBankEntry
+
+class UncategorizedBankEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UncategorizedBankEntry
+        fields = '__all__'

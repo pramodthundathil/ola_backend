@@ -45,7 +45,7 @@ class ReferenceRuleAdmin(admin.ModelAdmin):
 
 @admin.register(EMIConfiguration)
 class EMIConfigurationAdmin(admin.ModelAdmin):
-    list_display = ('method', 'processing_fee_default', 'insurance_fee_default', 'tax_rate_pct', 'is_active')
+    list_display = ('method', 'processing_fee_default', 'insurance_fee_default', 'tax_rate_pct', 'punto_pago_bank_account', 'western_union_bank_account', 'is_active')
 
 @admin.register(FinancePlan)
 class FinancePlanAdmin(admin.ModelAdmin):

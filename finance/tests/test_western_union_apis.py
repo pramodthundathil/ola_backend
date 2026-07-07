@@ -81,16 +81,57 @@ class TestWesternUnionAPIs(TestCase):
             balance_remaining=Decimal("100.00"),
             status="UPCOMING"
         )
+
+        from finance.models import Invoice, AccountingCode, BankAccount
+        AccountingCode.objects.get_or_create(code="1100", defaults={"name": "Cash", "type": "ASSET"})
+        AccountingCode.objects.get_or_create(code="1200", defaults={"name": "EMI Receivable", "type": "ASSET"})
+        AccountingCode.objects.get_or_create(code="2500", defaults={"name": "Revenue", "type": "REVENUE"})
+        AccountingCode.objects.get_or_create(code="1300", defaults={"name": "Deferred Revenue", "type": "LIABILITY"})
+
+        self.invoice1 = Invoice.objects.create(
+            invoice_number="INV-WU-01",
+            customer=self.customer,
+            finance_plan=self.plan,
+            emi_schedule=self.emi1,
+            due_date=self.emi1.due_date,
+            base_amount=Decimal("100.00"),
+            subtotal=Decimal("100.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("100.00"),
+            balance=Decimal("100.00"),
+            principal_amount=Decimal("100.00"),
+            interest_amount=Decimal("0.00"),
+            penalty_amount=Decimal("0.00"),
+            status='PENDING'
+        )
+        self.invoice2 = Invoice.objects.create(
+            invoice_number="INV-WU-02",
+            customer=self.customer,
+            finance_plan=self.plan,
+            emi_schedule=self.emi2,
+            due_date=self.emi2.due_date,
+            base_amount=Decimal("100.00"),
+            subtotal=Decimal("100.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("100.00"),
+            balance=Decimal("100.00"),
+            principal_amount=Decimal("100.00"),
+            interest_amount=Decimal("0.00"),
+            penalty_amount=Decimal("0.00"),
+            status='PENDING'
+        )
         self.client = APIClient()
 
-    def get_expected_barcode(self, emi):
+    def get_expected_barcode(self, obj):
         utility_str = "90061234"
-        id_item_str = str(emi.id).zfill(21)
+        id_item_str = str(obj.id).zfill(21)
         monto_abierto_str = "0"
-        cents = int(round(emi.balance_remaining * 100))
+        
+        balance = getattr(obj, "balance", getattr(obj, "balance_remaining", Decimal("100.00")))
+        cents = int(round(balance * 100))
         importe_str = str(cents).zfill(11)
         
-        due_date = emi.due_date
+        due_date = obj.due_date
         aa = due_date.strftime("%y")
         jjj = f"{due_date.timetuple().tm_yday:03d}"
         julian_str = f"{aa}{jjj}"
@@ -123,7 +164,7 @@ class TestWesternUnionAPIs(TestCase):
         assert data["cod_respuesta"] == "0"
         assert data["msg_respuesta"] == "Consulta exitosa"
         assert len(data["items"]) == 1
-        assert data["items"][0]["id_item"] == str(self.emi1.id)
+        assert data["items"][0]["id_item"] == str(self.invoice1.id)
         assert data["items"][0]["importe"] == "10000"
 
     def test_verify_customer_username_success(self):
@@ -210,13 +251,15 @@ class TestWesternUnionAPIs(TestCase):
         assert data["msg_respuesta"] == "Cliente no existe"
 
     def test_verify_customer_no_pending_emi(self):
-        # Mark emi1 as paid, and emi2 is UPCOMING
-        self.emi1.status = "PAID"
-        self.emi1.amount_paid = Decimal("100.00")
-        self.emi1.balance_remaining = Decimal("0.00")
-        self.emi1.save()
+        # Mark invoice1 as paid
+        self.invoice1.status = "PAID"
+        self.invoice1.amount_paid = Decimal("100.00")
+        self.invoice1.balance = Decimal("0.00")
+        self.invoice1.save()
         
-        # Verify customer should not return emi2 because it is UPCOMING, only DUE, OVERDUE, PARTIALLY_PAID
+        # Mark invoice2 as cancelled so there are no active pending invoices
+        self.invoice2.status = "CANCELLED"
+        self.invoice2.save()
         url = reverse("v2_finance_verify-customer_create")
         payload = {
             "tipo_operacion": "CashIn",
@@ -263,12 +306,12 @@ class TestWesternUnionAPIs(TestCase):
     # ==========================================
     def test_payment_success(self):
         url = reverse("v2_finance_directa_create")
-        barcode = self.get_expected_barcode(self.emi1)
+        barcode = self.get_expected_barcode(self.invoice1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -288,10 +331,10 @@ class TestWesternUnionAPIs(TestCase):
         assert data["msg_respuesta"] == "Cobranza exitosa"
         
         # Verify database changes
-        self.emi1.refresh_from_db()
-        assert self.emi1.status == "PAID"
-        assert self.emi1.amount_paid == Decimal("100.00")
-        assert self.emi1.balance_remaining == Decimal("0.00")
+        self.invoice1.refresh_from_db()
+        assert self.invoice1.status == "PAID"
+        assert self.invoice1.amount_paid == Decimal("100.00")
+        assert self.invoice1.balance == Decimal("0.00")
         
         # Verify payment record is created
         assert PaymentRecord.objects.filter(

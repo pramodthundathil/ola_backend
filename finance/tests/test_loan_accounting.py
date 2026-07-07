@@ -177,6 +177,15 @@ def test_disbursement_and_settlement_posting(accounting_setup):
     settlement = MerchantSettlement.objects.filter(finance_plan=plan).first()
     assert settlement.status == "PENDING"
     assert settlement.amount == Decimal("400.00")
+    assert settlement.bill is not None
+    assert settlement.bill.status == "PENDING"
+
+    # Assert Bill GL Journal Entry
+    bill_journal = JournalEntry.objects.get(reference_number=f"JR-{settlement.bill.bill_number}")
+    bill_ledgers = LedgerEntry.objects.filter(journal_entry=bill_journal)
+    assert bill_ledgers.count() == 2
+    assert bill_ledgers.filter(type="CREDIT", accounting_code__code="2100", amount=Decimal("400.00")).exists()
+    assert bill_ledgers.filter(type="DEBIT", accounting_code__code=store.accounting_code.code, amount=Decimal("400.00")).exists()
 
     merch_ledger = MerchantLedgerEntry.objects.filter(store=store).first()
     assert merch_ledger.entry_type == "SETTLEMENT_CREATION"
@@ -192,24 +201,32 @@ def test_disbursement_and_settlement_posting(accounting_setup):
     
     assert settled.status == "PAID"
     assert BankAccount.objects.get(id=bank_acc.id).current_balance == Decimal("4600.00")  # 5000 - 400
+    
+    # Assert connected Bill is paid
+    settled.bill.refresh_from_db()
+    assert settled.bill.status == "PAID"
+    assert settled.bill.balance == Decimal("0.00")
 
     # Assert PaymentMade is created
     payment_made = PaymentMade.objects.get(payment_number=f"PM-{settled.settlement_number}")
     assert payment_made.amount_paid == Decimal("400.00")
     assert payment_made.vendor.store == store
 
-    # Assert GL for payment
-    pay_journal = JournalEntry.objects.get(reference_number=f"STPY-{settled.settlement_number}")
+    # Assert GL for payment (tallied and using 2100 Accounts Payable)
+    pay_journal = JournalEntry.objects.get(reference_number=f"JR-{payment_made.payment_number}")
     pay_ledgers = LedgerEntry.objects.filter(journal_entry=pay_journal)
     assert pay_ledgers.count() == 2
     
     pay_dr = pay_ledgers.get(type="DEBIT")
     pay_cr = pay_ledgers.get(type="CREDIT")
     
-    assert pay_dr.accounting_code.code == store.accounting_code.code  # Store Payable debit
+    assert pay_dr.accounting_code.code == "2100"  # Accounts Payable debit
     assert pay_dr.payment_made == payment_made
+    assert pay_dr.settlement == settled
+    
     assert pay_cr.accounting_code.code == bank_acc.accounting_code.code  # Bank credit
     assert pay_cr.payment_made == payment_made
+    assert pay_cr.settlement == settled
 
     # Assert Merchant outstanding goes to 0
     last_merch = MerchantLedgerEntry.objects.filter(store=store).order_by("-id").first()
@@ -311,3 +328,217 @@ def test_disbursement_reversal(accounting_setup):
     last_merch = MerchantLedgerEntry.objects.filter(store=store).order_by("-id").first()
     assert last_merch.entry_type == "CANCELLATION"
     assert last_merch.outstanding_balance == Decimal("0.00")
+
+
+def test_emi_invoice_and_payment_clearing_flow(accounting_setup):
+    from finance.models import EMISchedule, Invoice, PaymentReceived, LedgerEntry, CustomerLoanLedgerEntry
+    plan = accounting_setup["plan"]
+    bank_acc = accounting_setup["bank_account"]
+
+    # 1. Disburse the loan first to allow EMI invoicing
+    AccountingEngineService.disburse_loan(plan.id, 900.00, "Full disbursement")
+
+    # Clear any auto-generated EMISchedule objects to prevent unique constraint violation
+    EMISchedule.objects.filter(finance_plan=plan).delete()
+
+    # 2. Setup an EMI installment schedule with principal = 8000, interest = 1500
+    emi = EMISchedule.objects.create(
+        finance_plan=plan,
+        installment_number=1,
+        due_date=timezone.now().date(),
+        installment_amount=Decimal("9500.00"),
+        principal=Decimal("8000.00"),
+        interest=Decimal("1500.00"),
+        balance_remaining=Decimal("9500.00"),
+        status="UPCOMING"
+    )
+
+    # 3. Create the Invoice (base_amount=9500.00, penalty_amount=500.00, total_amount=10000.00)
+    invoice = Invoice.objects.create(
+        invoice_number="INV-EMI-TEST-001",
+        customer=plan.customer,
+        finance_plan=plan,
+        emi_schedule=emi,
+        due_date=emi.due_date,
+        base_amount=emi.installment_amount,
+        subtotal=Decimal("10000.00"),
+        tax_amount=Decimal("0.00"),
+        total_amount=Decimal("10000.00"),
+        balance=Decimal("10000.00"),
+        amount_paid=Decimal("0.00"),
+        principal_amount=emi.principal,
+        interest_amount=emi.interest,
+        penalty_amount=Decimal("500.00"),
+        status="PENDING",
+        invoice_type="PLAN"
+    )
+
+    # Generate invoice ledger entries
+    invoice.generate_ledger_entries()
+
+    # Assert Invoice ledger entries:
+    # Dr EMI Receivable (1200) - 10000
+    # Cr Installment Due (Principal) / Loan Installment Payable (2500) - 8000
+    # Cr Interest Income (4200) - 1500
+    # Cr Penalty Income (4300) - 500
+    entries = LedgerEntry.objects.filter(invoice=invoice)
+    assert entries.count() == 4
+
+    emi_rec = entries.get(accounting_code__code="1200")
+    assert emi_rec.type == "DEBIT"
+    assert emi_rec.amount == Decimal("10000.00")
+
+    inst_due = entries.get(accounting_code__code="2500")
+    assert inst_due.type == "CREDIT"
+    assert inst_due.amount == Decimal("8000.00")
+
+    int_inc = entries.get(accounting_code__code="4200")
+    assert int_inc.type == "CREDIT"
+    assert int_inc.amount == Decimal("1500.00")
+
+    pen_inc = entries.get(accounting_code__code="4300")
+    assert pen_inc.type == "CREDIT"
+    assert pen_inc.amount == Decimal("500.00")
+
+    # 4. Create customer payment receipt (amount_received = 10000.00)
+    payment = PaymentReceived.objects.create(
+        payment_number="PR-EMI-TEST-001",
+        customer=plan.customer,
+        amount_received=Decimal("10000.00"),
+        payment_date=timezone.now(),
+        payment_method="CASH",
+        deposited_to=bank_acc.accounting_code,
+        invoices=[{"invoice_id": invoice.id, "amount_applied": 10000.00}]
+    )
+
+    # Process payment
+    payment.process_payment()
+
+    # Assert Payment ledger entries:
+    # Dr Bank (deposited_to) - 10000
+    # Cr EMI Receivable (1200) - 10000
+    # Dr Installment Due (2500) - 8000 (Principal allocation)
+    # Cr Customer Loan Receivable (1300) - 8000 (Principal allocation)
+    pay_entries = LedgerEntry.objects.filter(payment_received=payment)
+    assert pay_entries.count() == 4
+
+    dr_bank = pay_entries.get(accounting_code=bank_acc.accounting_code)
+    assert dr_bank.type == "DEBIT"
+    assert dr_bank.amount == Decimal("10000.00")
+
+    cr_emi_rec = pay_entries.get(accounting_code__code="1200")
+    assert cr_emi_rec.type == "CREDIT"
+    assert cr_emi_rec.amount == Decimal("10000.00")
+
+    dr_inst_due = pay_entries.get(accounting_code__code="2500")
+    assert dr_inst_due.type == "DEBIT"
+    assert dr_inst_due.amount == Decimal("8000.00")
+
+    cr_loan_rec = pay_entries.get(accounting_code__code="1300")
+    assert cr_loan_rec.type == "CREDIT"
+    assert cr_loan_rec.amount == Decimal("8000.00")
+
+    # Verify that the CustomerLoanLedgerEntry has updated balances
+    last_cust = CustomerLoanLedgerEntry.objects.filter(finance_plan=plan, entry_type="EMI_PAYMENT").first()
+    assert last_cust is not None
+    assert last_cust.outstanding_principal == Decimal("0.00")
+
+
+def test_settlement_paid_via_direct_bill_payment(accounting_setup):
+    plan = accounting_setup["plan"]
+    store = accounting_setup["store"]
+    bank_acc = accounting_setup["bank_account"]
+
+    # 1. Disburse loan ($400)
+    AccountingEngineService.disburse_loan(plan.id, 400.00, "First partial disbursement")
+
+    settlement = MerchantSettlement.objects.filter(finance_plan=plan).first()
+    assert settlement.status == "PENDING"
+    assert settlement.bill is not None
+    assert settlement.bill.status == "PENDING"
+
+    # 2. Pay the bill directly using PaymentMade
+    payment_made = PaymentMade.objects.create(
+        payment_number="PM-DIRECT-TEST-999",
+        vendor=settlement.bill.vendor,
+        amount_paid=Decimal("400.00"),
+        payment_date=timezone.now().date(),
+        payment_method="BANK_TRANSFER",
+        paid_from=bank_acc.accounting_code,
+        bills=[{"bill_id": settlement.bill.id, "amount_applied": 400.00}]
+    )
+    payment_made.process_payment()
+
+    # 3. Verify connected bill, settlement, and bank balance
+    settlement.refresh_from_db()
+    settlement.bill.refresh_from_db()
+    
+    assert settlement.status == "PAID"
+    assert settlement.bill.status == "PAID"
+    assert settlement.payment_reference == "PM-DIRECT-TEST-999"
+    assert BankAccount.objects.get(id=bank_acc.id).current_balance == Decimal("4600.00") # 5000 - 400
+
+    # Assert Merchant outstanding subledger balance goes to 0
+    last_merch = MerchantLedgerEntry.objects.filter(store=store).order_by("-id").first()
+    assert last_merch.entry_type == "SETTLEMENT_PAYMENT"
+    assert last_merch.outstanding_balance == Decimal("0.00")
+
+    # Assert traceability ledger links exist
+    ledgers = LedgerEntry.objects.filter(payment_made=payment_made)
+    assert ledgers.count() == 2
+    for le in ledgers:
+        assert le.settlement == settlement
+        if le.type == "DEBIT":
+            assert le.merchant_ledger_entry == last_merch
+
+
+def test_bank_account_balance_recalculation_signals(accounting_setup):
+    from finance.models import BankAccount, LedgerEntry, JournalEntry
+    bank_acc = accounting_setup["bank_account"]
+    initial_bal = bank_acc.initial_balance  # 5000.00
+    
+    # Assert initial balance is set correctly
+    assert bank_acc.current_balance == initial_bal
+
+    # Create dummy journal entry
+    journal = JournalEntry.objects.create(
+        reference_number="JR-SIGNAL-TEST",
+        entry_date=timezone.now().date(),
+        description="Signal test journal"
+    )
+
+    # 1. Create a Debit LedgerEntry for the bank account's accounting code
+    le1 = LedgerEntry.objects.create(
+        journal_entry=journal,
+        accounting_code=bank_acc.accounting_code,
+        type="DEBIT",
+        amount=Decimal("150.00"),
+        description="Test debit deposit",
+        entry_date=timezone.now()
+    )
+
+    # The post-save signal should run and update the current balance (5000 + 150 = 5150)
+    bank_acc.refresh_from_db()
+    assert bank_acc.current_balance == initial_bal + Decimal("150.00")
+
+    # 2. Create a Credit LedgerEntry for the bank account's accounting code
+    le2 = LedgerEntry.objects.create(
+        journal_entry=journal,
+        accounting_code=bank_acc.accounting_code,
+        type="CREDIT",
+        amount=Decimal("50.00"),
+        description="Test credit withdrawal",
+        entry_date=timezone.now()
+    )
+
+    # The post-save signal should run and update the current balance (5150 - 50 = 5100)
+    bank_acc.refresh_from_db()
+    assert bank_acc.current_balance == initial_bal + Decimal("150.00") - Decimal("50.00")
+
+    # 3. Delete the Debit LedgerEntry
+    le1.delete()
+
+    # The post-delete signal should run and update the current balance (5000 - 50 = 4950)
+    bank_acc.refresh_from_db()
+    assert bank_acc.current_balance == initial_bal - Decimal("50.00")
+

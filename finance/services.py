@@ -423,48 +423,9 @@ class ContractService:
     def generate_payment_schedule_text(plan):
         schedules = list(EMISchedule.objects.filter(finance_plan=plan).order_by('installment_number'))
         if not schedules:
-            import datetime
-            from .models import LoanTerm, InterestPlan
-            from django.utils import timezone
             frequency_days = plan.installment_frequency_days or 30
-            term_months = plan.selected_term
-            principal = Decimal(str(plan.amount_to_finance))
-
-            if frequency_days == 30:
-                total_installments = term_months
-            elif frequency_days == 15:
-                total_installments = term_months * 2
-            elif frequency_days == 7:
-                total_installments = term_months * 4
-            elif frequency_days == 3:
-                total_installments = term_months * 8
-            else:
-                total_installments = int(term_months * 30 / frequency_days)
-
-            term_obj = LoanTerm.objects.filter(months=term_months).first()
-            plan_obj = InterestPlan.objects.filter(loan_term=term_obj, is_active=True).first()
-            multiplier = plan_obj.risk_multiplier if plan_obj else (term_obj.multiplier if term_obj else Decimal('1.2'))
-            if multiplier is None or multiplier <= 0:
-                multiplier = Decimal('1.2')
-
-            total_repayment = principal * Decimal(str(multiplier))
-            emi_amount = (total_repayment / Decimal(str(total_installments))).quantize(Decimal('0.01'))
             first_due_date = timezone.now().date() + datetime.timedelta(days=frequency_days)
-
-            current_balance = total_repayment
-            for i in range(1, total_installments + 1):
-                due_date = first_due_date + datetime.timedelta(days=(i-1)*frequency_days)
-                current_balance -= emi_amount
-                s = EMISchedule(
-                    installment_number=i,
-                    due_date=due_date,
-                    installment_amount=emi_amount,
-                    principal=emi_amount,
-                    interest=Decimal('0.00'),
-                    balance=max(Decimal('0.00'), current_balance),
-                    status='UPCOMING'
-                )
-                schedules.append(s)
+            schedules = EMISchedule.generate_schedule(plan, first_due_date, save=False)
 
         output = [
             "================================================================================",

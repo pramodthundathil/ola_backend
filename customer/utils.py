@@ -286,12 +286,32 @@ class CustomerFilter:
 
         # ---------------- CREDIT APPLICATION FILTER ----------------
         has_application = params.get("has_application")  # 1 or 0
+        registration_status = params.get("registration_status")
 
         # ------ APPLY FILTERS ----------
         if status_filter:
             queryset = queryset.filter(status=status_filter)
         else:
             queryset = queryset.filter(status__in=['ACTIVE', 'INACTIVE'])
+
+        if registration_status:
+            if registration_status == "Approved":
+                queryset = queryset.filter(
+                    credit_applications__status="APPROVED",
+                    credit_applications__device_imei__isnull=False
+                ).exclude(
+                    credit_applications__finance_plan__disbursements__status="COMPLETED"
+                )
+            elif registration_status == "Disbursed":
+                queryset = queryset.filter(
+                    credit_applications__status="APPROVED",
+                    credit_applications__device_imei__isnull=False,
+                    credit_applications__finance_plan__disbursements__status="COMPLETED"
+                )
+            elif registration_status == "Pending Approval":
+                queryset = queryset.filter(credit_applications__status="PENDING_APPROVAL")
+            elif registration_status == "Rejected":
+                queryset = queryset.filter(credit_applications__status="REJECTED")
 
         if document_type:
             queryset = queryset.filter(document_type=document_type)

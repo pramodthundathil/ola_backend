@@ -1028,3 +1028,74 @@ class CustomerIncomeFile(models.Model):
     def __str__(self):
         return "Customer Income Sheet"
 
+
+# ========================================
+#  NOTIFICATION MODEL
+# ========================================
+
+class Notification(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    is_read = models.BooleanField(default=False)
+    customer_id = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'notifications'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Notification to {self.user.email} - {self.title}"
+
+
+# ========================================
+#  SIGNALS FOR DISBURSEMENT NOTIFICATIONS
+# ========================================
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+@receiver(post_save, sender=CreditApplication)
+def credit_app_status_changed(sender, instance, created, **kwargs):
+    if instance.status == "APPROVED":
+        try:
+            create_disbursement_notifications(instance.customer, "Application Approved")
+        except Exception as e:
+            pass
+
+def create_disbursement_notifications(customer, trigger_type):
+    from django.contrib.auth import get_user_model
+    UserModel = get_user_model()
+    
+    notified_roles = ["admin", "global_manager", "financial_manager", "sales_advisor"]
+    users_to_notify = UserModel.objects.filter(role__in=notified_roles)
+    
+    title = "Loan Processed for Disbursement"
+    message = f"Loan for customer {customer.first_name} {customer.last_name} ({customer.document_number}) has been processed for disbursement ({trigger_type})."
+    
+    for user in users_to_notify:
+        # Avoid creating duplicate notifications for same customer and trigger_type
+        if not Notification.objects.filter(user=user, customer_id=customer.id, title=title, message__contains=trigger_type).exists():
+            Notification.objects.create(
+                user=user,
+                title=title,
+                message=message,
+                customer_id=customer.id
+            )
+
+# Import FinancePlan and connect signal at the bottom to avoid circular import issues
+try:
+    from finance.models import FinancePlan
+    @receiver(post_save, sender=FinancePlan)
+    def finance_plan_status_changed(sender, instance, created, **kwargs):
+        if instance.status == "ACTIVE":
+            try:
+                customer = instance.credit_application.customer
+                create_disbursement_notifications(customer, "Loan Activated")
+            except Exception as e:
+                pass
+except Exception as e:
+    pass
+
+

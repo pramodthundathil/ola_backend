@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import ( Customer,CreditScore,
                      CreditConfig,PersonalReference,
                      CustomerIncomeFile,
+                     CreditApplication,
                      )
 
 
@@ -15,10 +16,21 @@ class CustomerSerializer(serializers.ModelSerializer):
     created_by_details = serializers.SerializerMethodField()
     apc_score = serializers.SerializerMethodField()
     registration_status = serializers.SerializerMethodField()
+    latest_application_id = serializers.SerializerMethodField()
+    device_imei = serializers.SerializerMethodField()
+    device_brand = serializers.SerializerMethodField()
+    device_model = serializers.SerializerMethodField()
     next_step_label = serializers.SerializerMethodField()
     next_step_url = serializers.SerializerMethodField()
     salary = serializers.SerializerMethodField()
     employer = serializers.SerializerMethodField()
+    store_name = serializers.SerializerMethodField()
+    store_code = serializers.SerializerMethodField()
+    region_name = serializers.SerializerMethodField()
+    province_name = serializers.SerializerMethodField()
+    district_name = serializers.SerializerMethodField()
+    corregimiento_name = serializers.SerializerMethodField()
+    amount_to_finance = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -40,8 +52,19 @@ class CustomerSerializer(serializers.ModelSerializer):
             'created_by_details',
             'apc_score',
             'registration_status',
+            'latest_application_id',
+            'device_imei',
+            'device_brand',
+            'device_model',
+            'store_name',
+            'store_code',
+            'region_name',
+            'province_name',
+            'district_name',
+            'corregimiento_name',
             'next_step_label',
             'next_step_url',
+            'amount_to_finance',
             'created_at',
             'updated_at',
         ]
@@ -247,11 +270,61 @@ class CustomerSerializer(serializers.ModelSerializer):
     def get_registration_status(self, obj):
         return self._get_registration_details(obj)["status"]
 
+    def get_latest_application_id(self, obj):
+        latest = obj.credit_applications.order_by('-created_at').first()
+        return latest.id if latest else None
+
+    def get_device_imei(self, obj):
+        latest = obj.credit_applications.order_by('-created_at').first()
+        return latest.device_imei if latest else None
+
+    def get_device_brand(self, obj):
+        latest = obj.credit_applications.order_by('-created_at').first()
+        return latest.device.brand.name if latest and latest.device and latest.device.brand else None
+
+    def get_device_model(self, obj):
+        latest = obj.credit_applications.order_by('-created_at').first()
+        return latest.device.model_name if latest and latest.device else None
+
+    def get_store_name(self, obj):
+        if obj.created_by and getattr(obj.created_by, 'store', None):
+            return obj.created_by.store.name
+        return None
+
+    def get_store_code(self, obj):
+        if obj.created_by and getattr(obj.created_by, 'store', None):
+            return obj.created_by.store.code
+        return None
+
+    def get_region_name(self, obj):
+        if obj.created_by and getattr(obj.created_by, 'store', None) and obj.created_by.store.region:
+            return obj.created_by.store.region.name
+        return None
+
+    def get_province_name(self, obj):
+        if obj.created_by and getattr(obj.created_by, 'store', None) and obj.created_by.store.province:
+            return obj.created_by.store.province.name
+        return None
+
+    def get_district_name(self, obj):
+        if obj.created_by and getattr(obj.created_by, 'store', None) and obj.created_by.store.district:
+            return obj.created_by.store.district.name
+        return None
+
+    def get_corregimiento_name(self, obj):
+        if obj.created_by and getattr(obj.created_by, 'store', None) and obj.created_by.store.corregimiento:
+            return obj.created_by.store.corregimiento.name
+        return None
+
     def get_next_step_label(self, obj):
         return self._get_registration_details(obj)["next_step_label"]
 
     def get_next_step_url(self, obj):
         return self._get_registration_details(obj)["next_step_url"]
+
+    def get_amount_to_finance(self, obj):
+        latest = obj.credit_applications.order_by('-created_at').first()
+        return latest.amount_to_finance if latest else None
 
 
 
@@ -384,3 +457,285 @@ class CustomerIncomeFileSerializer(serializers.ModelSerializer):
         model = CustomerIncomeFile
         fields = ['id', 'file', 'uploaded_at']
         read_only_fields = ['id', 'uploaded_at']
+
+
+# ========================================
+#  SERIALIZER FOR NOTIFICATIONS
+# ========================================
+
+from .models import Notification
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = ['id', 'user', 'title', 'message', 'is_read', 'customer_id', 'created_at']
+        read_only_fields = ['id', 'user', 'created_at']
+
+
+class CreditApplicationAsCustomerSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source='customer.id', read_only=True)
+    document_number = serializers.CharField(source='customer.document_number', read_only=True)
+    document_type = serializers.CharField(source='customer.document_type', read_only=True)
+    first_name = serializers.CharField(source='customer.first_name', read_only=True)
+    last_name = serializers.CharField(source='customer.last_name', read_only=True)
+    email = serializers.CharField(source='customer.email', read_only=True)
+    phone_number = serializers.CharField(source='customer.phone_number', read_only=True)
+    status = serializers.CharField(source='customer.status', read_only=True)
+    created_by = serializers.IntegerField(source='customer.created_by.id', read_only=True, allow_null=True)
+    
+    created_by_details = serializers.SerializerMethodField()
+    apc_score = serializers.SerializerMethodField()
+    registration_status = serializers.SerializerMethodField()
+    latest_application_id = serializers.IntegerField(source='id', read_only=True)
+    device_imei = serializers.CharField(read_only=True)
+    device_brand = serializers.SerializerMethodField()
+    device_model = serializers.SerializerMethodField()
+    next_step_label = serializers.SerializerMethodField()
+    next_step_url = serializers.SerializerMethodField()
+    
+    amount_to_finance = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    loan_account_number = serializers.SerializerMethodField()
+    
+    store_name = serializers.SerializerMethodField()
+    store_code = serializers.SerializerMethodField()
+    region_name = serializers.SerializerMethodField()
+    province_name = serializers.SerializerMethodField()
+    district_name = serializers.SerializerMethodField()
+    corregimiento_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CreditApplication
+        fields = [
+            'id',
+            'document_number',
+            'document_type', 
+            'first_name', 
+            'last_name', 
+            'email', 
+            'phone_number', 
+            'status',
+            'created_by',
+            'created_by_details',
+            'apc_score',
+            'registration_status',
+            'latest_application_id',
+            'device_imei',
+            'device_brand',
+            'device_model',
+            'store_name',
+            'store_code',
+            'region_name',
+            'province_name',
+            'district_name',
+            'corregimiento_name',
+            'next_step_label',
+            'next_step_url',
+            'amount_to_finance',
+            'loan_account_number',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_created_by_details(self, obj):
+        if not obj.customer or not obj.customer.created_by:
+            return None
+        user = obj.customer.created_by
+        data = {
+            'id': user.id,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'email': user.email,
+            'role': user.role,
+        }
+        if hasattr(user, 'store') and user.store:
+            store = user.store
+            data['store'] = {
+                'id': str(store.id),
+                'name': store.name,
+                'code': store.code,
+                'region': store.region.name if store.region else None,
+                'province': store.province.name if store.province else None,
+                'district': store.district.name if store.district else None,
+                'corregimiento': store.corregimiento.name if store.corregimiento else None,
+                'sales_advisor': f"{store.sales_advisor.first_name} {store.sales_advisor.last_name}" if store.sales_advisor else None,
+            }
+        else:
+            data['store'] = None
+        return data
+
+    def get_apc_score(self, obj):
+        latest_score = obj.customer.credit_scores.order_by('-created_at').first()
+        return latest_score.apc_score if latest_score else None
+
+    def _get_registration_details(self, obj):
+        if hasattr(obj, '_cached_registration_details'):
+            return obj._cached_registration_details
+
+        # 1. OTP Check
+        otp_is_verified = obj.otp_verified
+        if not otp_is_verified:
+            res = {
+                "status": "Not Verified",
+                "next_step_label": "Verify OTP",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+ 
+        # 2. Credit Score check
+        latest_score = obj.customer.credit_scores.order_by('-created_at').first()
+        if not latest_score:
+            res = {
+                "status": "OTP Verified",
+                "next_step_label": "Check Credit Score",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+ 
+        # Check if rejected at credit score level
+        if latest_score.apc_status == "REJECTED" or latest_score.final_credit_status == "REJECTED" or (latest_score.apc_score and latest_score.apc_score < 500):
+            res = {
+                "status": "Rejected",
+                "next_step_label": "Rejected",
+                "next_step_url": None
+            }
+            obj._cached_registration_details = res
+            return res
+
+        # Check application status
+        if obj.status == "REJECTED":
+            res = {
+                "status": "Rejected",
+                "next_step_label": "Rejected",
+                "next_step_url": None
+            }
+            obj._cached_registration_details = res
+            return res
+        elif obj.status == "EXPIRED":
+            res = {
+                "status": "Expired",
+                "next_step_label": "Restart Application",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+            obj._cached_registration_details = res
+            return res
+
+        # Map status dynamically on each customer based on current_step
+        step = obj.current_step
+        
+        has_disbursement = False
+        if obj.status == "APPROVED" and obj.device_imei:
+            from finance.models import LoanDisbursement
+            if hasattr(obj, 'finance_plan') and obj.finance_plan:
+                has_disbursement = LoanDisbursement.objects.filter(
+                    finance_plan=obj.finance_plan,
+                    status='COMPLETED'
+                ).exists()
+
+        if obj.status == "APPROVED":
+            if not obj.device_imei:
+                status_str = "Device Enrollment Pending"
+            elif has_disbursement:
+                status_str = "Disbursed"
+            else:
+                status_str = "Approved"
+        elif step == 1 or step == 2:
+            status_str = "APC Checked"
+        elif step == 3:
+            status_str = "Salary Checked"
+        elif step == 4:
+            status_str = "Identity Verified"
+        elif step == 5:
+            status_str = "Device Selected"
+        elif step == 6:
+            status_str = "Draft Plan Created"
+        elif step == 7:
+            status_str = "Device IMEI Enrolled"
+        elif step == 8:
+            status_str = "Personal References Added"
+        else:
+            status_str = "APC Checked"
+
+        if status_str in ["Approved", "Disbursed"]:
+            res = {
+                "status": status_str,
+                "next_step_label": "Completed",
+                "next_step_url": None
+            }
+        else:
+            res = {
+                "status": status_str,
+                "next_step_label": "Resume",
+                "next_step_url": "/sellerPortal/createApplicant"
+            }
+        
+        obj._cached_registration_details = res
+        return res
+
+    def get_registration_status(self, obj):
+        return self._get_registration_details(obj)["status"]
+
+    def get_next_step_label(self, obj):
+        return self._get_registration_details(obj)["next_step_label"]
+
+    def get_next_step_url(self, obj):
+        return self._get_registration_details(obj)["next_step_url"]
+
+    def get_device_brand(self, obj):
+        if obj.device and obj.device.brand:
+            return obj.device.brand.name
+        return obj.device_brand
+
+    def get_device_model(self, obj):
+        if obj.device:
+            return obj.device.model_name
+        return obj.device_model
+
+    def get_store_name(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan and obj.finance_plan.store:
+            return obj.finance_plan.store.name
+        elif obj.sales_person and getattr(obj.sales_person, 'store', None):
+            return obj.sales_person.store.name
+        return None
+
+    def get_store_code(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan and obj.finance_plan.store:
+            return obj.finance_plan.store.code
+        elif obj.sales_person and getattr(obj.sales_person, 'store', None):
+            return obj.sales_person.store.code
+        return None
+
+    def get_region_name(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan and obj.finance_plan.store and obj.finance_plan.store.region:
+            return obj.finance_plan.store.region.name
+        elif obj.sales_person and getattr(obj.sales_person, 'store', None) and obj.sales_person.store.region:
+            return obj.sales_person.store.region.name
+        return None
+
+    def get_province_name(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan and obj.finance_plan.store and obj.finance_plan.store.province:
+            return obj.finance_plan.store.province.name
+        elif obj.sales_person and getattr(obj.sales_person, 'store', None) and obj.sales_person.store.province:
+            return obj.sales_person.store.province.name
+        return None
+
+    def get_district_name(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan and obj.finance_plan.store and obj.finance_plan.store.district:
+            return obj.finance_plan.store.district.name
+        elif obj.sales_person and getattr(obj.sales_person, 'store', None) and obj.sales_person.store.district:
+            return obj.sales_person.store.district.name
+        return None
+
+    def get_corregimiento_name(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan and obj.finance_plan.store and obj.finance_plan.store.corregimiento:
+            return obj.finance_plan.store.corregimiento.name
+        elif obj.sales_person and getattr(obj.sales_person, 'store', None) and obj.sales_person.store.corregimiento:
+            return obj.sales_person.store.corregimiento.name
+        return None
+
+    def get_loan_account_number(self, obj):
+        if hasattr(obj, 'finance_plan') and obj.finance_plan:
+            return obj.finance_plan.loan_account_number
+        return None
+

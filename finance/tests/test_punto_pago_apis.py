@@ -74,6 +74,25 @@ class TestPuntoPagoAPIs(TestCase):
             created_by=self.user
         )
 
+        # Seed default accounting codes
+        from finance.signals import seed_default_accounting_codes
+        seed_default_accounting_codes()
+
+        # Retrieve/create BankAccount for tests matching settings
+        from django.conf import settings
+        from finance.models import BankAccount, Invoice, LedgerEntry, PaymentReceived
+        pp_bank_acc_num = getattr(settings, 'PUNTO_PAGO_BANK_ACCOUNT_NUMBER', '1234567890')
+        BankAccount.objects.get_or_create(
+            account_number=pp_bank_acc_num,
+            defaults={
+                "bank_name": "Test Punto Pago Bank",
+                "account_holder_name": "Ola Credit",
+                "initial_balance": Decimal('0.00'),
+                "status": "ACTIVE",
+                "account_name": "Punto Pago Account"
+            }
+        )
+
         # Clear auto-generated schedules to define our custom ones
         self.plan.emi_schedule.all().delete()
 
@@ -95,6 +114,36 @@ class TestPuntoPagoAPIs(TestCase):
             amount_paid=Decimal("0.00"),
             balance_remaining=Decimal("100.00"),
             status="UPCOMING"
+        )
+
+        # 6. Create Invoices for emi1 and emi2
+        self.invoice1 = Invoice.objects.create(
+            invoice_number="OLA-EMI-000001",
+            customer=self.customer,
+            finance_plan=self.plan,
+            emi_schedule=self.emi1,
+            due_date=self.emi1.due_date,
+            base_amount=self.emi1.installment_amount,
+            subtotal=self.emi1.installment_amount,
+            tax_amount=Decimal("0.00"),
+            total_amount=self.emi1.installment_amount,
+            balance=self.emi1.installment_amount,
+            principal_amount=self.emi1.installment_amount,
+            status="PENDING"
+        )
+        self.invoice2 = Invoice.objects.create(
+            invoice_number="OLA-EMI-000002",
+            customer=self.customer,
+            finance_plan=self.plan,
+            emi_schedule=self.emi2,
+            due_date=self.emi2.due_date,
+            base_amount=self.emi2.installment_amount,
+            subtotal=self.emi2.installment_amount,
+            tax_amount=Decimal("0.00"),
+            total_amount=self.emi2.installment_amount,
+            balance=self.emi2.installment_amount,
+            principal_amount=self.emi2.installment_amount,
+            status="PENDING"
         )
         
         self.client = APIClient()
@@ -284,3 +333,91 @@ class TestPuntoPagoAPIs(TestCase):
         assert response.status_code == status.HTTP_201_CREATED
         assert response.data["status"] == "success"
         assert response.data["data"]["payment_method"] == "CASH"
+
+    def test_payment_process_bank_account_ledger(self):
+        from finance.models import PaymentReceived, LedgerEntry, BankAccount
+        from django.conf import settings
+
+        url = reverse("puntopago_payment_process")
+        payload = {
+            "identification": "8-123-456",
+            "payment_reference": "PP-LEDGER-TEST-789",
+            "amount": "100.00"
+        }
+        response = self.client.post(url, payload, format="json", **self.auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data
+        assert data["success"] is True
+
+        # Verify PaymentReceived was created
+        payment_received = PaymentReceived.objects.filter(
+            transaction_reference="PP-LEDGER-TEST-789",
+            payment_method="PUNTO_PAGO"
+        ).first()
+        assert payment_received is not None
+        assert payment_received.amount_received == Decimal("100.00")
+
+        # Verify BankAccount matching settings was resolved
+        pp_bank_acc_num = getattr(settings, 'PUNTO_PAGO_BANK_ACCOUNT_NUMBER', '1234567890')
+        bank_account = BankAccount.objects.get(account_number=pp_bank_acc_num)
+        
+        # Verify LedgerEntry (Debit to Bank Account Accounting Code)
+        debit_ledger = LedgerEntry.objects.filter(
+            payment_received=payment_received,
+            accounting_code=bank_account.accounting_code,
+            type="DEBIT"
+        ).first()
+        assert debit_ledger is not None
+        assert debit_ledger.amount == Decimal("100.00")
+        assert "PUNTO_PAGO" in debit_ledger.description
+        assert "PP-LEDGER-TEST-789" in debit_ledger.description
+
+    def test_payment_process_dynamic_bank_account(self):
+        from finance.models import PaymentReceived, LedgerEntry, BankAccount, EMIConfiguration
+        from django.conf import settings
+
+        # 1. Create a different bank account to be linked dynamically
+        dynamic_bank = BankAccount.objects.create(
+            bank_name="Dynamic Settlement Bank",
+            account_number="9876543210",
+            account_holder_name="Ola Credit Dynamic",
+            initial_balance=Decimal('0.00'),
+            status="ACTIVE",
+            account_name="Punto Pago Dynamic Account"
+        )
+
+        # 2. Link this dynamic bank account in EMIConfiguration
+        emi_config = EMIConfiguration.objects.filter(is_active=True).first()
+        if not emi_config:
+            emi_config = EMIConfiguration.objects.create(is_active=True)
+        emi_config.punto_pago_bank_account = dynamic_bank
+        emi_config.save()
+
+        # 3. Call payment process API
+        url = reverse("puntopago_payment_process")
+        payload = {
+            "identification": "8-123-456",
+            "payment_reference": "PP-DYNAMIC-TEST-101",
+            "amount": "100.00"
+        }
+        response = self.client.post(url, payload, format="json", **self.auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data
+        assert data["success"] is True
+
+        # 4. Verify PaymentReceived was created
+        payment_received = PaymentReceived.objects.filter(
+            transaction_reference="PP-DYNAMIC-TEST-101",
+            payment_method="PUNTO_PAGO"
+        ).first()
+        assert payment_received is not None
+
+        # 5. Verify LedgerEntry was debited to the dynamic bank account's accounting code
+        debit_ledger = LedgerEntry.objects.filter(
+            payment_received=payment_received,
+            accounting_code=dynamic_bank.accounting_code,
+            type="DEBIT"
+        ).first()
+        assert debit_ledger is not None
+        assert debit_ledger.amount == Decimal("100.00")
+        assert "PP-DYNAMIC-TEST-101" in debit_ledger.description

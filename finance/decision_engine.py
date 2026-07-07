@@ -220,8 +220,17 @@ class DecisionEngine:
         max_financing = self.plan.max_emi_allowed * Decimal(str(selected_term))
         
         # Multiplier
-        term_obj = LoanTerm.objects.filter(months=selected_term).first()
-        multiplier = term_obj.multiplier if term_obj else Decimal('1.00')
+        freq_days = self.plan.installment_frequency_days or 15
+        multiple_obj = FinanceMultiple.objects.filter(
+            term_months=selected_term,
+            interval_days=freq_days,
+            is_active=True
+        ).first()
+        multiplier = multiple_obj.multiple if multiple_obj else None
+
+        if not multiplier:
+            term_obj = LoanTerm.objects.filter(months=selected_term).first()
+            multiplier = term_obj.multiplier if term_obj else Decimal('1.00')
         
         # Total Financing = Loan Principal * Multiplier
         total_financing = self.plan.amount_to_finance * multiplier
@@ -263,6 +272,17 @@ class DecisionEngine:
             elif risk_tier_code == 'TIER_H':
                 reasons.append("Rejected due to existing active customer status.")
             self.plan.adjustment_notes = " ".join(reasons)
+
+        # Calculate final score
+        references_count = PersonalReference.objects.filter(customer=customer).count()
+        references_score = 100 if references_count >= 2 else (50 if references_count == 1 else 0)
+        geo_behavior = 100 if customer.latitude and customer.longitude else 80
+        
+        self.plan.calculate_final_score(
+            biometric_confidence=100,
+            references_score=references_score,
+            geo_behavior=geo_behavior
+        )
 
         if save:
             self.plan.save()

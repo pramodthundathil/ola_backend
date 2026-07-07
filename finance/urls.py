@@ -52,6 +52,11 @@ urlpatterns = [
     path('accounting-codes/create/', views.AccountingCodeCreateAPIView.as_view(), name='accounting-codes-create'),
     path('tax/', views.TaxListCreateAPIView.as_view(), name='tax-list-create'),
     path('bank-accounts/', views.BankAccountListCreateAPIView.as_view(), name='bank-account-list-create'),
+    path('bank-accounts/<int:pk>/', views.BankAccountDetailAPIView.as_view(), name='bank-account-detail'),
+    path('bank-accounts/<int:bank_account_id>/upload-statement/', views.BankAccountUploadStatementAPIView.as_view(), name='bank-account-upload-statement'),
+    path('bank-accounts/<int:bank_account_id>/uncategorized-entries/', views.BankAccountUncategorizedEntriesAPIView.as_view(), name='bank-account-uncategorized-entries'),
+    path('bank-accounts/uncategorized-entries/map/', views.UncategorizedBankEntriesBulkMapAPIView.as_view(), name='bank-entries-bulk-map'),
+    path('bank-accounts/uncategorized-entries/<int:pk>/map/', views.UncategorizedBankEntryMapAPIView.as_view(), name='bank-entry-map'),
     path('invoices/', views.InvoiceListAPIView.as_view(), name='invoices-list'),
     path('invoices/<int:pk>/', views.InvoiceDetailAPIView.as_view(), name='invoices-detail'),
     path('payment-received/', views.PaymentReceivedListCreateAPIView.as_view(), name='payment-received-list-create'),
@@ -77,4 +82,5 @@ urlpatterns = [
     path('merchant-ledger/<uuid:store_id>/', views.MerchantLedgerAPIView.as_view(), name='merchant-ledger'),
     path('customer-loan-ledger/<int:plan_id>/', views.CustomerLoanLedgerAPIView.as_view(), name='customer-loan-ledger'),
     path('loans/<int:plan_id>/manual-action/', views.LoanManualActionAPIView.as_view(), name='loan-manual-action'),
+    path('emi-schedule/<int:emi_id>/create-invoice/', views.EMIInvoiceCreateAPIView.as_view(), name='emi-create-invoice'),
 ]

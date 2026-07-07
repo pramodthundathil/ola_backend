@@ -377,7 +377,7 @@ class FinancePlanAPIView(APIView):
     API to create a Finance Plan using Decision Engine from AutoFinancePlan data,
     and retrieve all or specific Finance Plans.
     """
-    permission_classes=[IsAuthenticatedUser]
+    permission_classes = [IsAuthenticatedUser]
     @swagger_auto_schema(
         operation_summary="Create Finance Plan",
         operation_description="""
@@ -679,6 +679,10 @@ class FinancePlanAPIView(APIView):
             enum=["APPROVED", "CONDITIONAL", "REJECTED"]
         ),
         openapi.Parameter(
+            "disbursement_status", openapi.IN_QUERY, type=openapi.TYPE_STRING,
+            enum=["PENDING", "DISBURSED"]
+        ),
+        openapi.Parameter(
             "conditions_met", openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN,
             enum=["true", "false"]
         ),
@@ -783,6 +787,23 @@ class FinancePlanAPIView(APIView):
             if apc_score:
                 finance_qs = finance_qs.filter(apc_score=apc_score)
 
+            has_loan = request.query_params.get("has_loan")
+            if has_loan and has_loan.lower() == "true":
+                finance_qs = finance_qs.filter(
+                    loan_account_number__isnull=False,
+                    status__in=["ACTIVE", "CLOSED"]
+                )
+
+            search = request.query_params.get("search")
+            if search:
+                finance_qs = finance_qs.filter(
+                    Q(loan_account_number__icontains=search) |
+                    Q(credit_application__customer__first_name__icontains=search) |
+                    Q(credit_application__customer__last_name__icontains=search) |
+                    Q(credit_application__customer__document_number__icontains=search) |
+                    Q(credit_application__customer__phone_number__icontains=search)
+                ).distinct()
+
             # --------------------- Date Filters ---------------------
             # Filter by created_at range
             if start_date:
@@ -830,9 +851,10 @@ class FinancePlanAPIView(APIView):
             if user_role in ['admin', 'global_manager', 'financial_manager']:
                 pass
             elif user_role == "store_manager":
-                finance_qs = finance_qs.filter(
-                    credit_application__customer__created_by__store=user.store
-                )
+                if user.store:
+                    finance_qs = finance_qs.filter(store=user.store)
+                else:
+                    finance_qs = finance_qs.none()
             elif user_role == "sales_advisor":
                 finance_qs = finance_qs.filter(
                     Q(credit_application__customer__created_by__store__sales_advisor=request.user) |
@@ -840,11 +862,10 @@ class FinancePlanAPIView(APIView):
                     Q(credit_application__customer__created_by=request.user)
                 ).distinct()
             elif user_role == "salesperson":
-                finance_qs = finance_qs.filter(
-                    Q(credit_application__customer__created_by=user) |
-                    Q(credit_application__sales_person=user) |
-                    Q(created_by=user)
-                ).distinct()
+                if user.store:
+                    finance_qs = finance_qs.filter(store=user.store)
+                else:
+                    finance_qs = finance_qs.none()
             else:
                 customer = Customer.objects.filter(created_by=user).first()
                 if not customer:
@@ -1005,6 +1026,40 @@ class FinancePlanDetailAPIView(APIView):
                     "status": "error",
                     "message": "Finance plan not found."
                 }, status=status.HTTP_404_NOT_FOUND)
+
+            disbursement_status = request.data.get("disbursement_status")
+            if disbursement_status:
+                if disbursement_status not in ['PENDING', 'DISBURSED']:
+                    return Response({
+                        "status": "error",
+                        "message": "Invalid disbursement_status. Must be PENDING or DISBURSED."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                if plan:
+                    plan.disbursement_status = disbursement_status
+                    if disbursement_status == 'DISBURSED' and not plan.disbursed_at:
+                        from django.utils import timezone
+                        plan.disbursed_at = timezone.now()
+                    elif disbursement_status == 'PENDING':
+                        plan.disbursed_at = None
+                    plan.save(update_fields=["disbursement_status", "disbursed_at"])
+
+                    # Synchronize EMI statuses based on disbursement
+                    if disbursement_status == 'DISBURSED':
+                        plan.emi_schedule.filter(status='DRAFT').update(status='UPCOMING')
+                    elif disbursement_status == 'PENDING':
+                        plan.emi_schedule.filter(status='UPCOMING').update(status='DRAFT')
+
+                    logger.info(f"[DISBURSEMENT UPDATED] Updated status to {disbursement_status} for plan ID={plan.id}")
+
+            disbursed_at_val = request.data.get("disbursed_at")
+            if disbursed_at_val is not None:
+                if plan:
+                    from django.utils.dateparse import parse_datetime
+                    if disbursed_at_val:
+                        plan.disbursed_at = parse_datetime(disbursed_at_val)
+                    else:
+                        plan.disbursed_at = None
+                    plan.save(update_fields=["disbursed_at"])
 
             imei = request.data.get("imei")
             if imei:
@@ -1538,25 +1593,29 @@ class FinanceCollectionsView(APIView):
     )
     def get(self, request):
         try:
+            from .models import Invoice
+            from django.db.models import Q, Sum
+            
             user = request.user
             user_role = getattr(user, "role", "Customer")
 
             # ==================================================
-            # Base Query
+            # Base Query based on Invoice
             # ==================================================
             qs = (
-                PaymentRecord.objects.select_related(
+                Invoice.objects.select_related(
+                    "customer",
                     "finance_plan",
                     "finance_plan__store",                
                     "finance_plan__store__region",        
                     "finance_plan__credit_application",
-                    "finance_plan__credit_application__customer",
-                    "finance_plan__credit_score",
                     "finance_plan__device",
                     "emi_schedule",
                 )
-                .prefetch_related("emi_schedule__payments")
-                .order_by("-created_at")
+                .prefetch_related(
+                    "emi_schedule__payments",
+                )
+                .order_by("-due_date")
             )
 
             # ==================================================
@@ -1573,7 +1632,7 @@ class FinanceCollectionsView(APIView):
             elif user_role == "salesperson":
                 qs = qs.filter(finance_plan__created_by=user)
             elif user_role == "Customer":
-                qs = qs.filter(finance_plan__credit_application__customer=user)
+                qs = qs.filter(customer=user)
             else:
                 qs = qs.none()
 
@@ -1581,31 +1640,107 @@ class FinanceCollectionsView(APIView):
             # Query Filters (status, type, date, etc.)
             # ==================================================
             params = request.query_params
+            
+            # Map payment_status to invoice status
+            status_param = params.get("payment_status")
+            mapped_status = None
+            if status_param:
+                status_map = {
+                    "COMPLETED": "PAID",
+                    "PENDING": "PENDING",
+                    "FAILED": "OVERDUE",
+                }
+                mapped_status = status_map.get(status_param.upper(), status_param.upper())
+
+            # Map payment_type to invoice_type
+            type_param = params.get("payment_type")
+            mapped_type = None
+            if type_param:
+                if type_param.upper() == "EMI":
+                    mapped_type = "PLAN"
+                elif type_param.upper() == "DOWN_PAYMENT":
+                    # Down payments are down payments, could map to a specific type if defined
+                    pass
+
             filters = {
-                "payment_status__iexact": params.get("payment_status"),
                 "payment_method__iexact": params.get("payment_method"),
-                "payment_type__iexact": params.get("payment_type"),
                 "finance_plan__store__region__id": params.get("region_id"),
                 "finance_plan__store__id": params.get("store_id"),
-                "finance_plan__credit_application__customer__id": params.get("customer_id"),
+                "customer__id": params.get("customer_id"),
                 "finance_plan__id": params.get("finance_plan_id"),
+                "finance_plan__created_by__id": params.get("salesperson_id") or params.get("sales_advisor_id"),
             }
 
             for key, value in filters.items():
                 if value:
                     qs = qs.filter(**{key: value})
 
+            if mapped_status:
+                qs = qs.filter(status=mapped_status)
+            if mapped_type:
+                qs = qs.filter(invoice_type=mapped_type)
+
+            # Search Filter
+            search = params.get("search")
+            if search:
+                search_q = Q(invoice_number__icontains=search) | \
+                           Q(customer__first_name__icontains=search) | \
+                           Q(customer__last_name__icontains=search) | \
+                           Q(customer__phone__icontains=search) | \
+                           Q(customer__document_number__icontains=search) | \
+                           Q(finance_plan__device__brand__name__icontains=search) | \
+                           Q(finance_plan__device__model_name__icontains=search) | \
+                           Q(status__icontains=search) | \
+                           Q(notes__icontains=search) | \
+                           Q(invoice_type__icontains=search)
+
+                # Optional numeric search
+                try:
+                    from decimal import Decimal, InvalidOperation
+                    decimal_val = Decimal(search)
+                    search_q |= Q(total_amount=decimal_val) | Q(amount_paid=decimal_val) | Q(balance=decimal_val)
+                except (InvalidOperation, ValueError, TypeError):
+                    pass
+
+                # Optional date search
+                try:
+                    date_val = datetime.strptime(search, "%Y-%m-%d").date()
+                    search_q |= Q(due_date=date_val) | Q(created_at__date=date_val)
+                except (ValueError, TypeError):
+                    pass
+
+                qs = qs.filter(search_q).distinct()
+
+            # Custom Ordering/Sorting
+            ordering = params.get("ordering")
+            if ordering:
+                ordering_fields = {
+                    "payment_date": "updated_at",
+                    "-payment_date": "-updated_at",
+                    "due_date": "due_date",
+                    "-due_date": "-due_date",
+                    "amount": "total_amount",
+                    "-amount": "-total_amount",
+                    "customer_name": "customer__first_name",
+                    "-customer_name": "-customer__first_name",
+                    "created_at": "created_at",
+                    "-created_at": "-created_at",
+                }
+                mapped_ordering = ordering_fields.get(ordering)
+                if mapped_ordering:
+                    qs = qs.order_by(mapped_ordering)
+
             start_date = params.get("start_date")
             end_date = params.get("end_date")
 
             if start_date:
                 try:
-                    qs = qs.filter(payment_date__date__gte=datetime.strptime(start_date, "%Y-%m-%d"))
+                    qs = qs.filter(created_at__date__gte=datetime.strptime(start_date, "%Y-%m-%d").date())
                 except ValueError:
                     pass
             if end_date:
                 try:
-                    qs = qs.filter(payment_date__date__lte=datetime.strptime(end_date, "%Y-%m-%d"))
+                    qs = qs.filter(created_at__date__lte=datetime.strptime(end_date, "%Y-%m-%d").date())
                 except ValueError:
                     pass
 
@@ -1613,20 +1748,20 @@ class FinanceCollectionsView(APIView):
             # Analytics Calculation
             # ==================================================
             total_installments = qs.count()
-            total_collected = float(qs.filter(payment_status="COMPLETED").aggregate(total=Sum("payment_amount"))["total"] or 0)
-            total_due = float(qs.aggregate(total=Sum("payment_amount"))["total"] or 0)
-            total_pending = total_due - total_collected
+            total_collected = float(qs.aggregate(total=Sum("amount_paid"))["total"] or 0)
+            total_due = float(qs.aggregate(total=Sum("total_amount"))["total"] or 0)
+            total_pending = float(qs.aggregate(total=Sum("balance"))["total"] or 0)
             collection_rate = (total_collected / total_due * 100) if total_due > 0 else 0.0
 
             # --- Overdue Analytics ---
             overdue_qs = qs.filter(
-                Q(payment_status__in=["PENDING", "FAILED"]) &
-                Q(emi_schedule__due_date__lt=timezone.now().date())
+                Q(status="OVERDUE") |
+                Q(status__in=["PENDING", "PARTIAL"], due_date__lt=timezone.now().date())
             )
-            total_overdue = float(overdue_qs.aggregate(total=Sum("payment_amount"))["total"] or 0)
+            total_overdue = float(overdue_qs.aggregate(total=Sum("balance"))["total"] or 0)
             total_overdue_installments = overdue_qs.count()
             customers_with_overdue = overdue_qs.values_list(
-                "finance_plan__credit_application__customer", flat=True
+                "customer", flat=True
             ).distinct().count()
 
             # ==================================================
@@ -1640,8 +1775,9 @@ class FinanceCollectionsView(APIView):
                 "total_overdue": 0.0,
             })
 
-            for payment in qs:
-                store = payment.finance_plan.store
+            for inv in qs:
+                fp = inv.finance_plan
+                store = getattr(fp, "store", None) if fp else None
                 region = getattr(store.region, "name", None) if store else None
                 if not region:
                     continue
@@ -1650,14 +1786,12 @@ class FinanceCollectionsView(APIView):
                 region_data["region_name"] = region
                 region_data["total_installments"] += 1
 
-                amt = float(payment.payment_amount or 0)
-                if payment.payment_status == "COMPLETED":
-                    region_data["total_collected"] += amt
-                elif payment.payment_status in ["PENDING", "FAILED"]:
-                    region_data["total_pending"] += amt
+                region_data["total_collected"] += float(inv.amount_paid or 0)
+                region_data["total_pending"] += float(inv.balance or 0)
 
-                if payment.emi_schedule and payment.emi_schedule.due_date < timezone.now().date() and payment.payment_status in ["PENDING", "FAILED"]:
-                    region_data["total_overdue"] += amt
+                is_overdue = inv.status == "OVERDUE" or (inv.status in ["PENDING", "PARTIAL"] and inv.due_date < timezone.now().date())
+                if is_overdue:
+                    region_data["total_overdue"] += float(inv.balance or 0)
 
             # ==================================================
             # Serialize Analytics Data
@@ -1679,43 +1813,89 @@ class FinanceCollectionsView(APIView):
             # ==================================================
             # Pagination & Results
             # ==================================================
+            if mapped_status:
+                list_qs = qs
+            else:
+                list_qs = qs.exclude(status="PAID")
+
             paginator = FinancePlanPagination()
-            page = paginator.paginate_queryset(qs, request)
+            page = paginator.paginate_queryset(list_qs, request)
 
             results = []
-            for p in page:
-                fp = p.finance_plan
-                store = getattr(fp, "store", None)
-                region = getattr(store, "region", None)
-                dev = getattr(fp, "device", None)
-                ca = getattr(fp, "credit_application", None)
-                cust = getattr(ca, "customer", None)
-                emi = getattr(p, "emi_schedule", None)
+            for inv in page:
+                fp = inv.finance_plan
+                store = getattr(fp, "store", None) if fp else None
+                region = getattr(store.region, "name", None) if store else None
+                dev = getattr(fp, "device", None) if fp else None
+                cust = inv.customer
+                emi = inv.emi_schedule
+
+                # Map status to payment status equivalent
+                payment_status = "PENDING"
+                if inv.status == "PAID":
+                    payment_status = "COMPLETED"
+                elif inv.status == "OVERDUE" or (inv.status in ["PENDING", "PARTIAL"] and inv.due_date < timezone.now().date()):
+                    payment_status = "FAILED"
+
+                # Check if there is completed payments
+                payment_method = "N/A"
+                payment_date = None
+                if emi:
+                    last_payment = emi.payments.filter(payment_status="COMPLETED").order_by("-payment_date").first()
+                    if last_payment:
+                        payment_method = last_payment.payment_method
+                        payment_date = last_payment.payment_date.isoformat() if last_payment.payment_date else None
+
+                # Fallback to check PaymentReceived records for invoice payment association
+                if not payment_date and cust:
+                    from .models import PaymentReceived
+                    recent_payments = PaymentReceived.objects.filter(customer=cust).order_by("-payment_date")[:10]
+                    for pay in recent_payments:
+                        if isinstance(pay.invoices, list):
+                            for item in pay.invoices:
+                                if int(item.get("invoice_id", 0)) == inv.id:
+                                    payment_method = pay.payment_method
+                                    payment_date = pay.payment_date.isoformat()
+                                    break
+                        if payment_date:
+                            break
+
+                if not payment_date and inv.status == "PAID":
+                    payment_date = inv.updated_at.isoformat()
 
                 item = {
-                    "payment_id": p.id,
-                    "payment_amount": float(p.payment_amount or 0),
-                    "payment_type": p.payment_type,
-                    "payment_method": p.payment_method,
-                    "payment_status": p.payment_status,
-                    "payment_date": p.payment_date.isoformat() if p.payment_date else None,
+                    "payment_id": inv.id,
+                    "payment_amount": float(inv.total_amount),
+                    "payment_type": "EMI" if inv.invoice_type == "PLAN" else "MANUAL",
+                    "payment_method": payment_method,
+                    "payment_status": payment_status,
+                    "payment_date": payment_date,
                     "finance_plan": {
-                        "finance_plan_id": fp.id,
-                        "amount": float(fp.amount_to_finance or 0),
+                        "finance_plan_id": fp.id if fp else None,
+                        "amount": float(fp.amount_to_finance or 0) if fp else None,
                         "store": getattr(store, "name", None),
-                        "region": getattr(region, "name", None),
+                        "region": region,
                         "device": {"id": dev.id, "model_name": dev.model_name} if dev else None,
-                       "customer": {
-                        "id": cust.id,
-                        "name": f"{cust.first_name} {cust.last_name}",
-                        "phone": getattr(cust, "phone", None)} if cust else None,
+                        "customer": {
+                            "id": cust.id,
+                            "name": f"{cust.first_name} {cust.last_name}",
+                            "phone": getattr(cust, "phone_number", None)
+                        } if cust else None,
                     },
                     "emi_schedule": {
                         "emi_id": emi.id if emi else None,
-                        "due_date": emi.due_date.isoformat() if emi and emi.due_date else None,
-                        "amount_due": float(emi.amount_due or 0) if emi else None,
-                        "status": getattr(emi, "status", None) if emi else None,
+                        "due_date": emi.due_date.isoformat() if emi and emi.due_date else inv.due_date.isoformat(),
+                        "amount_due": float(emi.installment_amount or 0) if emi else float(inv.total_amount),
+                        "status": getattr(emi, "status", None) if emi else inv.status,
                     },
+                    "invoice": {
+                        "invoice_id": inv.id,
+                        "invoice_number": inv.invoice_number,
+                        "total_amount": float(inv.total_amount),
+                        "amount_paid": float(inv.amount_paid),
+                        "balance": float(inv.balance),
+                        "status": inv.status,
+                    }
                 }
                 results.append(mask_sensitive_data(item, user_role))
 
@@ -1745,9 +1925,10 @@ class FinanceCollectionsView(APIView):
                 "results": results,
                 "page": paginator.page.number if paginator.page else 1,
                 "page_size": paginator.get_page_size(request),
+                "count": list_qs.count(),
             }
 
-            return paginator.get_paginated_response(payload)
+            return Response(payload, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.error(f"Error generating finance collection analytics: {str(e)}", exc_info=True)
@@ -1885,7 +2066,11 @@ class EMIScheduleAPIView(APIView):
                     return Response({"error": "Store not assigned to user"}, status=403)
 
             elif role == "salesperson":
-                emi_qs = emi_qs.filter(finance_plan__created_by=user)
+                store = getattr(user, "store", None)
+                if store:
+                    emi_qs = emi_qs.filter(finance_plan__store=store)
+                else:
+                    emi_qs = emi_qs.none()
 
             elif role == "Customer":
                 emi_qs = emi_qs.filter(finance_plan__credit_application__customer__user=user)
@@ -3138,13 +3323,14 @@ class VerifyCustomerAPIView(APIView):
                 "items": []
             }, status=status.HTTP_200_OK)
 
-        # Fetch pending EMIs
-        pending_emis = EMISchedule.objects.filter(
-            finance_plan__credit_application__customer=customer,
-            status__in=["DUE", "OVERDUE", "PARTIALLY_PAID"]
-        ).order_by("due_date")
+        # Fetch pending Invoices
+        from .models import Invoice
+        pending_invoices = Invoice.objects.filter(
+            customer=customer,
+            status__in=["PENDING", "PARTIAL", "OVERDUE"]
+        ).order_by("due_date", "id")
 
-        if not pending_emis.exists():
+        if not pending_invoices.exists():
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "cod_cliente": str(customer.id),
@@ -3161,16 +3347,16 @@ class VerifyCustomerAPIView(APIView):
             }, status=status.HTTP_200_OK)
 
         items = []
-        for emi in pending_emis:
+        for inv in pending_invoices:
             # Format: Utility (8) + Id_item (21) + Monto abierto (1) + Importe (11) + Vencimiento (5) + Filler (13)
             utility_str = data.get("utility", "").zfill(8)[:8]
-            id_item_str = str(emi.id).zfill(21)[:21]
+            id_item_str = str(inv.id).zfill(21)[:21]
             monto_abierto_str = "0"
-            cents = int(round(emi.balance_remaining * 100))
+            cents = int(round(inv.balance * 100))
             importe_str = str(cents).zfill(11)[:11]
             
             # Julian date AAJJJ
-            due_date = emi.due_date
+            due_date = inv.due_date
             aa = due_date.strftime("%y")
             jjj = f"{due_date.timetuple().tm_yday:03d}"
             julian_str = f"{aa}{jjj}"
@@ -3179,11 +3365,11 @@ class VerifyCustomerAPIView(APIView):
             cod_barra = f"{utility_str}{id_item_str}{monto_abierto_str}{importe_str}{julian_str}{filler_str}"
 
             items.append({
-                "id_item": str(emi.id),
+                "id_item": str(inv.id),
                 "cod_barra": cod_barra,
                 "importe": str(cents),
                 "monto_abierto": False,
-                "texto_mostrar": f"Factura EMI {emi.installment_number} - Vence {due_date.strftime('%Y-%m-%d')}",
+                "texto_mostrar": f"Factura {inv.invoice_number} - Vence {due_date.strftime('%Y-%m-%d')}",
                 "prioriza_deuda": "",
                 "orden": 0,
                 "fecha_vencimiento": due_date.strftime("%Y%m%d")
@@ -3349,17 +3535,18 @@ class WesternUnionPaymentAPIView(APIView):
                 "cod_operacion": data.get("cod_operacion"),
                 "cod_severidad": "0",
                 "cod_respuesta": "9",
-                "msg_respuesta": "EMI record not found",
+                "msg_respuesta": "Invoice record not found",
                 "texto_ticket": "Payment could not be processed."
             }, status=status.HTTP_200_OK)
 
         # 4. Idempotency Lock using select_for_update inside transaction.atomic
+        from .models import Invoice, EMIConfiguration, BankAccount, PaymentReceived
         try:
             with transaction.atomic():
-                emi = EMISchedule.objects.select_for_update().get(id=id_item_int)
+                invoice = Invoice.objects.select_for_update().get(id=id_item_int)
 
                 # 5. Customer validation
-                expected_customer_id = emi.finance_plan.credit_application.customer.id
+                expected_customer_id = invoice.customer.id
                 incoming_customer_id = data.get("cod_cliente")
                 if str(expected_customer_id) != str(incoming_customer_id):
                     return Response({
@@ -3379,12 +3566,12 @@ class WesternUnionPaymentAPIView(APIView):
 
                 # 6. Barcode validation
                 utility_str = data.get("utility", "").zfill(8)[:8]
-                id_item_str = str(emi.id).zfill(21)[:21]
+                id_item_str = str(invoice.id).zfill(21)[:21]
                 monto_abierto_str = "0"
-                cents = int(round(emi.balance_remaining * 100))
+                cents = int(round(invoice.balance * 100))
                 importe_str = str(cents).zfill(11)[:11]
                 
-                due_date = emi.due_date
+                due_date = invoice.due_date
                 aa = due_date.strftime("%y")
                 jjj = f"{due_date.timetuple().tm_yday:03d}"
                 julian_str = f"{aa}{jjj}"
@@ -3410,10 +3597,7 @@ class WesternUnionPaymentAPIView(APIView):
 
                 # 7. Parse payment amount and check exact amount for closed amount (monto_abierto = False)
                 amount = parse_importe(data.get("importe", "0"))
-                pending_amount = (
-                    Decimal(emi.installment_amount)
-                    - Decimal(emi.amount_paid)
-                )
+                pending_amount = invoice.balance
 
                 if amount != pending_amount:
                     return Response({
@@ -3427,28 +3611,82 @@ class WesternUnionPaymentAPIView(APIView):
                         "cod_operacion": data.get("cod_operacion"),
                         "cod_severidad": "0",
                         "cod_respuesta": "5",
-                        "msg_respuesta": f"Payment amount ({amount}) must exactly match pending EMI amount ({pending_amount})",
+                        "msg_respuesta": f"Payment amount ({amount}) must exactly match pending Invoice amount ({pending_amount})",
                         "texto_ticket": f"Payment rejected. Exact pending amount is ₹{pending_amount:.2f}."
                     }, status=status.HTTP_200_OK)
 
-                emi.amount_paid += amount
-                emi.update_status()
-                emi.save()
+                # 8. Resolve Western Union bank account
+                bank_account = None
+                config = EMIConfiguration.objects.filter(is_active=True).first()
+                if config and config.western_union_bank_account:
+                    bank_account = config.western_union_bank_account
 
-                # Save payment record
-                PaymentRecord.objects.create(
-                    finance_plan=emi.finance_plan,
-                    emi_schedule=emi,
-                    payment_type="EMI",
-                    payment_method="WESTERN_UNION",
-                    payment_amount=amount,
-                    payment_date=timezone.now(),
-                    payment_status="COMPLETED",
-                    transaction_reference=data.get("cod_trx"),
-                    notes="Payment received via Western Union"
+                if not bank_account:
+                    wu_bank_acc_num = getattr(settings, 'WESTERN_UNION_BANK_ACCOUNT_NUMBER', '9876543211')
+                    bank_account = BankAccount.objects.filter(account_number=wu_bank_acc_num).first()
+                    if not bank_account:
+                        bank_account = BankAccount.objects.create(
+                            bank_name="Western Union Settlement Bank",
+                            account_number=wu_bank_acc_num,
+                            account_holder_name="Ola Credit",
+                            initial_balance=Decimal('0.00'),
+                            status="ACTIVE",
+                            account_name="Western Union Account"
+                        )
+
+                deposited_to = bank_account.accounting_code
+                if not deposited_to:
+                    from .models import AccountingCode
+                    deposited_to = AccountingCode.objects.filter(code="1100").first()
+
+                # Generate payment number PR-YYYYMMDD-XXXX
+                import random
+                date_str = timezone.now().strftime("%Y%m%d")
+                rand_str = str(random.randint(1000, 9999))
+                payment_number = f"PR-{date_str}-{rand_str}"
+                while PaymentReceived.objects.filter(payment_number=payment_number).exists():
+                    rand_str = str(random.randint(1000, 9999))
+                    payment_number = f"PR-{date_str}-{rand_str}"
+
+                payment_notes = (
+                    f"Payment received via Western Union (Ref: {cod_trx}). "
+                    f"Deposited to bank account {bank_account.bank_name} - A/C: {bank_account.account_number} ({deposited_to.name if deposited_to else 'None'})"
                 )
 
-        except EMISchedule.DoesNotExist:
+                # Create PaymentReceived record
+                payment_received = PaymentReceived.objects.create(
+                    payment_number=payment_number,
+                    customer=invoice.customer,
+                    amount_received=amount,
+                    payment_date=timezone.now(),
+                    payment_method='WESTERN_UNION',
+                    transaction_reference=cod_trx,
+                    deposited_to=deposited_to,
+                    invoices=[{
+                        'invoice_id': invoice.id,
+                        'amount_applied': float(amount)
+                    }],
+                    notes=payment_notes
+                )
+                payment_received.process_payment(user=None)
+
+                # Fetch or create target PaymentRecord just to maintain compatibility
+                payment_rec = PaymentRecord.objects.filter(payment_received=payment_received).first()
+                if not payment_rec:
+                    PaymentRecord.objects.create(
+                        finance_plan=invoice.finance_plan,
+                        emi_schedule=invoice.emi_schedule,
+                        payment_received=payment_received,
+                        payment_type="EMI",
+                        payment_method="WESTERN_UNION",
+                        payment_amount=amount,
+                        payment_date=timezone.now(),
+                        payment_status="COMPLETED",
+                        transaction_reference=cod_trx,
+                        notes="Payment received via Western Union"
+                    )
+
+        except Invoice.DoesNotExist:
             return Response({
                 "tipo_operacion": data.get("tipo_operacion"),
                 "utility": data.get("utility"),
@@ -3460,7 +3698,7 @@ class WesternUnionPaymentAPIView(APIView):
                 "cod_operacion": data.get("cod_operacion"),
                 "cod_severidad": "0",
                 "cod_respuesta": "9",
-                "msg_respuesta": "EMI record not found",
+                "msg_respuesta": "Invoice record not found",
                 "texto_ticket": "Payment could not be processed."
             }, status=status.HTTP_200_OK)
 
@@ -3614,10 +3852,44 @@ class WesternUnionReverseAPIView(APIView):
 
             emi = EMISchedule.objects.select_for_update().get(id=payment.emi_schedule.id)
             
-            # Revert the amount
+            # Revert the amount on EMI
             emi.amount_paid -= payment.payment_amount
             emi.update_status()
             emi.save()
+
+            # Revert the amount on Invoice
+            from .models import Invoice
+            invoice = Invoice.objects.filter(emi_schedule=emi).first()
+            if invoice:
+                invoice.amount_paid -= payment.payment_amount
+                invoice.balance = invoice.total_amount - invoice.amount_paid
+                invoice.status = 'PENDING' if invoice.amount_paid == 0 else 'PARTIAL'
+                invoice.save()
+
+                # Revert Ledger Entries
+                from .models import AccountingCode, LedgerEntry
+                ar_code = AccountingCode.objects.filter(code="1200").first()
+                if ar_code and payment.payment_received:
+                    # Restored to AR
+                    LedgerEntry.objects.create(
+                        payment_received=payment.payment_received,
+                        invoice=invoice,
+                        accounting_code=ar_code,
+                        type='DEBIT',
+                        amount=payment.payment_amount,
+                        description=f"AR restored due to Western Union reversal of payment {payment.payment_received.payment_number}",
+                        entry_date=timezone.now()
+                    )
+                    # Reversal entry in Bank Account
+                    LedgerEntry.objects.create(
+                        payment_received=payment.payment_received,
+                        invoice=invoice,
+                        accounting_code=payment.payment_received.deposited_to,
+                        type='CREDIT',
+                        amount=payment.payment_amount,
+                        description=f"Reversal of payment {payment.payment_received.payment_number} via Western Union.",
+                        entry_date=timezone.now()
+                    )
 
             # Update payment status
             payment.payment_status = "REVERSED"
@@ -4514,34 +4786,121 @@ class BankAccountListCreateAPIView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class BankAccountDetailAPIView(APIView):
+    """
+    Retrieve a single bank account.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            account = BankAccount.objects.select_related('accounting_code').get(pk=pk)
+            serializer = BankAccountSerializer(account)
+            return Response(serializer.data)
+        except BankAccount.DoesNotExist:
+            return Response({"error": "Bank account not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
 class InvoiceListAPIView(APIView):
     """
     List and filter all invoices, or create a new manual invoice.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [CanViewAdminFinanceDetails]
 
     def get(self, request):
-        invoices = Invoice.objects.all().select_related('customer', 'finance_plan', 'emi_schedule').order_by('-due_date')
+        invoices = Invoice.objects.all().select_related('customer', 'finance_plan', 'emi_schedule')
         
         customer_id = request.query_params.get('customer_id')
         status_param = request.query_params.get('status')
         
         if customer_id:
             invoices = invoices.filter(customer_id=customer_id)
+
+        finance_plan_id = request.query_params.get('finance_plan_id')
+        if finance_plan_id:
+            invoices = invoices.filter(finance_plan_id=finance_plan_id)
         if status_param:
             status_param = status_param.upper()
             today = timezone.now().date()
-            if status_param == 'OVERDUE':
-                invoices = invoices.filter(
-                    Q(status='OVERDUE') | 
-                    Q(status__in=['PENDING', 'PARTIAL'], due_date__lt=today)
-                )
-            elif status_param == 'PENDING':
-                invoices = invoices.filter(status='PENDING', due_date__gte=today)
-            elif status_param == 'PARTIAL':
-                invoices = invoices.filter(status='PARTIAL', due_date__gte=today)
+            if ',' in status_param:
+                statuses = [s.strip() for s in status_param.split(',')]
+                status_q = Q()
+                for status_single in statuses:
+                    if status_single == 'OVERDUE':
+                        status_q |= Q(status='OVERDUE') | Q(status__in=['PENDING', 'PARTIAL'], due_date__lt=today)
+                    elif status_single == 'PENDING':
+                        status_q |= Q(status='PENDING', due_date__gte=today)
+                    elif status_single == 'PARTIAL':
+                        status_q |= Q(status='PARTIAL', due_date__gte=today)
+                    else:
+                        status_q |= Q(status=status_single)
+                invoices = invoices.filter(status_q)
             else:
-                invoices = invoices.filter(status=status_param)
+                if status_param == 'OVERDUE':
+                    invoices = invoices.filter(
+                        Q(status='OVERDUE') | 
+                        Q(status__in=['PENDING', 'PARTIAL'], due_date__lt=today)
+                    )
+                elif status_param == 'PENDING':
+                    invoices = invoices.filter(status='PENDING', due_date__gte=today)
+                elif status_param == 'PARTIAL':
+                    invoices = invoices.filter(status='PARTIAL', due_date__gte=today)
+                else:
+                    invoices = invoices.filter(status=status_param)
+
+        # --------------------- Search Filter ---------------------
+        search = request.query_params.get('search')
+        if search:
+            search_q = Q(invoice_number__icontains=search) | \
+                       Q(customer__first_name__icontains=search) | \
+                       Q(customer__last_name__icontains=search) | \
+                       Q(customer__document_number__icontains=search) | \
+                       Q(finance_plan__device__brand__name__icontains=search) | \
+                       Q(finance_plan__device__model_name__icontains=search) | \
+                       Q(status__icontains=search) | \
+                       Q(notes__icontains=search) | \
+                       Q(invoice_type__icontains=search)
+
+            # Optional numeric search for total_amount, amount_paid, balance
+            try:
+                from decimal import Decimal, InvalidOperation
+                decimal_val = Decimal(search)
+                search_q |= Q(total_amount=decimal_val) | Q(amount_paid=decimal_val) | Q(balance=decimal_val)
+            except (InvalidOperation, ValueError, TypeError):
+                pass
+
+            # Optional date search for due_date or created_at date part
+            try:
+                # support YYYY-MM-DD
+                date_val = datetime.strptime(search, "%Y-%m-%d").date()
+                search_q |= Q(due_date=date_val) | Q(created_at__date=date_val)
+            except (ValueError, TypeError):
+                pass
+
+            invoices = invoices.filter(search_q).distinct()
+
+        # --------------------- Sorting / Ordering ---------------------
+        ordering = request.query_params.get('ordering', '-created_at')
+        allowed_ordering = {
+            'invoice_number': 'invoice_number',
+            '-invoice_number': '-invoice_number',
+            'customer_name': 'customer__first_name',
+            '-customer_name': '-customer__first_name',
+            'due_date': 'due_date',
+            '-due_date': '-due_date',
+            'created_at': 'created_at',
+            '-created_at': '-created_at',
+            'total_amount': 'total_amount',
+            '-total_amount': '-total_amount',
+            'amount_paid': 'amount_paid',
+            '-amount_paid': '-amount_paid',
+            'balance': 'balance',
+            '-balance': '-balance',
+            'status': 'status',
+            '-status': '-status',
+        }
+        db_ordering = allowed_ordering.get(ordering, '-created_at')
+        invoices = invoices.order_by(db_ordering)
 
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(invoices, request, view=self)
@@ -4607,13 +4966,19 @@ class InvoiceListAPIView(APIView):
 
                 total_amount = subtotal + tax_amount
 
-                # Generate unique invoice number
-                import random
+                # Generate unique sequential manual invoice number
                 invoice_number = None
                 while not invoice_number:
-                    date_str = timezone.now().strftime("%Y%m%d")
-                    rand_str = str(random.randint(1000, 9999))
-                    candidate = f"INV-MAN-{date_str}-{rand_str}"
+                    last_inv = Invoice.objects.filter(invoice_number__startswith='OLA-MAN-').order_by('-id').first()
+                    if last_inv:
+                        try:
+                            last_num = int(last_inv.invoice_number.split('-')[-1])
+                            next_num = last_num + 1
+                        except (ValueError, IndexError):
+                            next_num = 1
+                    else:
+                        next_num = 1
+                    candidate = f"OLA-MAN-{next_num:06d}"
                     if not Invoice.objects.filter(invoice_number=candidate).exists():
                         invoice_number = candidate
 
@@ -4658,7 +5023,7 @@ class InvoiceDetailAPIView(APIView):
     """
     Retrieve a single invoice's details.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [CanViewAdminFinanceDetails]
 
     def get(self, request, pk):
         invoice = get_object_or_404(Invoice, pk=pk)
@@ -4677,6 +5042,21 @@ class PaymentReceivedListCreateAPIView(APIView):
         customer_id = request.query_params.get('customer_id')
         if customer_id:
             payments = payments.filter(customer_id=customer_id)
+        
+        finance_plan_id = request.query_params.get('finance_plan_id')
+        if finance_plan_id:
+            try:
+                fp_id = int(finance_plan_id)
+                from .models import Invoice
+                inv_ids = set(Invoice.objects.filter(finance_plan_id=fp_id).values_list('id', flat=True))
+                payment_ids = []
+                for p in payments:
+                    p_invs = p.invoices or []
+                    if any(isinstance(item, dict) and item.get('invoice_id') in inv_ids for item in p_invs):
+                        payment_ids.append(p.id)
+                payments = payments.filter(id__in=payment_ids)
+            except ValueError:
+                pass
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(payments, request, view=self)
         serializer = PaymentReceivedSerializer(page, many=True)
@@ -4753,7 +5133,7 @@ class LedgerEntryListAPIView(APIView):
     """
     List all general ledger entries.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [CanViewAdminFinanceDetails]
 
     def get(self, request):
         entries = LedgerEntry.objects.all().select_related('invoice', 'payment_received', 'accounting_code', 'bill', 'expense', 'payment_made', 'credit_note').order_by('-entry_date', '-id')
@@ -4765,6 +5145,7 @@ class LedgerEntryListAPIView(APIView):
         credit_note_id = request.query_params.get('credit_note_id')
         vendor_id = request.query_params.get('vendor_id')
         customer_id = request.query_params.get('customer_id')
+        accounting_code_id = request.query_params.get('accounting_code_id')
 
         if bill_id:
             entries = entries.filter(bill_id=bill_id)
@@ -4784,6 +5165,8 @@ class LedgerEntryListAPIView(APIView):
         if customer_id:
             from django.db.models import Q
             entries = entries.filter(Q(invoice__customer_id=customer_id) | Q(payment_received__customer_id=customer_id))
+        if accounting_code_id:
+            entries = entries.filter(accounting_code_id=accounting_code_id)
             
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(entries, request, view=self)
@@ -4934,8 +5317,23 @@ class BillListCreateAPIView(APIView):
         
         if vendor_id:
             bills = bills.filter(vendor_id=vendor_id)
+            
         if status_param:
-            bills = bills.filter(status=status_param)
+            status_param = status_param.upper()
+            if ',' in status_param:
+                statuses = [s.strip() for s in status_param.split(',')]
+                bills = bills.filter(status__in=statuses)
+            else:
+                bills = bills.filter(status=status_param)
+
+        search = request.query_params.get('search')
+        if search:
+            from django.db.models import Q
+            bills = bills.filter(
+                Q(bill_number__icontains=search) |
+                Q(vendor__name__icontains=search) |
+                Q(notes__icontains=search)
+            ).distinct()
 
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(bills, request, view=self)
@@ -5061,21 +5459,6 @@ class PaymentMadeListCreateAPIView(APIView):
         serializer = PaymentMadeSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
-
-class PaymentMadeDetailAPIView(APIView):
-    """
-    Retrieve a single payment made to a vendor.
-    """
-    permission_classes = [AllowAny]
-
-    def get(self, request, pk):
-        try:
-            payment = PaymentMade.objects.select_related('vendor', 'paid_from').get(pk=pk)
-            serializer = PaymentMadeSerializer(payment)
-            return Response(serializer.data)
-        except PaymentMade.DoesNotExist:
-            return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
-
     def post(self, request):
         data = request.data
         vendor_id = data.get('vendor_id')
@@ -5123,6 +5506,21 @@ class PaymentMadeDetailAPIView(APIView):
             return Response({"error": "GL Account not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PaymentMadeDetailAPIView(APIView):
+    """
+    Retrieve a single payment made to a vendor.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            payment = PaymentMade.objects.select_related('vendor', 'paid_from').get(pk=pk)
+            serializer = PaymentMadeSerializer(payment)
+            return Response(serializer.data)
+        except PaymentMade.DoesNotExist:
+            return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
 
 
 class CreditNoteListCreateAPIView(APIView):
@@ -5300,6 +5698,55 @@ class FinanceConfigAPIView(APIView):
             }
         })
 
+    def put(self, request):
+        from .models import EMIConfiguration, BankAccount
+        from decimal import Decimal
+        
+        config = EMIConfiguration.objects.filter(is_active=True).first()
+        if not config:
+            config = EMIConfiguration.objects.create(is_active=True)
+            
+        if "punto_pago_bank_account_id" in request.data:
+            punto_pago_bank_account_id = request.data.get("punto_pago_bank_account_id")
+            if punto_pago_bank_account_id:
+                try:
+                    bank_acc = BankAccount.objects.get(id=int(punto_pago_bank_account_id))
+                    config.punto_pago_bank_account = bank_acc
+                except (BankAccount.DoesNotExist, ValueError, TypeError):
+                    return Response({
+                        "status": "error",
+                        "message": f"Bank account with ID {punto_pago_bank_account_id} not found for Punto Pago."
+                    }, status=status.HTTP_404_NOT_FOUND)
+            else:
+                config.punto_pago_bank_account = None
+
+        if "western_union_bank_account_id" in request.data:
+            western_union_bank_account_id = request.data.get("western_union_bank_account_id")
+            if western_union_bank_account_id:
+                try:
+                    bank_acc = BankAccount.objects.get(id=int(western_union_bank_account_id))
+                    config.western_union_bank_account = bank_acc
+                except (BankAccount.DoesNotExist, ValueError, TypeError):
+                    return Response({
+                        "status": "error",
+                        "message": f"Bank account with ID {western_union_bank_account_id} not found for Western Union."
+                    }, status=status.HTTP_404_NOT_FOUND)
+            else:
+                config.western_union_bank_account = None
+            
+        if "processing_fee_default" in request.data:
+            config.processing_fee_default = Decimal(str(request.data["processing_fee_default"]))
+        if "insurance_fee_default" in request.data:
+            config.insurance_fee_default = Decimal(str(request.data["insurance_fee_default"]))
+        if "tax_rate_pct" in request.data:
+            config.tax_rate_pct = Decimal(str(request.data["tax_rate_pct"]))
+            
+        config.save()
+        return Response({
+            "status": "success",
+            "message": "Configuration updated successfully."
+        })
+
 
 class FinanceGeneratePlansAPIView(APIView):
     permission_classes = [IsAuthenticatedUser]
@@ -5348,48 +5795,11 @@ class FinanceContractsAPIView(APIView):
         schedules = plan.emi_schedule.all().order_by('installment_number')
         if not schedules.exists():
             import datetime
-            from .models import LoanTerm, InterestPlan, EMISchedule
             from django.utils import timezone
+            from .models import EMISchedule
             frequency_days = plan.installment_frequency_days or 30
-            term_months = plan.selected_term
-            principal = Decimal(str(plan.amount_to_finance))
-
-            if frequency_days == 30:
-                total_installments = term_months
-            elif frequency_days == 15:
-                total_installments = term_months * 2
-            elif frequency_days == 7:
-                total_installments = term_months * 4
-            elif frequency_days == 3:
-                total_installments = term_months * 8
-            else:
-                total_installments = int(term_months * 30 / frequency_days)
-
-            term_obj = LoanTerm.objects.filter(months=term_months).first()
-            plan_obj = InterestPlan.objects.filter(loan_term=term_obj, is_active=True).first()
-            multiplier = plan_obj.risk_multiplier if plan_obj else (term_obj.multiplier if term_obj else Decimal('1.2'))
-            if multiplier is None or multiplier <= 0:
-                multiplier = Decimal('1.2')
-
-            total_repayment = principal * Decimal(str(multiplier))
-            emi_amount = (total_repayment / Decimal(str(total_installments))).quantize(Decimal('0.01'))
             first_due_date = timezone.now().date() + datetime.timedelta(days=frequency_days)
-
-            schedules_list = []
-            current_balance = total_repayment
-            for i in range(1, total_installments + 1):
-                due_date = first_due_date + datetime.timedelta(days=(i-1)*frequency_days)
-                current_balance -= emi_amount
-                s = EMISchedule(
-                    installment_number=i,
-                    due_date=due_date,
-                    installment_amount=emi_amount,
-                    principal=emi_amount,
-                    interest=Decimal('0.00'),
-                    balance=max(Decimal('0.00'), current_balance),
-                    status='UPCOMING'
-                )
-                schedules_list.append(s)
+            schedules_list = EMISchedule.generate_schedule(plan, first_due_date, save=False)
             schedule_data = EMIScheduleSerializer(schedules_list, many=True).data
         else:
             schedule_data = EMIScheduleSerializer(schedules, many=True).data
@@ -5493,15 +5903,23 @@ class MerchantSettlementAPIView(APIView):
     permission_classes = [IsAuthenticatedUser]
 
     def get(self, request):
-        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+        if request.user.role not in ["admin", "global_manager", "financial_manager", "store_manager"]:
             return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         store_id = request.query_params.get("store_id")
         status_filter = request.query_params.get("status")
         
         qs = MerchantSettlement.objects.all().select_related('store', 'finance_plan__credit_application__customer', 'bank_account')
-        if store_id:
-            qs = qs.filter(store_id=store_id)
+        
+        if request.user.role == 'store_manager':
+            if request.user.store:
+                qs = qs.filter(store=request.user.store)
+            else:
+                qs = qs.none()
+        else:
+            if store_id:
+                qs = qs.filter(store_id=store_id)
+                
         if status_filter:
             qs = qs.filter(status=status_filter)
 
@@ -5604,6 +6022,10 @@ class CustomerLoanLedgerAPIView(APIView):
         if not plan:
             return Response({"status": "error", "message": "Finance Plan not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        if request.user.role in ["salesperson", "store_manager"]:
+            if plan.store != request.user.store:
+                return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
         ledger_entries = CustomerLoanLedgerEntry.objects.filter(finance_plan=plan).order_by('-entry_date', '-id')
         last_entry = ledger_entries.first()
         
@@ -5667,6 +6089,714 @@ class LoanManualActionAPIView(APIView):
             })
         except Exception as e:
             return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class EMIInvoiceCreateAPIView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def post(self, request, emi_id):
+        if request.user.role not in ["admin", "global_manager", "financial_manager"]:
+            return Response({"status": "error", "message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        from .models import EMISchedule, Invoice
+        from django.db import transaction
+        from django.utils import timezone
+        import random
+        from decimal import Decimal
+
+        try:
+            with transaction.atomic():
+                emi = EMISchedule.objects.select_for_update().filter(id=emi_id).first()
+                if not emi:
+                    return Response({"status": "error", "message": "EMI Schedule not found."}, status=status.HTTP_404_NOT_FOUND)
+
+                plan = emi.finance_plan
+                if plan.disbursement_status != 'DISBURSED':
+                    return Response({"status": "error", "message": "Cannot generate invoice for an undisbursed loan."}, status=status.HTTP_400_BAD_REQUEST)
+
+                if Invoice.objects.filter(emi_schedule=emi).exists():
+                    return Response({"status": "error", "message": "Invoice already generated for this EMI installment."}, status=status.HTTP_400_BAD_REQUEST)
+
+                n = emi.installment_number
+                if n > 1:
+                    prev_emi = EMISchedule.objects.filter(finance_plan=plan, installment_number=n-1).first()
+                    if not prev_emi or not Invoice.objects.filter(emi_schedule=prev_emi).exists():
+                        return Response({
+                            "status": "error",
+                            "message": f"Cannot generate invoice for installment #{n}. Installment #{n-1} must have an invoice generated first."
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
+                # Generate unique sequential EMI invoice number
+                invoice_number = None
+                while not invoice_number:
+                    last_inv = Invoice.objects.filter(invoice_number__startswith='OLA-EMI-').order_by('-id').first()
+                    if last_inv:
+                        try:
+                            last_num = int(last_inv.invoice_number.split('-')[-1])
+                            next_num = last_num + 1
+                        except (ValueError, IndexError):
+                            next_num = 1
+                    else:
+                        next_num = 1
+                    candidate = f"OLA-EMI-{next_num:06d}"
+                    if not Invoice.objects.filter(invoice_number=candidate).exists():
+                        invoice_number = candidate
+
+                # Calculate balances
+                penalty_amount = Decimal(str(request.data.get('penalty_amount', '0.00')))
+                amount_paid = emi.amount_paid
+                total_to_bill = emi.installment_amount + penalty_amount
+                balance = total_to_bill - amount_paid
+                inv_status = 'PAID' if emi.status == 'PAID' else 'PENDING'
+ 
+                # Retrieve customer
+                customer = plan.credit_application.customer
+ 
+                # Line item description
+                line_items = [{
+                    "name": f"EMI Installment #{n} - Plan {plan.loan_account_number or plan.id}",
+                    "qty": 1.0,
+                    "unit_price": float(emi.installment_amount),
+                    "sales_account_id": None,
+                    "tax_rate_id": None,
+                    "tax_rate": 0.0,
+                    "tax_amount": 0.0,
+                    "total": float(emi.installment_amount)
+                }]
+                if penalty_amount > 0:
+                    line_items.append({
+                        "name": f"Late Penalty Fee - Plan {plan.loan_account_number or plan.id}",
+                        "qty": 1.0,
+                        "unit_price": float(penalty_amount),
+                        "sales_account_id": None,
+                        "tax_rate_id": None,
+                        "tax_rate": 0.0,
+                        "tax_amount": 0.0,
+                        "total": float(penalty_amount)
+                    })
+ 
+                invoice = Invoice.objects.create(
+                    invoice_number=invoice_number,
+                    customer=customer,
+                    finance_plan=plan,
+                    emi_schedule=emi,
+                    due_date=emi.due_date,
+                    base_amount=emi.installment_amount,
+                    subtotal=total_to_bill,
+                    tax_amount=Decimal('0.00'),
+                    total_amount=total_to_bill,
+                    balance=balance,
+                    amount_paid=amount_paid,
+                    principal_amount=emi.principal,
+                    interest_amount=emi.interest,
+                    penalty_amount=penalty_amount,
+                    status=inv_status,
+                    invoice_type='PLAN',
+                    line_items=line_items,
+                    notes=f"Generated invoice for EMI #{n} on plan {plan.loan_account_number or plan.id}"
+                )
+                
+                # Generate double-entry ledger entries!
+                invoice.generate_ledger_entries()
+
+                # Also ensure the EMI status is updated to DUE if it was DRAFT/UPCOMING and is now due
+                if emi.status == 'DRAFT':
+                    emi.status = 'UPCOMING'
+                    emi.save()
+
+                return Response({
+                    "status": "success",
+                    "message": f"Invoice {invoice.invoice_number} generated successfully.",
+                    "data": {
+                        "id": invoice.id,
+                        "invoice_number": invoice.invoice_number,
+                        "total_amount": str(invoice.total_amount),
+                        "status": invoice.status
+                    }
+                })
+
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+from .models import UncategorizedBankEntry
+from .serializers import UncategorizedBankEntrySerializer
+from django.db import transaction
+from django.utils import timezone
+from decimal import Decimal
+from datetime import datetime, date
+import csv
+import io
+import openpyxl
+
+def parse_statement_file(file_obj, filename):
+    parsed_entries = []
+    is_excel = filename.endswith('.xlsx') or filename.endswith('.xls')
+    
+    if is_excel:
+        try:
+            wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
+            sheet = wb.active
+            rows_iter = list(sheet.iter_rows(values_only=True))
+        except Exception as e:
+            file_obj.seek(0)
+            is_excel = False
+
+    if not is_excel:
+        try:
+            content_str = file_obj.read().decode('utf-8-sig', errors='ignore')
+            reader = csv.reader(io.StringIO(content_str))
+            rows_iter = list(reader)
+        except Exception as e:
+            raise ValueError(f"Failed to read file as CSV or Excel: {str(e)}")
+
+    headers = []
+    
+    # English & Spanish headers mappings
+    DATE_HEADERS = ['date', 'fecha', 'fecha de proceso', 'value date', 'fecha valor']
+    DESC_HEADERS = ['description', 'descripcion', 'descripción', 'concepto', 'detalle', 'narration', 'glosa', 'motivo']
+    REF_HEADERS = ['reference', 'referencia', 'documento', 'doc', 'ref', 'nro doc', 'no. doc', 'nro. documento']
+    AMOUNT_HEADERS = ['amount', 'monto', 'valor', 'amount usd', 'importe', 'saldo']
+    DEBIT_HEADERS = ['debit', 'debito', 'débito', 'egreso', 'cargo', 'retiros']
+    CREDIT_HEADERS = ['credit', 'credito', 'crédito', 'ingreso', 'abono', 'depósitos', 'depositos']
+
+    for r_idx, row in enumerate(rows_iter, 1):
+        if not row or not any(x is not None and str(x).strip() for x in row):
+            continue
+            
+        row_str = [str(x).lower().strip() if x is not None else "" for x in row]
+        
+        if not headers:
+            if any(h in row_str for h in ['date', 'fecha', 'concepto', 'description', 'amount', 'monto', 'valor', 'debito', 'credito']):
+                headers = row_str
+                continue
+            if r_idx < 10:
+                continue
+            else:
+                headers = [str(i) for i in range(len(row))]
+                
+        row_dict = {}
+        for c_idx, val in enumerate(row):
+            if c_idx < len(headers):
+                row_dict[headers[c_idx]] = val
+                
+        date_val = None
+        for key in DATE_HEADERS:
+            if key in row_dict and row_dict[key] is not None:
+                date_val = row_dict[key]
+                break
+                
+        desc_val = None
+        for key in DESC_HEADERS:
+            if key in row_dict and row_dict[key] is not None:
+                desc_val = str(row_dict[key]).strip()
+                break
+        if not desc_val:
+            desc_val = "Bank Transaction"
+
+        ref_val = None
+        for key in REF_HEADERS:
+            if key in row_dict and row_dict[key] is not None:
+                ref_val = str(row_dict[key]).strip()
+                break
+
+        amount_val = Decimal('0.00')
+        type_val = 'CREDIT'
+        
+        debit_col = None
+        for key in DEBIT_HEADERS:
+            if key in row_dict and row_dict[key] is not None:
+                try:
+                    debit_col = Decimal(str(row_dict[key]).replace(',', '').strip())
+                except:
+                    pass
+                break
+                
+        credit_col = None
+        for key in CREDIT_HEADERS:
+            if key in row_dict and row_dict[key] is not None:
+                try:
+                    credit_col = Decimal(str(row_dict[key]).replace(',', '').strip())
+                except:
+                    pass
+                break
+                
+        if debit_col is not None and debit_col > 0:
+            amount_val = debit_col
+            type_val = 'DEBIT'
+        elif credit_col is not None and credit_col > 0:
+            amount_val = credit_col
+            type_val = 'CREDIT'
+        else:
+            for key in AMOUNT_HEADERS:
+                if key in row_dict and row_dict[key] is not None:
+                    try:
+                        val = Decimal(str(row_dict[key]).replace(',', '').strip())
+                        if val < 0:
+                            amount_val = abs(val)
+                            type_val = 'DEBIT'
+                        else:
+                            amount_val = val
+                            type_val = 'CREDIT'
+                    except:
+                        pass
+                    break
+        
+        if isinstance(date_val, str):
+            date_val = date_val.strip()
+            parsed_date = None
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+                try:
+                    parsed_date = datetime.strptime(date_val, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed_date:
+                date_val = parsed_date
+            else:
+                date_val = timezone.now().date()
+        elif isinstance(date_val, datetime):
+            date_val = date_val.date()
+        elif not isinstance(date_val, date):
+            date_val = timezone.now().date()
+
+        if amount_val > 0:
+            parsed_entries.append({
+                'entry_date': date_val,
+                'description': desc_val,
+                'amount': amount_val,
+                'type': type_val,
+                'reference_number': ref_val
+            })
+            
+    return parsed_entries
+
+
+class BankAccountUploadStatementAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, bank_account_id):
+        try:
+            bank_account = BankAccount.objects.get(pk=bank_account_id)
+        except BankAccount.DoesNotExist:
+            return Response({"error": "Bank account not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response({"error": "No file uploaded"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            entries_data = parse_statement_file(file_obj, file_obj.name)
+        except Exception as e:
+            return Response({"error": f"Error parsing statement file: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        created_count = 0
+        skipped_count = 0
+
+        with transaction.atomic():
+            for item in entries_data:
+                exists = UncategorizedBankEntry.objects.filter(
+                    bank_account=bank_account,
+                    entry_date=item['entry_date'],
+                    amount=item['amount'],
+                    type=item['type'],
+                    description=item['description'],
+                    reference_number=item['reference_number']
+                ).exists()
+
+                if not exists:
+                    UncategorizedBankEntry.objects.create(
+                        bank_account=bank_account,
+                        entry_date=item['entry_date'],
+                        description=item['description'],
+                        amount=item['amount'],
+                        type=item['type'],
+                        reference_number=item['reference_number']
+                    )
+                    created_count += 1
+                else:
+                    skipped_count += 1
+
+        return Response({
+            "status": "success",
+            "message": f"Successfully parsed statement. Imported {created_count} entries, skipped {skipped_count} duplicates.",
+            "imported_count": created_count,
+            "skipped_count": skipped_count
+        }, status=status.HTTP_201_CREATED)
+
+
+class BankAccountUncategorizedEntriesAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, bank_account_id):
+        entries = UncategorizedBankEntry.objects.filter(
+            bank_account_id=bank_account_id,
+            is_mapped=False
+        )
+        
+        entry_type = request.query_params.get('type')
+        if entry_type:
+            entries = entries.filter(type=entry_type.upper())
+            
+        entries = entries.order_by('-entry_date', '-id')
+        
+        paginator = FinancePlanPagination()
+        page = paginator.paginate_queryset(entries, request, view=self)
+        serializer = UncategorizedBankEntrySerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class UncategorizedBankEntryMapAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        try:
+            entry = UncategorizedBankEntry.objects.select_related('bank_account').get(pk=pk)
+        except UncategorizedBankEntry.DoesNotExist:
+            return Response({"error": "Uncategorized entry not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if entry.is_mapped:
+            return Response({"error": "Entry is already mapped"}, status=status.HTTP_400_BAD_REQUEST)
+
+        invoices_data = request.data.get('invoices')
+        single_invoice_id = request.data.get('invoice_id')
+
+        if not invoices_data and not single_invoice_id:
+            return Response({"error": "Missing invoices or invoice_id parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                target_customer = None
+                sum_amount = Decimal('0.00')
+                first_invoice = None
+
+                if not invoices_data:
+                    # Single invoice backward compatible mapping
+                    try:
+                        invoice = Invoice.objects.select_related('customer').get(pk=single_invoice_id)
+                    except Invoice.DoesNotExist:
+                        return Response({"error": "Invoice not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                    if invoice.balance <= 0:
+                        return Response({"error": f"Invoice {invoice.invoice_number} is already fully paid"}, status=status.HTTP_400_BAD_REQUEST)
+
+                    applied_amount = min(entry.amount, invoice.balance)
+                    invoices_list = [{
+                        'invoice_id': invoice.id,
+                        'amount_applied': float(applied_amount)
+                    }]
+                    sum_amount = applied_amount
+                    target_customer = invoice.customer
+                    first_invoice = invoice
+                else:
+                    # Multi-invoice Zoho-like mapping
+                    if not isinstance(invoices_data, list) or len(invoices_data) == 0:
+                        return Response({"error": "invoices must be a non-empty list"}, status=status.HTTP_400_BAD_REQUEST)
+
+                    invoices_list = []
+                    for item in invoices_data:
+                        inv_id = item.get('invoice_id')
+                        amt = Decimal(str(item.get('amount_applied', 0)))
+                        if not inv_id or amt <= 0:
+                            return Response({"error": "Invalid invoice_id or amount_applied in invoices list"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        try:
+                            invoice = Invoice.objects.select_related('customer').get(pk=inv_id)
+                        except Invoice.DoesNotExist:
+                            return Response({"error": f"Invoice with ID {inv_id} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                        if invoice.balance <= 0:
+                            return Response({"error": f"Invoice {invoice.invoice_number} is already fully paid"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if amt > invoice.balance:
+                            return Response({"error": f"Applied amount ({amt}) exceeds balance ({invoice.balance}) for invoice {invoice.invoice_number}"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if target_customer is None:
+                            target_customer = invoice.customer
+                            first_invoice = invoice
+                        elif target_customer.id != invoice.customer.id:
+                            return Response({"error": f"All invoices must belong to the same customer ({target_customer.first_name} {target_customer.last_name})"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        sum_amount += amt
+                        invoices_list.append({
+                            'invoice_id': invoice.id,
+                            'amount_applied': float(amt)
+                        })
+
+                    if sum_amount > entry.amount:
+                        return Response({"error": f"Total applied amount ({sum_amount}) exceeds statement entry amount ({entry.amount})"}, status=status.HTTP_400_BAD_REQUEST)
+
+                deposited_to = entry.bank_account.accounting_code
+                if not deposited_to:
+                    return Response({"error": "Bank account is not linked to any accounting code"}, status=status.HTTP_400_BAD_REQUEST)
+
+                import random
+                date_str = timezone.now().strftime("%Y%m%d")
+                rand_str = str(random.randint(1000, 9999))
+                payment_number = f"PR-{date_str}-{rand_str}"
+
+                payment = PaymentReceived.objects.create(
+                    payment_number=payment_number,
+                    customer=target_customer,
+                    amount_received=sum_amount,
+                    payment_date=timezone.now(),
+                    payment_method='BANK_TRANSFER',
+                    transaction_reference=entry.reference_number or f"STATEMENT-MAP-{entry.id}",
+                    deposited_to=deposited_to,
+                    invoices=invoices_list,
+                    notes=f"Mapped from bank statement: {entry.description}"
+                )
+
+                payment.process_payment(user=request.user if request.user.is_authenticated else None)
+
+                entry.is_mapped = True
+                entry.invoice = first_invoice
+                entry.save()
+
+                AuditLog.objects.create(
+                    user=request.user if request.user.is_authenticated else None,
+                    customer=target_customer,
+                    action_type='PAYMENT_RECEIVED',
+                    description=f"Recorded PaymentReceived {payment_number} of {sum_amount} via bank statement mapping to multiple invoices",
+                    metadata={
+                        "payment_number": payment_number,
+                        "amount_received": str(sum_amount),
+                        "payment_method": "BANK_TRANSFER",
+                        "transaction_reference": entry.reference_number
+                    }
+                )
+
+            return Response({
+                "status": "success",
+                "message": f"Successfully mapped entry to {len(invoices_list)} invoice(s). Created payment {payment_number}.",
+                "payment_number": payment_number,
+                "applied_amount": str(sum_amount)
+            })
+
+        except Exception as e:
+            return Response({"error": f"Failed to map entry: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from .models import PaymentMade
+
+class UncategorizedBankEntriesBulkMapAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        entry_ids = request.data.get('entry_ids')
+        if not entry_ids or not isinstance(entry_ids, list):
+            return Response({"error": "Missing or invalid entry_ids parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
+        entries = UncategorizedBankEntry.objects.filter(id__in=entry_ids).select_related('bank_account')
+        if len(entries) != len(entry_ids):
+            return Response({"error": "One or more bank entries were not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if any(e.is_mapped for e in entries):
+            return Response({"error": "One or more bank entries are already mapped"}, status=status.HTTP_400_BAD_REQUEST)
+
+        types = set(e.type for e in entries)
+        if len(types) > 1:
+            return Response({"error": "Cannot map mixed CREDIT and DEBIT entries together"}, status=status.HTTP_400_BAD_REQUEST)
+        entry_type = list(types)[0]
+
+        bank_accounts = set(e.bank_account.id for e in entries)
+        if len(bank_accounts) > 1:
+            return Response({"error": "All bank entries must belong to the same bank account"}, status=status.HTTP_400_BAD_REQUEST)
+        bank_account = entries[0].bank_account
+
+        total_entry_amount = sum(e.amount for e in entries)
+
+        if entry_type == 'CREDIT':
+            invoices_data = request.data.get('invoices')
+            if not invoices_data or not isinstance(invoices_data, list):
+                return Response({"error": "Missing or invalid invoices parameter for CREDIT entries"}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                with transaction.atomic():
+                    target_customer = None
+                    sum_amount = Decimal('0.00')
+                    first_invoice = None
+                    invoices_list = []
+
+                    for item in invoices_data:
+                        inv_id = item.get('invoice_id')
+                        amt = Decimal(str(item.get('amount_applied', 0)))
+                        if not inv_id or amt <= 0:
+                            return Response({"error": "Invalid invoice_id or amount_applied in invoices list"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        try:
+                            invoice = Invoice.objects.select_related('customer').get(pk=inv_id)
+                        except Invoice.DoesNotExist:
+                            return Response({"error": f"Invoice with ID {inv_id} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                        if invoice.balance <= 0:
+                            return Response({"error": f"Invoice {invoice.invoice_number} is already fully paid"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if amt > invoice.balance:
+                            return Response({"error": f"Applied amount ({amt}) exceeds balance ({invoice.balance}) for invoice {invoice.invoice_number}"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if target_customer is None:
+                            target_customer = invoice.customer
+                            first_invoice = invoice
+                        elif target_customer.id != invoice.customer.id:
+                            return Response({"error": f"All invoices must belong to the same customer ({target_customer.first_name} {target_customer.last_name})"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        sum_amount += amt
+                        invoices_list.append({
+                            'invoice_id': invoice.id,
+                            'amount_applied': float(amt)
+                        })
+
+                    if sum_amount > total_entry_amount:
+                        return Response({"error": f"Total applied amount ({sum_amount}) exceeds total statement entries amount ({total_entry_amount})"}, status=status.HTTP_400_BAD_REQUEST)
+
+                    deposited_to = bank_account.accounting_code
+                    if not deposited_to:
+                        return Response({"error": "Bank account is not linked to any accounting code"}, status=status.HTTP_400_BAD_REQUEST)
+
+                    import random
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    payment_number = f"PR-{date_str}-{rand_str}"
+
+                    refs = [e.reference_number for e in entries if e.reference_number]
+                    tx_ref = ", ".join(refs) if refs else f"BULK-MAP-{payment_number}"
+
+                    payment = PaymentReceived.objects.create(
+                        payment_number=payment_number,
+                        customer=target_customer,
+                        amount_received=sum_amount,
+                        payment_date=timezone.now(),
+                        payment_method='BANK_TRANSFER',
+                        transaction_reference=tx_ref[:100],
+                        deposited_to=deposited_to,
+                        invoices=invoices_list,
+                        notes=f"Mapped from bank statement bulk entries: " + ", ".join([e.description[:30] for e in entries])
+                    )
+
+                    payment.process_payment(user=request.user if request.user.is_authenticated else None)
+
+                    for e in entries:
+                        e.is_mapped = True
+                        e.invoice = first_invoice
+                        e.save()
+
+                    AuditLog.objects.create(
+                        user=request.user if request.user.is_authenticated else None,
+                        customer=target_customer,
+                        action_type='PAYMENT_RECEIVED',
+                        description=f"Recorded PaymentReceived {payment_number} of {sum_amount} via bank statement bulk mapping to multiple invoices",
+                        metadata={
+                            "payment_number": payment_number,
+                            "amount_received": str(sum_amount),
+                            "payment_method": "BANK_TRANSFER",
+                            "mapped_entries": entry_ids
+                        }
+                    )
+
+                return Response({
+                    "status": "success",
+                    "message": f"Successfully mapped {len(entries)} entries to {len(invoices_list)} invoice(s). Created payment {payment_number}.",
+                    "payment_number": payment_number,
+                    "applied_amount": str(sum_amount)
+                })
+
+            except Exception as e:
+                return Response({"error": f"Failed to map entries: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        else:
+            # --- DEBIT Mapping (Vendor Bills) ---
+            bills_data = request.data.get('bills')
+            if not bills_data or not isinstance(bills_data, list):
+                return Response({"error": "Missing or invalid bills parameter for DEBIT entries"}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                with transaction.atomic():
+                    target_vendor = None
+                    sum_amount = Decimal('0.00')
+                    bills_list = []
+
+                    for item in bills_data:
+                        b_id = item.get('bill_id')
+                        amt = Decimal(str(item.get('amount_applied', 0)))
+                        if not b_id or amt <= 0:
+                            return Response({"error": "Invalid bill_id or amount_applied in bills list"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        try:
+                            bill = Bill.objects.select_related('vendor').get(pk=b_id)
+                        except Bill.DoesNotExist:
+                            return Response({"error": f"Bill with ID {b_id} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                        if bill.balance <= 0:
+                            return Response({"error": f"Bill {bill.bill_number} is already fully paid"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if amt > bill.balance:
+                            return Response({"error": f"Applied amount ({amt}) exceeds balance ({bill.balance}) for bill {bill.bill_number}"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if target_vendor is None:
+                            target_vendor = bill.vendor
+                        elif target_vendor.id != bill.vendor.id:
+                            return Response({"error": f"All bills must belong to the same vendor ({target_vendor.name})"}, status=status.HTTP_400_BAD_REQUEST)
+
+                        sum_amount += amt
+                        bills_list.append({
+                            'bill_id': bill.id,
+                            'amount_applied': float(amt)
+                        })
+
+                    if sum_amount > total_entry_amount:
+                        return Response({"error": f"Total applied amount ({sum_amount}) exceeds total statement entries amount ({total_entry_amount})"}, status=status.HTTP_400_BAD_REQUEST)
+
+                    paid_from = bank_account.accounting_code
+                    if not paid_from:
+                        return Response({"error": "Bank account is not linked to any accounting code"}, status=status.HTTP_400_BAD_REQUEST)
+
+                    import random
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    payment_number = f"PM-{date_str}-{rand_str}"
+
+                    refs = [e.reference_number for e in entries if e.reference_number]
+                    tx_ref = ", ".join(refs) if refs else f"BULK-MAP-{payment_number}"
+
+                    payment = PaymentMade.objects.create(
+                        payment_number=payment_number,
+                        vendor=target_vendor,
+                        amount_paid=sum_amount,
+                        payment_date=timezone.now().date(),
+                        payment_method='BANK_TRANSFER',
+                        paid_from=paid_from,
+                        bills=bills_list,
+                        notes=f"Mapped from bank statement bulk entries: " + ", ".join([e.description[:30] for e in entries])
+                    )
+
+                    payment.process_payment()
+
+                    for e in entries:
+                        e.is_mapped = True
+                        e.save()
+
+                    AuditLog.objects.create(
+                        user=request.user if request.user.is_authenticated else None,
+                        action_type='PAYMENT_MADE',
+                        description=f"Recorded PaymentMade {payment_number} of {sum_amount} to vendor {target_vendor.name} via bank statement mapping",
+                        metadata={
+                            "payment_number": payment_number,
+                            "amount_paid": str(sum_amount),
+                            "payment_method": "BANK_TRANSFER",
+                            "mapped_entries": entry_ids
+                        }
+                    )
+
+                return Response({
+                    "status": "success",
+                    "message": f"Successfully mapped {len(entries)} entries to {len(bills_list)} bill(s). Created vendor payment {payment_number}.",
+                    "payment_number": payment_number,
+                    "applied_amount": str(sum_amount)
+                })
+
+            except Exception as e:
+                return Response({"error": f"Failed to map entries: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
