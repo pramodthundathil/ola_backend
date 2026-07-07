@@ -1623,19 +1623,48 @@ class CustomerIncomeFileView(APIView):
 
     # helper function to refresh SQLite cache
     def load_excel_to_sqlite(self, file_path):
-        if os.path.exists(settings.EXCEL_CACHE_DB):
-            os.remove(settings.EXCEL_CACHE_DB)
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        
+        try:
+            # Ensure the directory of settings.EXCEL_CACHE_DB exists
+            db_dir = os.path.dirname(settings.EXCEL_CACHE_DB)
+            if db_dir and not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
 
-        df = pd.read_excel(file_path)
-        df = df.rename(columns={
-            'CEDULA': 'document_id',
-            'PATRONO': 'employer',
-            'SALARIO': 'monthly_income'
-        })
+            # Try removing the old DB file if it exists, but proceed if it's locked/fails
+            if os.path.exists(settings.EXCEL_CACHE_DB):
+                try:
+                    os.remove(settings.EXCEL_CACHE_DB)
+                except Exception as e:
+                    logger.warning(f"Could not remove existing EXCEL_CACHE_DB file: {e}")
 
-        conn = sqlite3.connect(settings.EXCEL_CACHE_DB)
-        df.to_sql('income_data', conn, index=False, if_exists='replace')
-        conn.close()
+            df = pd.read_excel(file_path)
+
+            # Validate columns
+            required_cols = {'CEDULA', 'SALARIO'}
+            df_cols = set(df.columns)
+            missing = required_cols - df_cols
+            if missing:
+                raise DRFValidationError(f"Missing required columns in Excel sheet: {', '.join(missing)}")
+
+            df = df.rename(columns={
+                'CEDULA': 'document_id',
+                'PATRONO': 'employer',
+                'SALARIO': 'monthly_income'
+            })
+
+            conn = sqlite3.connect(settings.EXCEL_CACHE_DB)
+            df.to_sql('income_data', conn, index=False, if_exists='replace')
+            try:
+                conn.execute("VACUUM")
+            except Exception:
+                pass
+            conn.close()
+        except DRFValidationError:
+            raise
+        except Exception as e:
+            logger.exception("Failed to process Excel sheet and cache to SQLite: %s", e)
+            raise DRFValidationError(f"Failed to process Excel sheet: {str(e)}")
 
    # -----------GET METHOD-------------
 

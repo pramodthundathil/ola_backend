@@ -82,11 +82,9 @@ class TestWesternUnionAPIs(TestCase):
             status="UPCOMING"
         )
 
+        from finance.signals import seed_default_accounting_codes
+        seed_default_accounting_codes()
         from finance.models import Invoice, AccountingCode, BankAccount
-        AccountingCode.objects.get_or_create(code="1100", defaults={"name": "Cash", "type": "ASSET"})
-        AccountingCode.objects.get_or_create(code="1200", defaults={"name": "EMI Receivable", "type": "ASSET"})
-        AccountingCode.objects.get_or_create(code="2500", defaults={"name": "Revenue", "type": "REVENUE"})
-        AccountingCode.objects.get_or_create(code="1300", defaults={"name": "Deferred Revenue", "type": "LIABILITY"})
 
         self.invoice1 = Invoice.objects.create(
             invoice_number="INV-WU-01",
@@ -345,12 +343,12 @@ class TestWesternUnionAPIs(TestCase):
 
     def test_payment_partial_rejected_for_closed_amounts(self):
         url = reverse("v2_finance_directa_create")
-        barcode = self.get_expected_barcode(self.emi1)
+        barcode = self.get_expected_barcode(self.invoice1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -383,12 +381,12 @@ class TestWesternUnionAPIs(TestCase):
         )
         
         url = reverse("v2_finance_directa_create")
-        barcode = self.get_expected_barcode(self.emi1)
+        barcode = self.get_expected_barcode(self.invoice1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -412,7 +410,7 @@ class TestWesternUnionAPIs(TestCase):
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -432,12 +430,12 @@ class TestWesternUnionAPIs(TestCase):
 
     def test_payment_customer_validation_failure(self):
         url = reverse("v2_finance_directa_create")
-        barcode = self.get_expected_barcode(self.emi1)
+        barcode = self.get_expected_barcode(self.invoice1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": "99999", # wrong customer id
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -457,12 +455,12 @@ class TestWesternUnionAPIs(TestCase):
 
     def test_payment_utility_validation_failure(self):
         url = reverse("v2_finance_directa_create")
-        barcode = self.get_expected_barcode(self.emi1)
+        barcode = self.get_expected_barcode(self.invoice1)
         payload = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -511,12 +509,12 @@ class TestWesternUnionAPIs(TestCase):
     def test_reversal_success(self):
         # First process payment successfully
         url_pay = reverse("v2_finance_directa_create")
-        barcode = self.get_expected_barcode(self.emi1)
+        barcode = self.get_expected_barcode(self.invoice1)
         payload_pay = {
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "D",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
@@ -574,13 +572,13 @@ class TestWesternUnionAPIs(TestCase):
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "R",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
             "secuencia": "1125",
             "cod_trx": "D00561202605261020001125",
-            "cod_barra": self.get_expected_barcode(self.emi1),
+            "cod_barra": self.get_expected_barcode(self.invoice1),
             "utility": "90061234",
             "importe": "10000",
             "medio_pago": "E01",
@@ -598,13 +596,13 @@ class TestWesternUnionAPIs(TestCase):
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "R",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
             "secuencia": "1125",
             "cod_trx": "NON_EXISTENT_TRX",
-            "cod_barra": self.get_expected_barcode(self.emi1),
+            "cod_barra": self.get_expected_barcode(self.invoice1),
             "utility": "90061234",
             "importe": "10000",
             "medio_pago": "E01",
@@ -622,13 +620,13 @@ class TestWesternUnionAPIs(TestCase):
             "tipo_operacion": "CashIn",
             "cod_cliente": str(self.customer.id),
             "cod_operacion": "R",
-            "id_item": str(self.emi1.id),
+            "id_item": str(self.invoice1.id),
             "terminal": "D00561",
             "fecha": "20260526",
             "hora": "102000",
             "secuencia": "1125",
             "cod_trx": "D00561202605261020001125",
-            "cod_barra": self.get_expected_barcode(self.emi1),
+            "cod_barra": self.get_expected_barcode(self.invoice1),
             "utility": "90061234",
             "importe": "10000",
             "medio_pago": "E01",

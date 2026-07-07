@@ -334,7 +334,7 @@ EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 
 
 
-EXCEL_CACHE_DB = BASE_DIR / "income_cache.sqlite3"
+EXCEL_CACHE_DB = os.path.join(MEDIA_ROOT, "income_cache.sqlite3")
 
 # Configuration: Celery to connect to Redis
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
