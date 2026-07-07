@@ -90,9 +90,10 @@ from .serializers import (
     StoreManagerSerializerCreate,
     SalespersonSerializerCreate,
     StoreManagerListSerializer,
-    SalespersonListSerializer
+    SalespersonListSerializer,
+    AdminUserUpdateSerializer
 )
-from .permissions import IsAdminUser, IsStoreManager, CanListUsers
+from .permissions import IsAdminUser, IsStoreManager, CanListUsers, CanManageUsers
 
 
 import logging
@@ -873,23 +874,47 @@ class ListAllUsers(ListAPIView):
 
 @swagger_auto_schema(
     method='get',
-    operation_summary="Get User by ID (Admin)",
-    operation_description="Retrieves details of a specific user by ID. Admin only.",
+    operation_summary="Get User by ID",
+    operation_description="Retrieves details of a specific user by ID. Admin/Global Manager only.",
     responses={
         200: UserSerializer,
         404: "User not found"
     },
     tags=['User Management']
 )
-@api_view(['GET'])
-@permission_classes([IsAdminUser])
+@swagger_auto_schema(
+    method='patch',
+    operation_summary="Update User by ID",
+    operation_description="Updates details of a specific user by ID. Admin/Global Manager only.",
+    request_body=AdminUserUpdateSerializer,
+    responses={
+        200: UserSerializer,
+        400: "Invalid input data",
+        404: "User not found"
+    },
+    tags=['User Management']
+)
+@api_view(['GET', 'PUT', 'PATCH'])
+@permission_classes([CanManageUsers])
 def get_user_by_id(request, pk):
     """
-    Admin can get any user's details by ID.
+    Admin/Global Manager can get or update any user's details by ID.
     """
     user = get_object_or_404(User, id=pk)
-    serializer = UserSerializer(user)
-    return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    if request.method == 'GET':
+        serializer = UserSerializer(user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+        
+    elif request.method in ['PUT', 'PATCH']:
+        partial = (request.method == 'PATCH')
+        serializer = AdminUserUpdateSerializer(user, data=request.data, partial=partial)
+        if serializer.is_valid():
+            serializer.save()
+            # Return fresh data including store details using UserSerializer
+            return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 class ToggleUserActiveStatus(APIView):

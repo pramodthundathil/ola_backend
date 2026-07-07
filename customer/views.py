@@ -1660,6 +1660,7 @@ class CustomerIncomeFileView(APIView):
                 """)
                 conn.commit()
                 
+                empty_consecutive_count = 0
                 for row in sheet.iter_rows(values_only=True):
                     if not header:
                         # Find the headers
@@ -1676,6 +1677,9 @@ class CustomerIncomeFileView(APIView):
                     
                     # Ensure the row has enough elements
                     if len(row) <= max(cedula_idx, salario_idx, patrono_idx or 0):
+                        empty_consecutive_count += 1
+                        if empty_consecutive_count > 100:
+                            break
                         continue
                         
                     cedula = row[cedula_idx]
@@ -1683,7 +1687,12 @@ class CustomerIncomeFileView(APIView):
                     patrono = row[patrono_idx] if patrono_idx is not None else None
                     
                     if cedula is None:
+                        empty_consecutive_count += 1
+                        if empty_consecutive_count > 100:
+                            break
                         continue
+                    
+                    empty_consecutive_count = 0
                     
                     # Convert salary to float safely
                     try:

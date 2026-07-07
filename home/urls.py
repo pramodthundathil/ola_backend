@@ -31,9 +31,10 @@ urlpatterns = [
     
     # Admin User Management
     path('admin/users/', views.ListAllUsers.as_view(), name='list-users'),
-    path('admin/users/<uuid:pk>/', views.get_user_by_id, name='get-user'),
-    path('admin/users/<uuid:user_id>/toggle-active/', 
+    path('admin/users/<int:pk>/', views.get_user_by_id, name='get-user'),
+    path('admin/users/<int:user_id>/toggle-active/', 
          views.ToggleUserActiveStatus.as_view(), name='toggle-user-active'),
-    path('admin/users/<uuid:user_id>/delete/', 
+    path('admin/users/<int:user_id>/delete/', 
          views.DeleteUserByAdmin.as_view(), name='admin-delete-user'),
+
 ]

@@ -158,3 +158,16 @@ class CanListUsers(permissions.BasePermission):
             and request.user.role in ['admin', 'global_manager', 'financial_manager', 'sales_advisor', 'store_manager']
         )
 
+
+class CanManageUsers(permissions.BasePermission):
+    """
+    Permission check to allow user management edits (Admin and Global Manager).
+    """
+    def has_permission(self, request, view):
+        return (
+            request.user 
+            and request.user.is_authenticated 
+            and request.user.role in ['admin', 'global_manager']
+        )
+
+
