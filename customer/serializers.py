@@ -31,6 +31,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     district_name = serializers.SerializerMethodField()
     corregimiento_name = serializers.SerializerMethodField()
     amount_to_finance = serializers.SerializerMethodField()
+    loan_account_number = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -65,6 +66,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'next_step_label',
             'next_step_url',
             'amount_to_finance',
+            'loan_account_number',
             'created_at',
             'updated_at',
         ]
@@ -325,6 +327,12 @@ class CustomerSerializer(serializers.ModelSerializer):
     def get_amount_to_finance(self, obj):
         latest = obj.credit_applications.order_by('-created_at').first()
         return latest.amount_to_finance if latest else None
+
+    def get_loan_account_number(self, obj):
+        latest = obj.credit_applications.order_by('-created_at').first()
+        if latest and hasattr(latest, 'finance_plan') and latest.finance_plan:
+            return latest.finance_plan.loan_account_number
+        return None
 
 
 

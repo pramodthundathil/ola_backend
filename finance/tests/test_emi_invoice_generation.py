@@ -182,3 +182,20 @@ def test_sequential_emi_invoice_generation(test_setup):
     res = client.post(url_invoice_2)
     assert res.status_code == status.HTTP_200_OK
     assert Invoice.objects.filter(emi_schedule=emi2).exists()
+
+
+@pytest.mark.django_db
+def test_invoice_list_pagination_out_of_bounds(test_setup):
+    admin_user = test_setup["admin"]
+    client = APIClient()
+    client.force_authenticate(user=admin_user)
+
+    # Fetch invoices list with page=2 which is out of bounds since there are no invoices yet
+    url = reverse("invoices-list")
+    res = client.get(url, {"page": 2, "page_size": 10})
+    
+    assert res.status_code == status.HTTP_200_OK
+    assert res.data["results"] == []
+    assert res.data["count"] == 0
+    assert res.data["next"] is None
+    assert res.data["previous"] is None

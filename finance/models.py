@@ -1226,11 +1226,44 @@ class AccountingCode(models.Model):
         ('EQUITY', 'Equity'),
         ('REVENUE', 'Revenue'),
         ('EXPENSE', 'Expense'),
+        ('Income', 'Income'),
+        ('Expense', 'Expense'),
+        ('Cash', 'Cash'),
+        ('Accounts Receivable', 'Accounts Receivable'),
+        ('Fixed Asset', 'Fixed Asset'),
+        ('Other Current Asset', 'Other Current Asset'),
+        ('Accounts Payable', 'Accounts Payable'),
+        ('Other Current Liability', 'Other Current Liability'),
+        ('Equity', 'Equity'),
+        ('Other Expense', 'Other Expense'),
+        ('Other Liability', 'Other Liability'),
+        ('Stock', 'Stock'),
+        ('Cost Of Goods Sold', 'Cost Of Goods Sold'),
+        ('Output Tax', 'Output Tax'),
+        ('Input Tax', 'Input Tax'),
+        ('Bank', 'Bank'),
+        ('Non Current Liability', 'Non Current Liability'),
+        ('Other Income', 'Other Income'),
+        ('Other Asset', 'Other Asset'),
+        ('INCOME', 'INCOME'),
+        ('EXPENSE', 'EXPENSE'),
+        ('LIABILITY', 'LIABILITY'),
+        ('EQUITY', 'EQUITY'),
+        ('ncome', 'ncome'),
+        ('non current liab', 'non current liab'),
     ]
 
     code = models.CharField(max_length=20, unique=True, help_text="Unique account code (e.g. 1100)")
     name = models.CharField(max_length=100, help_text="Account name (e.g. Cash & Bank)")
-    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES)
+    category = models.CharField(max_length=100, choices=CATEGORY_CHOICES)
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='children',
+        help_text="Parent account code"
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -2283,10 +2316,13 @@ class CreditNote(models.Model):
 
     credit_note_number = models.CharField(max_length=50, unique=True)
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='credit_notes')
+    invoice = models.ForeignKey('Invoice', on_delete=models.SET_NULL, null=True, blank=True, related_name='credit_notes')
     date = models.DateField()
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UNAPPLIED')
     notes = models.TextField(blank=True, null=True)
+    accounts_receivable_account = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, null=True, blank=True, related_name='credit_notes_ar')
+    debit_account = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, null=True, blank=True, related_name='credit_notes_debit')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -2299,8 +2335,8 @@ class CreditNote(models.Model):
 
     def generate_ledger_entries(self):
         import datetime
-        ar_code = AccountingCode.objects.filter(code="1200").first() # Accounts Receivable
-        sales_code = AccountingCode.objects.filter(code="4100").first() # Sales
+        ar_code = self.accounts_receivable_account or AccountingCode.objects.filter(code="1200").first() # Accounts Receivable
+        debit_code = self.debit_account or AccountingCode.objects.filter(code="4100").first() # Sales/Debit code
         date_val = self.date
         if isinstance(date_val, str):
             date_val = datetime.datetime.strptime(date_val[:10], "%Y-%m-%d").date()
@@ -2319,14 +2355,14 @@ class CreditNote(models.Model):
                 entry_date=dt
             )
 
-        if sales_code:
-            # Debit leg: Sales Revenue (Revenue Decreases)
+        if debit_code:
+            # Debit leg: Revenue/Selected Account (reversal)
             LedgerEntry.objects.create(
                 credit_note=self,
-                accounting_code=sales_code,
+                accounting_code=debit_code,
                 type='DEBIT',
                 amount=self.amount,
-                description=f"Revenue reversal via credit note {self.credit_note_number}",
+                description=f"Debit reversal via credit note {self.credit_note_number} on {debit_code.name}",
                 entry_date=dt
             )
 
@@ -2511,5 +2547,99 @@ class UncategorizedBankEntry(models.Model):
 
     def __str__(self):
         return f"{self.type} of {self.amount} on {self.entry_date} ({self.description[:30]})"
+
+
+# ========================================
+# FIXED ASSET & DEPRECIATION MODELS
+# ========================================
+
+class FixedAssetType(models.Model):
+    name = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fixed_asset_types'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class FixedAsset(models.Model):
+    STATUS_CHOICES = [
+        ('Draft', 'Draft'),
+        ('Pending', 'Pending'),
+        ('Active', 'Active'),
+        ('Inactive', 'Inactive'),
+    ]
+    METHOD_CHOICES = [
+        ('Straight-Line', 'Straight-Line'),
+    ]
+    INTERVAL_CHOICES = [
+        ('Monthly', 'Monthly'),
+        ('Yearly', 'Yearly'),
+    ]
+
+    name = models.CharField(max_length=255)
+    code = models.CharField(max_length=100, unique=True)
+    purchase_date = models.DateField()
+    purchase_price = models.DecimalField(max_digits=12, decimal_places=2)
+    residual_value = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    useful_life_years = models.IntegerField(default=5)
+    location = models.CharField(max_length=255, blank=True, null=True)
+    purchase_quantity = models.IntegerField(default=1)
+    serial_number = models.CharField(max_length=255, blank=True, null=True)
+    current_quantity = models.IntegerField(default=1)
+    current_value = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    disposal_value = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    warranty_expiration_date = models.DateField(blank=True, null=True)
+    fixed_asset_type = models.ForeignKey(FixedAssetType, on_delete=models.SET_NULL, blank=True, null=True, related_name='fixed_assets')
+    computation_type = models.CharField(max_length=100, blank=True, null=True)
+    depreciation_start_date = models.DateField(blank=True, null=True)
+    asset_life = models.IntegerField(blank=True, null=True)
+    asset_life_unit = models.CharField(max_length=20, default='Years')
+    notes = models.TextField(blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    depreciation_method = models.CharField(max_length=50, choices=METHOD_CHOICES, default='Straight-Line')
+    depreciation_interval = models.CharField(max_length=50, choices=INTERVAL_CHOICES, default='Monthly')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Draft')
+    
+    fixed_asset_account = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='fixed_assets')
+    accumulated_depreciation_account = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='accumulated_depreciation_assets')
+    depreciation_expense_account = models.ForeignKey(AccountingCode, on_delete=models.PROTECT, related_name='depreciation_expense_assets')
+    
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True, related_name='created_fixed_assets')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fixed_assets'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class DepreciationScheduleEntry(models.Model):
+    fixed_asset = models.ForeignKey(FixedAsset, on_delete=models.CASCADE, related_name='depreciation_schedule')
+    period_index = models.IntegerField()
+    period_date = models.DateField()
+    depreciation_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    accumulated_depreciation = models.DecimalField(max_digits=12, decimal_places=2)
+    book_value = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=50, default='Pending') # Pending, Posted
+    ledger_entry = models.ForeignKey(LedgerEntry, on_delete=models.SET_NULL, blank=True, null=True, related_name='depreciation_schedule_entries')
+    posted_date = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'depreciation_schedule_entries'
+        ordering = ['period_index']
+
+    def __str__(self):
+        return f"{self.fixed_asset.code} - Period {self.period_index}"
+
 
 

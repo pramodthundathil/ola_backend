@@ -90,6 +90,24 @@ class FinancePlanPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 
+    def paginate_queryset(self, queryset, request, view=None):
+        try:
+            return super().paginate_queryset(queryset, request, view)
+        except Exception:
+            self.request = request
+            page_size = self.get_page_size(request)
+            if not page_size:
+                return []
+            from django.core.paginator import Paginator
+            paginator = Paginator(queryset, page_size)
+            last_page = max(1, paginator.num_pages)
+            try:
+                self.page = paginator.page(last_page)
+            except Exception:
+                return []
+            self.page.object_list = []
+            return []
+
 
 # ============================================================
 # Tier-based finance plans with multiple terms
@@ -5534,6 +5552,9 @@ class CreditNoteListCreateAPIView(APIView):
         customer_id = request.query_params.get('customer_id')
         if customer_id:
             credit_notes = credit_notes.filter(customer_id=customer_id)
+        invoice_id = request.query_params.get('invoice_id')
+        if invoice_id:
+            credit_notes = credit_notes.filter(invoice_id=invoice_id)
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(credit_notes, request, view=self)
         serializer = CreditNoteSerializer(page, many=True)
@@ -5545,6 +5566,8 @@ class CreditNoteListCreateAPIView(APIView):
         date = data.get('date')
         amount = Decimal(str(data.get('amount', 0)))
         notes = data.get('notes', '')
+        accounts_receivable_account_id = data.get('accounts_receivable_account_id') or data.get('accounts_receivable_account')
+        debit_account_id = data.get('debit_account_id') or data.get('debit_account')
 
         if not customer_id or not date or amount <= 0:
             return Response({"error": "Missing required fields: customer_id, date, and amount"}, 
@@ -5570,7 +5593,9 @@ class CreditNoteListCreateAPIView(APIView):
                     date=date,
                     amount=amount,
                     status='UNAPPLIED',
-                    notes=notes
+                    notes=notes,
+                    accounts_receivable_account_id=accounts_receivable_account_id,
+                    debit_account_id=debit_account_id
                 )
 
                 # Generate ledger entries
@@ -5580,6 +5605,89 @@ class CreditNoteListCreateAPIView(APIView):
 
         except Customer.DoesNotExist:
             return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CreditNoteDetailAPIView(APIView):
+    """
+    Retrieve details of a single credit note.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            credit_note = CreditNote.objects.select_related('customer', 'invoice').get(pk=pk)
+            serializer = CreditNoteSerializer(credit_note)
+            return Response(serializer.data)
+        except CreditNote.DoesNotExist:
+            return Response({"error": "Credit note not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class CreditNoteApplyAPIView(APIView):
+    """
+    Apply a credit note to an invoice.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        invoice_id = request.data.get('invoice_id')
+        if not invoice_id:
+            return Response({"error": "invoice_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                credit_note = CreditNote.objects.select_related('customer').get(pk=pk)
+                if credit_note.status != 'UNAPPLIED':
+                    return Response({"error": f"Credit note status is {credit_note.status}, only UNAPPLIED credit notes can be applied"}, 
+                                    status=status.HTTP_400_BAD_REQUEST)
+
+                invoice = Invoice.objects.get(pk=invoice_id)
+                if invoice.customer_id != credit_note.customer_id:
+                    return Response({"error": "Invoice customer does not match credit note customer"}, 
+                                    status=status.HTTP_400_BAD_REQUEST)
+
+                if invoice.balance <= 0:
+                    return Response({"error": "Invoice is already fully paid"}, 
+                                    status=status.HTTP_400_BAD_REQUEST)
+
+                # Determine the amount to apply: minimum of credit note amount and invoice balance
+                apply_amount = min(credit_note.amount, invoice.balance)
+
+                # Deduct from invoice balance, add to amount_paid
+                invoice.amount_paid += apply_amount
+                invoice.balance = invoice.total_amount - invoice.amount_paid
+
+                if invoice.balance <= 0:
+                    invoice.status = 'PAID'
+                    invoice.balance = 0
+                else:
+                    invoice.status = 'PARTIAL'
+
+                invoice.save()
+
+                # Mark credit note as applied and associate with invoice
+                credit_note.status = 'APPLIED'
+                credit_note.invoice = invoice
+                credit_note.save()
+
+                # Update descriptions and associate credit note ledger entries with the invoice
+                for entry in LedgerEntry.objects.filter(credit_note=credit_note):
+                    entry.invoice = invoice
+                    if entry.accounting_code.code == "1200":
+                        entry.description = f"EMI Receivable reduction for plan invoice {invoice.invoice_number} via credit note {credit_note.credit_note_number}"
+                    entry.save()
+
+                return Response({
+                    "message": "Credit note successfully applied to invoice",
+                    "credit_note": CreditNoteSerializer(credit_note).data,
+                    "applied_amount": str(apply_amount)
+                })
+
+        except CreditNote.DoesNotExist:
+            return Response({"error": "Credit note not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Invoice.DoesNotExist:
+            return Response({"error": "Invoice not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6797,6 +6905,749 @@ class UncategorizedBankEntriesBulkMapAPIView(APIView):
 
             except Exception as e:
                 return Response({"error": f"Failed to map entries: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ==============================================================================
+# FINANCIAL REPORTS & FIXED ASSET VIEWS (P&L, BALANCE SHEET, FIXED ASSETS)
+# ==============================================================================
+import math
+import time
+import datetime as dt_module
+from django.db.models import Q
+from .models import FixedAssetType, FixedAsset, DepreciationScheduleEntry
+
+class ProfitLossReportAPIView(APIView):
+    def get(self, request):
+        user = request.user
+        user_role = getattr(user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "You are not authorized to view this report."}, status=status.HTTP_403_FORBIDDEN)
+
+        start_date = request.query_params.get("startDate") or request.query_params.get("date_from")
+        end_date = request.query_params.get("endDate") or request.query_params.get("date_to")
+        
+        if not start_date or not end_date:
+            return Response({
+                "status": "success",
+                "data": {
+                    "income": [],
+                    "expenses": [],
+                    "netProfit": 0
+                },
+                "message": "Please select a date range to generate the Profit & Loss report."
+            })
+
+        # We query LedgerEntry objects within the date range
+        entries = LedgerEntry.objects.filter(entry_date__date__range=[start_date, end_date])
+        
+        # Prepopulate income and expenses
+        income_map = {}
+        expense_map = {}
+        
+        active_codes = AccountingCode.objects.filter(is_active=True)
+        for code in active_codes:
+            if code.category in ['REVENUE', 'INCOME']:
+                income_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id}
+            elif code.category in ['EXPENSE']:
+                expense_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id}
+                
+        for entry in entries:
+            code = entry.accounting_code
+            category = code.category
+            amount = float(entry.amount)
+            if category in ['REVENUE', 'INCOME']:
+                val = amount if entry.type == 'CREDIT' else -amount
+                if code.name not in income_map:
+                    income_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id}
+                income_map[code.name]["amount"] += val
+            elif category == 'EXPENSE':
+                val = amount if entry.type == 'DEBIT' else -amount
+                if code.name not in expense_map:
+                    expense_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id}
+                expense_map[code.name]["amount"] += val
+
+        income_list = [{"name": k, **v} for k, v in income_map.items()]
+        expense_list = [{"name": k, **v} for k, v in expense_map.items()]
+        
+        total_income = sum(item["amount"] for item in income_list)
+        total_expense = sum(item["amount"] for item in expense_list)
+        net_profit = total_income - total_expense
+        
+        return Response({
+            "status": "success",
+            "data": {
+                "income": income_list,
+                "expenses": expense_list,
+                "netProfit": net_profit
+            }
+        })
+
+
+class BalanceSheetReportAPIView(APIView):
+    def get(self, request):
+        user = request.user
+        user_role = getattr(user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "You are not authorized to view this report."}, status=status.HTTP_403_FORBIDDEN)
+
+        end_date = request.query_params.get("endDate") or request.query_params.get("date_to") or request.query_params.get("startDate") or request.query_params.get("date_from")
+        
+        if not end_date:
+            return Response({
+                "status": "success",
+                "data": {
+                    "assets": [],
+                    "liabilities": [],
+                    "equity": [],
+                    "assetsTotal": 0,
+                    "liabilitiesTotal": 0,
+                    "equityTotal": 0
+                },
+                "message": "Please select an end date to generate the Balance Sheet."
+            })
+
+        # We query LedgerEntry up to end_date
+        entries = LedgerEntry.objects.filter(entry_date__date__lte=end_date)
+        
+        assets_map = {}
+        liabilities_map = {}
+        equity_map = {}
+        
+        active_codes = AccountingCode.objects.filter(is_active=True)
+        for code in active_codes:
+            if code.category == 'ASSET':
+                assets_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id, "accountType": "Asset"}
+            elif code.category == 'LIABILITY':
+                liabilities_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id, "accountType": "Liability"}
+            elif code.category == 'EQUITY':
+                equity_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id, "accountType": "Equity"}
+                
+        cumulative_net_income = 0.0
+        
+        for entry in entries:
+            code = entry.accounting_code
+            category = code.category
+            amount = float(entry.amount)
+            
+            if category == 'ASSET':
+                val = amount if entry.type == 'DEBIT' else -amount
+                if code.name not in assets_map:
+                    assets_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id, "accountType": "Asset"}
+                assets_map[code.name]["amount"] += val
+            elif category == 'LIABILITY':
+                val = amount if entry.type == 'CREDIT' else -amount
+                if code.name not in liabilities_map:
+                    liabilities_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id, "accountType": "Liability"}
+                liabilities_map[code.name]["amount"] += val
+            elif category == 'EQUITY':
+                val = amount if entry.type == 'CREDIT' else -amount
+                if code.name not in equity_map:
+                    equity_map[code.name] = {"amount": 0.0, "code": code.code, "category": code.category, "id": code.id, "accountType": "Equity"}
+                equity_map[code.name]["amount"] += val
+            elif category in ['REVENUE', 'INCOME']:
+                cumulative_net_income += (amount if entry.type == 'CREDIT' else -amount)
+            elif category == 'EXPENSE':
+                cumulative_net_income -= (amount if entry.type == 'DEBIT' else -amount)
+
+        # Overwrite Retained Earnings (Current Period)
+        if cumulative_net_income != 0:
+            re_name = "Retained Earnings (Current Period)"
+            if re_name not in equity_map:
+                equity_map[re_name] = {"amount": 0.0, "code": "RE-CURRENT", "category": "EQUITY", "id": 0, "accountType": "Equity"}
+            equity_map[re_name]["amount"] += cumulative_net_income
+
+        assets_list = [{"name": k, **v} for k, v in assets_map.items()]
+        liabilities_list = [{"name": k, **v} for k, v in liabilities_map.items()]
+        equity_list = [{"name": k, **v} for k, v in equity_map.items()]
+        
+        assets_total = sum(item["amount"] for item in assets_list)
+        liabilities_total = sum(item["amount"] for item in liabilities_list)
+        equity_total = sum(item["amount"] for item in equity_list)
+        
+        return Response({
+            "status": "success",
+            "data": {
+                "assets": assets_list,
+                "liabilities": liabilities_list,
+                "equity": equity_list,
+                "assetsTotal": assets_total,
+                "liabilitiesTotal": liabilities_total,
+                "equityTotal": equity_total
+            }
+        })
+
+
+class FixedAssetTypeListCreateAPIView(APIView):
+    def get(self, request):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+        types = FixedAssetType.objects.all()
+        data = [{"_id": t.id, "name": t.name, "description": t.description, "isActive": t.is_active} for t in types]
+        return Response({"status": "success", "data": data})
+
+    def post(self, request):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+        name = request.data.get('name')
+        description = request.data.get('description')
+        is_active = request.data.get('isActive', True)
+        if not name:
+            return Response({"status": "error", "message": "Name is required"}, status=status.HTTP_400_BAD_REQUEST)
+        t = FixedAssetType.objects.create(name=name, description=description, is_active=is_active)
+        return Response({"status": "success", "data": {"_id": t.id, "name": t.name, "description": t.description, "isActive": t.is_active}})
+
+
+class FixedAssetTypeDetailAPIView(APIView):
+    def put(self, request, pk):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        try:
+            t = FixedAssetType.objects.get(pk=pk)
+        except FixedAssetType.DoesNotExist:
+            return Response({"status": "error", "message": "Fixed Asset Type not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        name = request.data.get('name')
+        description = request.data.get('description')
+        is_active = request.data.get('isActive')
+        
+        if name is not None:
+            t.name = name
+        if description is not None:
+            t.description = description
+        if is_active is not None:
+            t.is_active = is_active
+            
+        t.save()
+        return Response({"status": "success", "data": {"_id": t.id, "name": t.name, "description": t.description, "isActive": t.is_active}})
+
+    def delete(self, request, pk):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        try:
+            t = FixedAssetType.objects.get(pk=pk)
+        except FixedAssetType.DoesNotExist:
+            return Response({"status": "error", "message": "Fixed Asset Type not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        t.delete()
+        return Response({"status": "success", "message": "Fixed Asset Type deleted successfully"})
+
+
+def generate_depreciation_schedule(asset):
+    cost = float(asset.purchase_price)
+    salvage = float(asset.residual_value)
+    years = float(asset.useful_life_years)
+    
+    if asset.asset_life and asset.asset_life_unit:
+        if asset.asset_life_unit == "Months":
+            years = float(asset.asset_life) / 12.0
+        else:
+            years = float(asset.asset_life)
+            
+    depreciable_amount = cost - salvage
+    interval = asset.depreciation_interval or "Monthly"
+    
+    if depreciable_amount <= 0 or years <= 0:
+        return
+        
+    start_date = asset.depreciation_start_date or asset.purchase_date
+    if isinstance(start_date, str):
+        start_date = dt_module.date.fromisoformat(start_date)
+        
+    # Clear existing schedule
+    asset.depreciation_schedule.all().delete()
+    accumulated_depreciation = 0.0
+    
+    if interval == "Yearly":
+        annual_depr = round(depreciable_amount / years, 2)
+        total_periods = math.ceil(years)
+        for i in range(1, total_periods + 1):
+            dep_amount = annual_depr
+            if i == total_periods:
+                dep_amount = round(depreciable_amount - accumulated_depreciation, 2)
+            accumulated_depreciation = round(accumulated_depreciation + dep_amount, 2)
+            book_value = round(cost - accumulated_depreciation, 2)
+            
+            period_date = dt_module.date(start_date.year + i - 1, 12, 31)
+            
+            DepreciationScheduleEntry.objects.create(
+                fixed_asset=asset,
+                period_index=i,
+                period_date=period_date,
+                depreciation_amount=Decimal(str(dep_amount)),
+                accumulated_depreciation=Decimal(str(accumulated_depreciation)),
+                book_value=Decimal(str(book_value)),
+                status="Pending"
+            )
+    else: # Monthly
+        total_months = math.ceil(years * 12)
+        monthly_depr = round(depreciable_amount / total_months, 2)
+        for i in range(1, total_months + 1):
+            dep_amount = monthly_depr
+            if i == total_months:
+                dep_amount = round(depreciable_amount - accumulated_depreciation, 2)
+            accumulated_depreciation = round(accumulated_depreciation + dep_amount, 2)
+            book_value = round(cost - accumulated_depreciation, 2)
+            
+            m = start_date.month + i
+            y = start_date.year + (m - 1) // 12
+            m = (m - 1) % 12 + 1
+            if m == 12:
+                last_day = dt_module.date(y + 1, 1, 1) - dt_module.timedelta(days=1)
+            else:
+                last_day = dt_module.date(y, m + 1, 1) - dt_module.timedelta(days=1)
+                
+            DepreciationScheduleEntry.objects.create(
+                fixed_asset=asset,
+                period_index=i,
+                period_date=last_day,
+                depreciation_amount=Decimal(str(dep_amount)),
+                accumulated_depreciation=Decimal(str(accumulated_depreciation)),
+                book_value=Decimal(str(book_value)),
+                status="Pending"
+            )
+
+
+class FixedAssetListCreateAPIView(APIView):
+    def get(self, request):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+        
+        status_filter = request.query_params.get("status")
+        search = request.query_params.get("search")
+        
+        queryset = FixedAsset.objects.all()
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        if search:
+            queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search))
+            
+        page_num = request.query_params.get("page")
+        limit_num = request.query_params.get("limit") or 25
+        
+        data_list = []
+        for asset in queryset:
+            data_list.append({
+                "_id": asset.id,
+                "name": asset.name,
+                "code": asset.code,
+                "purchaseDate": asset.purchase_date.isoformat() if asset.purchase_date else None,
+                "purchasePrice": float(asset.purchase_price),
+                "residualValue": float(asset.residual_value),
+                "usefulLifeYears": asset.useful_life_years,
+                "location": asset.location,
+                "status": asset.status,
+                "fixedAssetAccount": {"_id": asset.fixed_asset_account.id, "code": asset.fixed_asset_account.code, "name": asset.fixed_asset_account.name} if asset.fixed_asset_account else None,
+                "accumulatedDepreciationAccount": {"_id": asset.accumulated_depreciation_account.id, "code": asset.accumulated_depreciation_account.code, "name": asset.accumulated_depreciation_account.name} if asset.accumulated_depreciation_account else None,
+                "depreciationExpenseAccount": {"_id": asset.depreciation_expense_account.id, "code": asset.depreciation_expense_account.code, "name": asset.depreciation_expense_account.name} if asset.depreciation_expense_account else None,
+                "currentValue": float(asset.current_value) if asset.current_value is not None else float(asset.purchase_price),
+            })
+            
+        if page_num:
+            page_int = int(page_num)
+            limit_int = int(limit_num)
+            total = len(data_list)
+            start = (page_int - 1) * limit_int
+            end = start + limit_int
+            paginated = data_list[start:end]
+            return Response({
+                "status": "success",
+                "data": {
+                    "data": paginated,
+                    "total": total,
+                    "page": page_int,
+                    "limit": limit_int,
+                    "pages": math.ceil(total / limit_int)
+                }
+            })
+            
+        return Response({"status": "success", "data": data_list})
+
+    def post(self, request):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        d = request.data
+        code = d.get("code") or f"FA-{int(time.time())}"
+        
+        try:
+            fixed_asset_account = AccountingCode.objects.get(pk=d.get("fixedAssetAccount"))
+            accumulated_depreciation_account = AccountingCode.objects.get(pk=d.get("accumulatedDepreciationAccount"))
+            depreciation_expense_account = AccountingCode.objects.get(pk=d.get("depreciationExpenseAccount"))
+        except AccountingCode.DoesNotExist:
+            return Response({"status": "error", "message": "Invalid Accounting Code(s)"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        fixed_asset_type_id = d.get("fixedAssetType")
+        fixed_asset_type = None
+        if fixed_asset_type_id:
+            try:
+                fixed_asset_type = FixedAssetType.objects.get(pk=fixed_asset_type_id)
+            except FixedAssetType.DoesNotExist:
+                pass
+                
+        asset = FixedAsset.objects.create(
+            name=d.get("name"),
+            code=code,
+            purchase_date=d.get("purchaseDate"),
+            purchase_price=Decimal(str(d.get("purchasePrice"))),
+            residual_value=Decimal(str(d.get("residualValue", 0))),
+            useful_life_years=int(d.get("usefulLifeYears", 5)),
+            location=d.get("location"),
+            purchase_quantity=int(d.get("purchaseQuantity", 1)),
+            serial_number=d.get("serialNumber"),
+            current_quantity=int(d.get("currentQuantity", 1)),
+            current_value=Decimal(str(d.get("currentValue") or d.get("purchasePrice"))),
+            disposal_value=Decimal(str(d.get("disposalValue"))) if d.get("disposalValue") else None,
+            warranty_expiration_date=d.get("warrantyExpirationDate") or None,
+            fixed_asset_type=fixed_asset_type,
+            computation_type=d.get("computationType"),
+            depreciation_start_date=d.get("depreciationStartDate") or d.get("purchaseDate"),
+            asset_life=int(d.get("assetLife")) if d.get("assetLife") else None,
+            asset_life_unit=d.get("assetLifeUnit", "Years"),
+            notes=d.get("notes"),
+            description=d.get("description"),
+            depreciation_method=d.get("depreciationMethod", "Straight-Line"),
+            depreciation_interval=d.get("depreciationInterval", "Monthly"),
+            status=d.get("status", "Draft"),
+            fixed_asset_account=fixed_asset_account,
+            accumulated_depreciation_account=accumulated_depreciation_account,
+            depreciation_expense_account=depreciation_expense_account,
+            created_by=request.user
+        )
+        
+        if asset.status == "Active":
+            generate_depreciation_schedule(asset)
+            
+        return Response({
+            "status": "success",
+            "data": {
+                "_id": asset.id,
+                "name": asset.name,
+                "code": asset.code,
+                "status": asset.status
+            }
+        })
+
+
+class FixedAssetDetailAPIView(APIView):
+    def get(self, request, pk):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        try:
+            asset = FixedAsset.objects.get(pk=pk)
+        except FixedAsset.DoesNotExist:
+            return Response({"status": "error", "message": "Asset not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        schedule = list(asset.depreciation_schedule.all())
+        schedule_data = [{
+            "_id": entry.id,
+            "periodIndex": entry.period_index,
+            "periodDate": entry.period_date.isoformat(),
+            "depreciationAmount": float(entry.depreciation_amount),
+            "accumulatedDepreciation": float(entry.accumulated_depreciation),
+            "bookValue": float(entry.book_value),
+            "status": entry.status,
+            "postedDate": entry.posted_date.isoformat() if entry.posted_date else None
+        } for entry in schedule]
+        
+        return Response({
+            "status": "success",
+            "data": {
+                "_id": asset.id,
+                "name": asset.name,
+                "code": asset.code,
+                "purchaseDate": asset.purchase_date.isoformat() if asset.purchase_date else None,
+                "purchasePrice": float(asset.purchase_price),
+                "residualValue": float(asset.residual_value),
+                "usefulLifeYears": asset.useful_life_years,
+                "location": asset.location,
+                "purchaseQuantity": asset.purchase_quantity,
+                "serialNumber": asset.serial_number,
+                "currentQuantity": asset.current_quantity,
+                "currentValue": float(asset.current_value) if asset.current_value is not None else float(asset.purchase_price),
+                "disposalValue": float(asset.disposal_value) if asset.disposal_value is not None else None,
+                "warrantyExpirationDate": asset.warranty_expiration_date.isoformat() if asset.warranty_expiration_date else None,
+                "fixedAssetType": {"_id": asset.fixed_asset_type.id, "name": asset.fixed_asset_type.name} if asset.fixed_asset_type else None,
+                "computationType": asset.computation_type,
+                "depreciationStartDate": asset.depreciation_start_date.isoformat() if asset.depreciation_start_date else None,
+                "assetLife": asset.asset_life,
+                "assetLifeUnit": asset.asset_life_unit,
+                "notes": asset.notes,
+                "description": asset.description,
+                "depreciationMethod": asset.depreciation_method,
+                "depreciationInterval": asset.depreciation_interval,
+                "status": asset.status,
+                "fixedAssetAccount": {"_id": asset.fixed_asset_account.id, "code": asset.fixed_asset_account.code, "name": asset.fixed_asset_account.name} if asset.fixed_asset_account else None,
+                "accumulatedDepreciationAccount": {"_id": asset.accumulated_depreciation_account.id, "code": asset.accumulated_depreciation_account.code, "name": asset.accumulated_depreciation_account.name} if asset.accumulated_depreciation_account else None,
+                "depreciationExpenseAccount": {"_id": asset.depreciation_expense_account.id, "code": asset.depreciation_expense_account.code, "name": asset.depreciation_expense_account.name} if asset.depreciation_expense_account else None,
+                "depreciationSchedule": schedule_data
+            }
+        })
+
+    def put(self, request, pk):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        try:
+            asset = FixedAsset.objects.get(pk=pk)
+        except FixedAsset.DoesNotExist:
+            return Response({"status": "error", "message": "Asset not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        d = request.data
+        if "name" in d: asset.name = d["name"]
+        if "purchaseDate" in d: asset.purchase_date = d["purchaseDate"]
+        if "purchasePrice" in d: asset.purchase_price = Decimal(str(d["purchasePrice"]))
+        if "residualValue" in d: asset.residual_value = Decimal(str(d["residualValue"]))
+        if "usefulLifeYears" in d: asset.useful_life_years = int(d["usefulLifeYears"])
+        if "location" in d: asset.location = d["location"]
+        if "purchaseQuantity" in d: asset.purchase_quantity = int(d["purchaseQuantity"])
+        if "serialNumber" in d: asset.serial_number = d["serialNumber"]
+        if "currentQuantity" in d: asset.current_quantity = int(d["currentQuantity"])
+        if "currentValue" in d: asset.current_value = Decimal(str(d["currentValue"]))
+        if "disposalValue" in d: asset.disposal_value = Decimal(str(d["disposalValue"])) if d["disposalValue"] else None
+        if "warrantyExpirationDate" in d: asset.warranty_expiration_date = d["warrantyExpirationDate"] or None
+        if "computationType" in d: asset.computation_type = d["computationType"]
+        if "depreciationStartDate" in d: asset.depreciation_start_date = d["depreciationStartDate"] or None
+        if "assetLife" in d: asset.asset_life = int(d["assetLife"]) if d["assetLife"] else None
+        if "assetLifeUnit" in d: asset.asset_life_unit = d["assetLifeUnit"]
+        if "notes" in d: asset.notes = d["notes"]
+        if "description" in d: asset.description = d["description"]
+        if "depreciationMethod" in d: asset.depreciation_method = d["depreciationMethod"]
+        if "depreciationInterval" in d: asset.depreciation_interval = d["depreciationInterval"]
+        
+        if "fixedAssetAccount" in d:
+            try:
+                asset.fixed_asset_account = AccountingCode.objects.get(pk=d["fixedAssetAccount"])
+            except AccountingCode.DoesNotExist:
+                pass
+        if "accumulatedDepreciationAccount" in d:
+            try:
+                asset.accumulated_depreciation_account = AccountingCode.objects.get(pk=d["accumulatedDepreciationAccount"])
+            except AccountingCode.DoesNotExist:
+                pass
+        if "depreciationExpenseAccount" in d:
+            try:
+                asset.depreciation_expense_account = AccountingCode.objects.get(pk=d["depreciationExpenseAccount"])
+            except AccountingCode.DoesNotExist:
+                pass
+                
+        if "fixedAssetType" in d:
+            if d["fixedAssetType"]:
+                try:
+                    asset.fixed_asset_type = FixedAssetType.objects.get(pk=d["fixedAssetType"])
+                except FixedAssetType.DoesNotExist:
+                    pass
+            else:
+                asset.fixed_asset_type = None
+                
+        old_status = asset.status
+        if "status" in d:
+            asset.status = d["status"]
+            
+        asset.save()
+        
+        if asset.status == "Active" and (old_status != "Active" or asset.depreciation_schedule.count() == 0):
+            generate_depreciation_schedule(asset)
+            
+        return Response({"status": "success", "data": {"_id": asset.id, "name": asset.name, "status": asset.status}})
+
+    def delete(self, request, pk):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        try:
+            asset = FixedAsset.objects.get(pk=pk)
+        except FixedAsset.DoesNotExist:
+            return Response({"status": "error", "message": "Asset not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        asset.delete()
+        return Response({"status": "success", "message": "Asset deleted"})
+
+
+class FixedAssetCalculateDepreciationPreviewAPIView(APIView):
+    def post(self, request):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        d = request.data
+        cost = float(d.get("purchasePrice") or d.get("purchaseValue") or 0)
+        salvage = float(d.get("residualValue") or d.get("disposalValue") or 0)
+        years = float(d.get("usefulLifeYears") or 5)
+        
+        if d.get("assetLife") and d.get("assetLifeUnit"):
+            if d.get("assetLifeUnit") == "Months":
+                years = float(d.get("assetLife")) / 12.0
+            else:
+                years = float(d.get("assetLife"))
+                
+        depreciable_amount = cost - salvage
+        interval = d.get("depreciationInterval") or "Monthly"
+        
+        if depreciable_amount <= 0 or years <= 0:
+            return Response({"status": "success", "data": []})
+            
+        start_date_str = d.get("depreciationStartDate") or d.get("purchaseDate") or dt_module.date.today().isoformat()
+        try:
+            start_date = dt_module.date.fromisoformat(start_date_str)
+        except ValueError:
+            start_date = dt_module.date.today()
+            
+        schedule = []
+        accumulated_depreciation = 0.0
+        
+        if interval == "Yearly":
+            annual_depr = round(depreciable_amount / years, 2)
+            total_periods = math.ceil(years)
+            for i in range(1, total_periods + 1):
+                dep_amount = annual_depr
+                if i == total_periods:
+                    dep_amount = round(depreciable_amount - accumulated_depreciation, 2)
+                accumulated_depreciation = round(accumulated_depreciation + dep_amount, 2)
+                book_value = round(cost - accumulated_depreciation, 2)
+                
+                period_date = dt_module.date(start_date.year + i - 1, 12, 31)
+                
+                schedule.append({
+                    "periodIndex": i,
+                    "periodDate": period_date.isoformat(),
+                    "depreciationAmount": dep_amount,
+                    "accumulatedDepreciation": accumulated_depreciation,
+                    "bookValue": book_value,
+                    "status": "Pending"
+                })
+        else: # Monthly
+            total_months = math.ceil(years * 12)
+            monthly_depr = round(depreciable_amount / total_months, 2)
+            for i in range(1, total_months + 1):
+                dep_amount = monthly_depr
+                if i == total_months:
+                    dep_amount = round(depreciable_amount - accumulated_depreciation, 2)
+                accumulated_depreciation = round(accumulated_depreciation + dep_amount, 2)
+                book_value = round(cost - accumulated_depreciation, 2)
+                
+                m = start_date.month + i
+                y = start_date.year + (m - 1) // 12
+                m = (m - 1) % 12 + 1
+                if m == 12:
+                    last_day = dt_module.date(y + 1, 1, 1) - dt_module.timedelta(days=1)
+                else:
+                    last_day = dt_module.date(y, m + 1, 1) - dt_module.timedelta(days=1)
+                    
+                schedule.append({
+                    "periodIndex": i,
+                    "periodDate": last_day.isoformat(),
+                    "depreciationAmount": dep_amount,
+                    "accumulatedDepreciation": accumulated_depreciation,
+                    "bookValue": book_value,
+                    "status": "Pending"
+                })
+                
+        return Response({"status": "success", "data": schedule})
+
+
+class FixedAssetPostDepreciationAPIView(APIView):
+    def post(self, request, pk):
+        user_role = getattr(request.user, "role", None)
+        if user_role not in ['admin', 'global_manager', 'financial_manager']:
+            return Response({"status": "error", "message": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        try:
+            asset = FixedAsset.objects.get(pk=pk)
+        except FixedAsset.DoesNotExist:
+            return Response({"status": "error", "message": "Asset not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        if asset.status != "Active":
+            return Response({"status": "error", "message": "Asset is not Active"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        period_index = request.data.get("periodIndex")
+        if period_index is None:
+            return Response({"status": "error", "message": "periodIndex is required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            entry = asset.depreciation_schedule.get(period_index=int(period_index))
+        except DepreciationScheduleEntry.DoesNotExist:
+            return Response({"status": "error", "message": "Period not found in schedule"}, status=status.HTTP_404_NOT_FOUND)
+            
+        if entry.status == "Posted":
+            return Response({"status": "error", "message": "Period already posted"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            with transaction.atomic():
+                import random
+                rand_num = random.randint(10000, 99999)
+                ref_num = f"DEP-{asset.code}-{entry.period_index}-{rand_num}"
+                
+                while JournalEntry.objects.filter(reference_number=ref_num).exists():
+                    rand_num = random.randint(10000, 99999)
+                    ref_num = f"DEP-{asset.code}-{entry.period_index}-{rand_num}"
+                
+                dt_naive = dt_module.datetime.combine(entry.period_date, dt_module.time.min)
+                dt_aware = timezone.make_aware(dt_naive)
+                
+                je = JournalEntry.objects.create(
+                    reference_number=ref_num,
+                    entry_date=entry.period_date,
+                    description=f"Depreciation for asset {asset.name} ({asset.code}) period {entry.period_index}"
+                )
+                
+                debit_le = LedgerEntry.objects.create(
+                    journal_entry=je,
+                    accounting_code=asset.depreciation_expense_account,
+                    type="DEBIT",
+                    amount=entry.depreciation_amount,
+                    description=f"Depreciation expense - {asset.name}",
+                    entry_date=dt_aware
+                )
+                
+                credit_le = LedgerEntry.objects.create(
+                    journal_entry=je,
+                    accounting_code=asset.accumulated_depreciation_account,
+                    type="CREDIT",
+                    amount=entry.depreciation_amount,
+                    description=f"Accumulated depreciation - {asset.name}",
+                    entry_date=dt_aware
+                )
+                
+                entry.status = "Posted"
+                entry.ledger_entry = debit_le
+                entry.posted_date = timezone.now()
+                entry.save()
+                
+                asset.current_value = entry.book_value
+                asset.save()
+                
+                AuditLog.objects.create(
+                    user=request.user,
+                    action_type='COMPLETE_FINANCE_VIEWED',
+                    description=f"Posted depreciation period {entry.period_index} for asset {asset.code}",
+                    metadata={"asset_code": asset.code, "period_index": entry.period_index, "amount": str(entry.depreciation_amount)}
+                )
+                
+            return Response({
+                "status": "success",
+                "message": f"Successfully posted depreciation for period {entry.period_index}.",
+                "data": {
+                    "_id": entry.id,
+                    "status": entry.status,
+                    "postedDate": entry.posted_date.isoformat(),
+                    "currentValue": float(asset.current_value)
+                }
+            })
+        except Exception as e:
+            return Response({"status": "error", "message": f"Failed to post depreciation: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 

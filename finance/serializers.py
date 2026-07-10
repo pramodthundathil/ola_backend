@@ -852,6 +852,7 @@ class PaymentMadeSerializer(serializers.ModelSerializer):
 
 class CreditNoteSerializer(serializers.ModelSerializer):
     customer_name = serializers.SerializerMethodField()
+    invoice_number = serializers.SerializerMethodField()
 
     class Meta:
         model = CreditNote
@@ -859,6 +860,9 @@ class CreditNoteSerializer(serializers.ModelSerializer):
 
     def get_customer_name(self, obj):
         return f"{obj.customer.first_name} {obj.customer.last_name}" if obj.customer else "N/A"
+
+    def get_invoice_number(self, obj):
+        return obj.invoice.invoice_number if obj.invoice else None
 
 
 class JournalEntrySerializer(serializers.ModelSerializer):

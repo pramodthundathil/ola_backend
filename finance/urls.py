@@ -71,6 +71,8 @@ urlpatterns = [
     path('payments-made/', views.PaymentMadeListCreateAPIView.as_view(), name='payments-made-list-create'),
     path('payments-made/<int:pk>/', views.PaymentMadeDetailAPIView.as_view(), name='payments-made-detail'),
     path('credit-notes/', views.CreditNoteListCreateAPIView.as_view(), name='credit-notes-list-create'),
+    path('credit-notes/<int:pk>/', views.CreditNoteDetailAPIView.as_view(), name='credit-note-detail'),
+    path('credit-notes/<int:pk>/apply/', views.CreditNoteApplyAPIView.as_view(), name='credit-note-apply'),
     path('journal-entries/', views.JournalEntryListCreateAPIView.as_view(), name='journal-entries-list-create'),
     
     # LOAN ACCOUNTING & LEDGER
@@ -83,4 +85,16 @@ urlpatterns = [
     path('customer-loan-ledger/<int:plan_id>/', views.CustomerLoanLedgerAPIView.as_view(), name='customer-loan-ledger'),
     path('loans/<int:plan_id>/manual-action/', views.LoanManualActionAPIView.as_view(), name='loan-manual-action'),
     path('emi-schedule/<int:emi_id>/create-invoice/', views.EMIInvoiceCreateAPIView.as_view(), name='emi-create-invoice'),
+
+    # REPORTS (P&L, BALANCE SHEET)
+    path('reports/pl/', views.ProfitLossReportAPIView.as_view(), name='reports-pl'),
+    path('reports/balance-sheet/', views.BalanceSheetReportAPIView.as_view(), name='reports-balance-sheet'),
+
+    # FIXED ASSETS
+    path('fixed-asset-types/', views.FixedAssetTypeListCreateAPIView.as_view(), name='fixed-asset-types-list-create'),
+    path('fixed-asset-types/<int:pk>/', views.FixedAssetTypeDetailAPIView.as_view(), name='fixed-asset-type-detail'),
+    path('fixed-assets/', views.FixedAssetListCreateAPIView.as_view(), name='fixed-assets-list-create'),
+    path('fixed-assets/calculate-depreciation-schedule/', views.FixedAssetCalculateDepreciationPreviewAPIView.as_view(), name='fixed-assets-depreciation-preview'),
+    path('fixed-assets/<int:pk>/', views.FixedAssetDetailAPIView.as_view(), name='fixed-asset-detail'),
+    path('fixed-assets/<int:pk>/post-depreciation/', views.FixedAssetPostDepreciationAPIView.as_view(), name='fixed-asset-post-depreciation'),
 ]

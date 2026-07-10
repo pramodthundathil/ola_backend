@@ -161,7 +161,7 @@ class TestWesternUnionAPIs(TestCase):
         assert data["cod_cliente"] == str(self.customer.id)
         assert data["cod_respuesta"] == "0"
         assert data["msg_respuesta"] == "Consulta exitosa"
-        assert len(data["items"]) == 1
+        assert len(data["items"]) == 2
         assert data["items"][0]["id_item"] == str(self.invoice1.id)
         assert data["items"][0]["importe"] == "10000"
 
