@@ -340,3 +340,5 @@ EXCEL_CACHE_DB = os.path.join(MEDIA_ROOT, "income_cache.sqlite3")
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
 CELERY_TIMEZONE = 'Asia/Kolkata'
+CELERY_TASK_ALWAYS_EAGER = True
+

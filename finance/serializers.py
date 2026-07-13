@@ -670,6 +670,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
     customer_name = serializers.SerializerMethodField()
     customer_document = serializers.SerializerMethodField()
     device_name = serializers.SerializerMethodField()
+    customer_advance_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Invoice
@@ -685,6 +686,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
         if obj.finance_plan and obj.finance_plan.device:
             return f"{obj.finance_plan.device.brand.name} {obj.finance_plan.device.model_name}"
         return "N/A"
+
+    def get_customer_advance_balance(self, obj):
+        return float(obj.customer.advance_balance)
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -704,6 +708,7 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
     customer_name = serializers.SerializerMethodField()
     deposited_to_name = serializers.SerializerMethodField()
     invoice_details = serializers.SerializerMethodField()
+    unused_advance_balance = serializers.ReadOnlyField()
 
     class Meta:
         model = PaymentReceived
@@ -719,13 +724,43 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
         details = []
         if not obj.invoices:
             return details
-        invoice_ids = [item.get('invoice_id') for item in obj.invoices if item.get('invoice_id')]
+            
+        invoices_list = obj.invoices
+        if isinstance(invoices_list, str):
+            try:
+                import json
+                invoices_list = json.loads(invoices_list)
+            except Exception:
+                return details
+                
+        if not isinstance(invoices_list, list):
+            return details
+
+        invoice_ids = []
+        for item in invoices_list:
+            if isinstance(item, dict) and item.get('invoice_id'):
+                try:
+                    invoice_ids.append(int(item.get('invoice_id')))
+                except ValueError:
+                    pass
+
         if not invoice_ids:
             return details
+
         from .models import Invoice
         invoices_map = {inv.id: inv for inv in Invoice.objects.filter(id__in=invoice_ids)}
-        for item in obj.invoices:
-            inv_id = item.get('invoice_id')
+        
+        for item in invoices_list:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get('invoice_id')
+            if not raw_id:
+                continue
+            try:
+                inv_id = int(raw_id)
+            except ValueError:
+                continue
+                
             applied = item.get('amount_applied', 0)
             inv = invoices_map.get(inv_id)
             if inv:

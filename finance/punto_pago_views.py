@@ -280,6 +280,17 @@ class PuntoPagoPaymentProcessAPIView(APIView):
             status__in=['PENDING', 'PARTIAL', 'OVERDUE']
         ).order_by('due_date', 'id')
 
+        total_debt = unpaid_invoices.aggregate(total=Sum('balance'))['total'] or Decimal('0.00')
+        if amount > total_debt:
+            logger.warning(
+                f"[PuntoPagoProcess] Payment amount {amount} exceeds "
+                f"total outstanding balance {total_debt} for identification {identification}."
+            )
+            return Response({
+                "success": False,
+                "message": f"Payment amount {amount} exceeds the total outstanding balance of {total_debt}."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         invoices_list = []
         remaining_amount = amount
         for inv in unpaid_invoices:

@@ -1617,6 +1617,7 @@ class PaymentReceived(models.Model):
     payment_number = models.CharField(max_length=50, unique=True)
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='payments_received')
     amount_received = models.DecimalField(max_digits=10, decimal_places=2)
+    advance_applied = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     payment_date = models.DateTimeField(default=timezone.now)
     payment_method = models.CharField(max_length=50, default='CASH')
     transaction_reference = models.CharField(max_length=100, null=True, blank=True)
@@ -1633,6 +1634,259 @@ class PaymentReceived(models.Model):
     def __str__(self):
         return f"PaymentReceived {self.payment_number} - {self.amount_received} from {self.customer.first_name}"
 
+    @property
+    def unused_advance_balance(self):
+        from decimal import Decimal
+        total_received = Decimal(str(self.amount_received))
+        
+        # Calculate total applied to invoices
+        invoices_list = self.invoices or []
+        if isinstance(invoices_list, str):
+            try:
+                import json
+                invoices_list = json.loads(invoices_list)
+            except Exception:
+                invoices_list = []
+                
+        total_applied = Decimal('0.00')
+        if isinstance(invoices_list, list):
+            for item in invoices_list:
+                if isinstance(item, dict):
+                    total_applied += Decimal(str(item.get('amount_applied', 0)))
+                    
+        return max(Decimal('0.00'), total_received - total_applied)
+
+    def apply_existing_advance(self, invoices_data, user=None):
+        """
+        Applies a portion of this payment's unused advance credit to invoices:
+        1. Appends or merges invoices_data into the self.invoices list
+        2. Adjusts invoice balance & status
+        3. Creates double-entry ledger postings:
+           Debit Customer Advance (2200), Credit Accounts Receivable (1200)
+        4. Saves self.invoices and updates self.advance_applied
+        """
+        from decimal import Decimal
+        from django.db import transaction
+        from django.utils import timezone
+        
+        # Avoid circular imports
+        from .models import LedgerEntry, AccountingCode, Invoice, CustomerLoanLedgerEntry, CustomerLoanLedgerEntry
+        
+        ar_code = AccountingCode.objects.filter(code="1200").first()
+        advance_code = AccountingCode.objects.filter(code="2200").first()
+        
+        # Parse existing invoices list
+        existing_invoices = self.invoices or []
+        if isinstance(existing_invoices, str):
+            try:
+                import json
+                existing_invoices = json.loads(existing_invoices)
+            except Exception:
+                existing_invoices = []
+                
+        if not isinstance(existing_invoices, list):
+            existing_invoices = []
+            
+        # Parse new invoices to apply
+        new_invoices = invoices_data or []
+        if isinstance(new_invoices, str):
+            try:
+                import json
+                new_invoices = json.loads(new_invoices)
+            except Exception:
+                new_invoices = []
+                
+        if not isinstance(new_invoices, list):
+            new_invoices = []
+
+        total_new_advance_applied = Decimal('0.00')
+
+        with transaction.atomic():
+            for item in new_invoices:
+                if not isinstance(item, dict):
+                    continue
+                raw_id = item.get('invoice_id')
+                if not raw_id:
+                    continue
+                try:
+                    inv_id = int(raw_id)
+                except ValueError:
+                    continue
+                    
+                applied_amount = Decimal(str(item.get('amount_applied', 0)))
+                if applied_amount <= 0:
+                    continue
+                    
+                # 1. Update Invoice status & balance
+                invoice = Invoice.objects.get(id=inv_id)
+                invoice.amount_paid += applied_amount
+                invoice.balance = invoice.total_amount - invoice.amount_paid
+                if invoice.balance <= 0:
+                    invoice.status = 'PAID'
+                else:
+                    invoice.status = 'PARTIAL'
+                invoice.save()
+                
+                # 2. Append/merge item into self.invoices list
+                found = False
+                for ex_item in existing_invoices:
+                    if isinstance(ex_item, dict) and int(ex_item.get('invoice_id', 0)) == inv_id:
+                        ex_item['amount_applied'] = float(Decimal(str(ex_item.get('amount_applied', 0))) + applied_amount)
+                        found = True
+                        break
+                if not found:
+                    existing_invoices.append({
+                        'invoice_id': inv_id,
+                        'amount_applied': float(applied_amount)
+                    })
+                    
+                total_new_advance_applied += applied_amount
+                
+                # 3. Create Credit Accounts Receivable (1200) (Asset Decreases) or EMI Receivable (1200)
+                if invoice.invoice_type == 'PLAN' and invoice.finance_plan:
+                    # Credit EMI Receivable (1200) for applied_amount
+                    emi_rec_code = AccountingCode.objects.filter(code="1200").first()
+                    if emi_rec_code:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            invoice=invoice,
+                            accounting_code=emi_rec_code,
+                            type='CREDIT',
+                            amount=applied_amount,
+                            description=f"EMI Receivable reduction for plan invoice {invoice.invoice_number} via advance allocation under payment {self.payment_number}",
+                            entry_date=timezone.now()
+                        )
+
+                    # Retrieve last subledger entry to calculate portions
+                    last_cust_entry = CustomerLoanLedgerEntry.objects.filter(finance_plan=invoice.finance_plan).order_by('-entry_date', '-id').first()
+                    
+                    if last_cust_entry:
+                        # Allocate payment to penalty first, then interest, then principal
+                        rem = applied_amount
+                        penalty_portion = min(rem, last_cust_entry.outstanding_penalties)
+                        rem -= penalty_portion
+                        interest_portion = min(rem, last_cust_entry.outstanding_interest)
+                        rem -= interest_portion
+                        principal_portion = rem
+
+                        op_p = max(Decimal('0.00'), last_cust_entry.outstanding_principal - principal_portion)
+                        op_i = max(Decimal('0.00'), last_cust_entry.outstanding_interest - interest_portion)
+                        op_pen = max(Decimal('0.00'), last_cust_entry.outstanding_penalties - penalty_portion)
+                        op_bal = op_p + op_i + op_pen
+
+                        # Subledger Entry
+                        cust_ledger = CustomerLoanLedgerEntry.objects.create(
+                            finance_plan=invoice.finance_plan,
+                            customer=invoice.finance_plan.customer,
+                            entry_type='EMI_PAYMENT',
+                            type='CREDIT',
+                            amount=applied_amount,
+                            principal_amount=principal_portion,
+                            interest_amount=interest_portion,
+                            penalty_amount=penalty_portion,
+                            outstanding_principal=op_p,
+                            outstanding_interest=op_i,
+                            outstanding_penalties=op_pen,
+                            outstanding_balance=op_bal,
+                            reference_number=self.payment_number,
+                            description=f"Repayment (Advance Allocation): Principal={principal_portion}, Interest={interest_portion}, Penalty={penalty_portion}",
+                            entry_date=timezone.now()
+                        )
+
+                        # Principal Allocation legs (clearing account structure):
+                        # 1. Debit Principal Due (2500)
+                        if principal_portion > 0:
+                            principal_due_code = AccountingCode.objects.filter(code="2500").first()
+                            if principal_due_code:
+                                LedgerEntry.objects.create(
+                                    payment_received=self,
+                                    customer_loan_ledger_entry=cust_ledger,
+                                    invoice=invoice,
+                                    accounting_code=principal_due_code,
+                                    type='DEBIT',
+                                    amount=principal_portion,
+                                    description=f"Principal allocation from clearing account via advance allocation under payment {self.payment_number}",
+                                    entry_date=timezone.now()
+                                )
+                        
+                        # 2. Credit Customer Loan Receivable (1300)
+                        if principal_portion > 0:
+                            loan_rec_code = AccountingCode.objects.filter(code="1300").first()
+                            if loan_rec_code:
+                                LedgerEntry.objects.create(
+                                    payment_received=self,
+                                    customer_loan_ledger_entry=cust_ledger,
+                                    invoice=invoice,
+                                    accounting_code=loan_rec_code,
+                                    type='CREDIT',
+                                    amount=principal_portion,
+                                    description=f"Principal loan receivable reduction via advance allocation under payment {self.payment_number}",
+                                    entry_date=timezone.now()
+                                )
+
+                        # Check Closure
+                        if op_bal <= 0:
+                            invoice.finance_plan.status = "CLOSED"
+                            invoice.finance_plan.save(update_fields=['status'])
+                            
+                            CustomerLoanLedgerEntry.objects.create(
+                                finance_plan=invoice.finance_plan,
+                                customer=invoice.finance_plan.customer,
+                                entry_type='CLOSURE',
+                                type='CREDIT',
+                                amount=Decimal('0.00'),
+                                outstanding_principal=Decimal('0.00'),
+                                outstanding_interest=Decimal('0.00'),
+                                outstanding_penalties=Decimal('0.00'),
+                                outstanding_balance=Decimal('0.00'),
+                                description="Loan marked as CLOSED. Fully settled.",
+                                entry_date=timezone.now()
+                            )
+                            
+                    # Also create a standard PaymentRecord linking to this EMISchedule
+                    if invoice.emi_schedule:
+                        from .models import PaymentRecord
+                        PaymentRecord.objects.create(
+                            finance_plan=invoice.finance_plan,
+                            emi_schedule=invoice.emi_schedule,
+                            payment_received=self,
+                            payment_type='EMI',
+                            payment_method=self.payment_method,
+                            payment_amount=applied_amount,
+                            payment_date=timezone.now(),
+                            payment_status='COMPLETED',
+                            transaction_reference=self.transaction_reference or self.payment_number,
+                            receipt_number=f"{self.payment_number}-{invoice.id}-ADV",
+                            processed_by=user,
+                            notes=self.notes or f"Paid via Advance Allocation from Payment {self.payment_number}"
+                        )
+                else:
+                    if ar_code:
+                        LedgerEntry.objects.create(
+                            payment_received=self,
+                            invoice=invoice,
+                            accounting_code=ar_code,
+                            type='CREDIT',
+                            amount=applied_amount,
+                            description=f"AR cleared for manual invoice {invoice.invoice_number} via advance allocation under payment {self.payment_number}",
+                            entry_date=timezone.now()
+                        )
+            
+            # 4. Debit Customer Advance (2200) for total new advance applied
+            if total_new_advance_applied > 0 and advance_code:
+                LedgerEntry.objects.create(
+                    payment_received=self,
+                    accounting_code=advance_code,
+                    type='DEBIT',
+                    amount=total_new_advance_applied,
+                    description=f"Customer Advance allocation of {total_new_advance_applied} applied to invoices from payment {self.payment_number}",
+                    entry_date=timezone.now()
+                )
+                
+            self.invoices = existing_invoices
+            self.advance_applied = Decimal(str(self.advance_applied or 0)) + total_new_advance_applied
+            self.save(update_fields=['invoices', 'advance_applied'])
+
     def process_payment(self, user=None):
         """
         Processes the payment:
@@ -1643,23 +1897,57 @@ class PaymentReceived(models.Model):
         from decimal import Decimal
         ar_code = AccountingCode.objects.filter(code="1200").first()
         
-        # Leg 1: Debit Cash/Bank (Asset Increases)
-        LedgerEntry.objects.create(
-            payment_received=self,
-            accounting_code=self.deposited_to,
-            type='DEBIT',
-            amount=self.amount_received,
-            description=f"Payment received {self.payment_number} via {self.payment_method}. Ref: {self.transaction_reference or 'N/A'}",
-            entry_date=self.payment_date
-        )
+        # Leg 1: Debit Cash/Bank (Asset Increases) if cash was received
+        if self.amount_received > 0:
+            LedgerEntry.objects.create(
+                payment_received=self,
+                accounting_code=self.deposited_to,
+                type='DEBIT',
+                amount=self.amount_received,
+                description=f"Payment received {self.payment_number} via {self.payment_method}. Ref: {self.transaction_reference or 'N/A'}",
+                entry_date=self.payment_date
+            )
+
+        # Leg 2: Debit Customer Advance (2200) (Liability Decreases) if advance credit was applied
+        if self.advance_applied > 0:
+            advance_code = AccountingCode.objects.filter(code="2200").first()
+            if advance_code:
+                LedgerEntry.objects.create(
+                    payment_received=self,
+                    accounting_code=advance_code,
+                    type='DEBIT',
+                    amount=self.advance_applied,
+                    description=f"Customer Advance of {self.advance_applied} applied toward invoices under payment {self.payment_number}",
+                    entry_date=self.payment_date
+                )
 
         total_applied = Decimal('0.00')
 
         # Apply to invoices
-        for item in self.invoices:
-            inv_id = item.get('invoice_id')
+        invoices_list = self.invoices
+        if isinstance(invoices_list, str):
+            try:
+                import json
+                invoices_list = json.loads(invoices_list)
+            except Exception:
+                invoices_list = []
+                
+        if not isinstance(invoices_list, list):
+            invoices_list = []
+
+        for item in invoices_list:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get('invoice_id')
+            if not raw_id:
+                continue
+            try:
+                inv_id = int(raw_id)
+            except ValueError:
+                continue
+
             applied_amount = Decimal(str(item.get('amount_applied', 0)))
-            if not inv_id or applied_amount <= 0:
+            if applied_amount <= 0:
                 continue
 
             try:

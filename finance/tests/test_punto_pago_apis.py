@@ -253,6 +253,18 @@ class TestPuntoPagoAPIs(TestCase):
         assert self.emi2.amount_paid == Decimal("50.00")
         assert self.emi2.balance_remaining == Decimal("50.00")
 
+    def test_payment_process_exceeds_total_debt(self):
+        url = reverse("puntopago_payment_process")
+        payload = {
+            "identification": "8-123-456",
+            "payment_reference": "PP-20260530-EXCEED",
+            "amount": "250.00"
+        }
+        response = self.client.post(url, payload, format="json", **self.auth_headers)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data["success"] is False
+        assert "exceeds" in response.data["message"]
+
     def test_payment_process_idempotency(self):
         url = reverse("puntopago_payment_process")
         payload = {
@@ -416,8 +428,296 @@ class TestPuntoPagoAPIs(TestCase):
         debit_ledger = LedgerEntry.objects.filter(
             payment_received=payment_received,
             accounting_code=dynamic_bank.accounting_code,
-            type="DEBIT"
+        type="DEBIT"
         ).first()
         assert debit_ledger is not None
         assert debit_ledger.amount == Decimal("100.00")
         assert "PP-DYNAMIC-TEST-101" in debit_ledger.description
+
+    def test_customer_advance_adjustment(self):
+        from finance.models import PaymentReceived, LedgerEntry, AccountingCode, BankAccount, Invoice
+        from django.urls import reverse
+
+        # 1. Verify initial advance balance is 0
+        assert self.customer.advance_balance == Decimal("0.00")
+
+        # 2. Get bank account accounting code
+        bank_acc = BankAccount.objects.first()
+        dep_code = bank_acc.accounting_code
+
+        # 3. Create a PaymentReceived that has excess amount (creating an advance)
+        url = reverse("payment-received-list-create")
+        payload = {
+            "customer_id": self.customer.id,
+            "amount_received": "150.00",
+            "payment_method": "CASH",
+            "deposited_to": dep_code.id,
+            "invoices": [
+                {
+                    "invoice_id": self.invoice1.id,
+                    "amount_applied": "100.00"
+                }
+            ]
+        }
+        
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_201_CREATED
+
+        # 4. Check advance balance is 50.00
+        self.customer.refresh_from_db()
+        assert self.customer.advance_balance == Decimal("50.00")
+
+        # 5. Check InvoiceSerializer returns customer_advance_balance
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        manager = User.objects.create_user(
+            email="manager@olacredits.com",
+            password="password123",
+            role="financial_manager"
+        )
+        self.client.force_authenticate(user=manager)
+        detail_url = reverse("invoices-detail", kwargs={"pk": self.invoice2.id})
+        detail_response = self.client.get(detail_url)
+        assert detail_response.status_code == status.HTTP_200_OK
+        assert detail_response.data["customer_advance_balance"] == 50.0
+        # Clean up authentication for subsequent requests
+        self.client.force_authenticate(user=None)
+
+        # 6. Pay invoice2 using 70.00 cash + 30.00 advance
+        payload2 = {
+            "customer_id": self.customer.id,
+            "amount_received": "70.00",
+            "advance_applied": "30.00",
+            "payment_method": "CASH",
+            "deposited_to": dep_code.id,
+            "invoices": [
+                {
+                    "invoice_id": self.invoice2.id,
+                    "amount_applied": "100.00"
+                }
+            ]
+        }
+        
+        response2 = self.client.post(url, payload2, format="json")
+        assert response2.status_code == status.HTTP_201_CREATED
+
+        # 7. Check advance balance decreases to 20.00
+        assert self.customer.advance_balance == Decimal("20.00")
+
+        # 8. Check invoice2 is fully PAID
+        self.invoice2.refresh_from_db()
+        assert self.invoice2.status == "PAID"
+        assert self.invoice2.balance == Decimal("0.00")
+        assert self.invoice2.amount_paid == Decimal("100.00")
+
+        # 9. Verify ledger entries for advance DEBIT and receivable CREDIT
+        latest_payment = PaymentReceived.objects.order_by("-id").first()
+        assert latest_payment.advance_applied == Decimal("30.00")
+
+        debit_advance = LedgerEntry.objects.filter(
+            payment_received=latest_payment,
+            accounting_code__code="2200",
+            type="DEBIT"
+        ).first()
+        assert debit_advance is not None
+        assert debit_advance.amount == Decimal("30.00")
+
+        credit_receivable = LedgerEntry.objects.filter(
+            payment_received=latest_payment,
+            accounting_code__code="1200",
+            type="CREDIT"
+        ).first()
+        assert credit_receivable is not None
+        assert credit_receivable.amount == Decimal("100.00")
+
+        # 10. Attempt to apply advance that exceeds remaining (apply 30.00 when only 20.00 remains)
+        payload3 = {
+            "customer_id": self.customer.id,
+            "amount_received": "0.00",
+            "advance_applied": "30.00",
+            "payment_method": "CASH",
+            "deposited_to": dep_code.id,
+            "invoices": [
+                {
+                    "invoice_id": self.invoice1.id,
+                    "amount_applied": "30.00"
+                }
+            ]
+        }
+        
+        response3 = self.client.post(url, payload3, format="json")
+        assert response3.status_code == status.HTTP_400_BAD_REQUEST
+        assert "exceeds" in response3.data["error"]
+
+        # 11. Test that string-based invoice_id is correctly parsed and reflected in the serializer
+        payload4 = {
+            "customer_id": self.customer.id,
+            "amount_received": "10.00",
+            "advance_applied": "10.00",
+            "payment_method": "CASH",
+            "deposited_to": dep_code.id,
+            "invoices": [
+                {
+                    "invoice_id": str(self.invoice1.id), # string ID!
+                    "amount_applied": "20.00"
+                }
+            ]
+        }
+        
+        response4 = self.client.post(url, payload4, format="json")
+        assert response4.status_code == status.HTTP_201_CREATED
+        
+        latest_payment_id = PaymentReceived.objects.order_by("-id").first().id
+        detail_url2 = reverse("payment-received-detail", kwargs={"pk": latest_payment_id})
+        self.client.force_authenticate(user=manager)
+        detail_response2 = self.client.get(detail_url2)
+        assert detail_response2.status_code == status.HTTP_200_OK
+        assert len(detail_response2.data["invoice_details"]) == 1
+        assert detail_response2.data["invoice_details"][0]["id"] == self.invoice1.id
+        self.client.force_authenticate(user=None)
+
+    def test_customer_serializer_advance_balance(self):
+        from customer.serializers import CustomerSerializer
+        from decimal import Decimal
+        # Initially 0.0
+        serializer = CustomerSerializer(self.customer)
+        assert serializer.data["advance_balance"] == 0.0
+
+        # Create LedgerEntry under customer to establish positive advance
+        from finance.models import LedgerEntry, AccountingCode, PaymentReceived
+        dep_code = AccountingCode.objects.filter(category="ASSET").first()
+        payment = PaymentReceived.objects.create(
+            payment_number="REC-10022",
+            customer=self.customer,
+            amount_received=Decimal("150.00"),
+            payment_date=timezone.now(),
+            payment_method="CASH",
+            deposited_to=dep_code,
+            invoices=[]
+        )
+        
+        # Credit to 2200 (Customer Advance)
+        advance_code = AccountingCode.objects.filter(code="2200").first()
+        LedgerEntry.objects.create(
+            payment_received=payment,
+            accounting_code=advance_code,
+            type="CREDIT",
+            amount=Decimal("150.00"),
+            description="Advance received",
+            entry_date=timezone.now()
+        )
+
+        # Re-check advance_balance serialization
+        self.customer.refresh_from_db()
+        serializer2 = CustomerSerializer(self.customer)
+        assert serializer2.data["advance_balance"] == 150.0
+
+    def test_create_payment_no_invoices(self):
+        from django.urls import reverse
+        from finance.models import BankAccount, LedgerEntry, PaymentReceived
+
+        # 1. Start with 0.00 advance
+        assert self.customer.advance_balance == 0.0
+
+        # 2. Get bank account accounting code
+        bank_acc = BankAccount.objects.first()
+        dep_code = bank_acc.accounting_code
+
+        # 3. Create a payment received with no invoices
+        url = reverse("payment-received-list-create")
+        payload = {
+            "customer_id": self.customer.id,
+            "amount_received": "200.00",
+            "payment_method": "CASH",
+            "deposited_to": dep_code.id,
+            "invoices": []
+        }
+
+        response = self.client.post(url, payload, format="json")
+        assert response.status_code == status.HTTP_201_CREATED
+
+        # 4. Advance balance should now be 200.00
+        self.customer.refresh_from_db()
+        assert self.customer.advance_balance == 200.00
+
+        # 5. Ledger entries should show 200 DEBIT to cash/bank and 200 CREDIT to advance code
+        latest_payment = PaymentReceived.objects.order_by("-id").first()
+        assert latest_payment.amount_received == Decimal("200.00")
+        
+        debit_cash = LedgerEntry.objects.filter(
+            payment_received=latest_payment,
+            accounting_code=dep_code,
+            type="DEBIT"
+        ).first()
+        assert debit_cash is not None
+        assert debit_cash.amount == Decimal("200.00")
+
+        credit_advance = LedgerEntry.objects.filter(
+            payment_received=latest_payment,
+            accounting_code__code="2200",
+            type="CREDIT"
+        ).first()
+        assert credit_advance is not None
+        assert credit_advance.amount == Decimal("200.00")
+
+    def test_apply_existing_advance(self):
+        from django.urls import reverse
+        from finance.models import BankAccount, LedgerEntry, PaymentReceived, Invoice
+
+        # 1. Create a payment received with no invoices (Generating $200 customer advance balance)
+        bank_acc = BankAccount.objects.first()
+        dep_code = bank_acc.accounting_code
+        
+        url = reverse("payment-received-list-create")
+        payload = {
+            "customer_id": self.customer.id,
+            "amount_received": "200.00",
+            "payment_method": "CASH",
+            "deposited_to": dep_code.id,
+            "invoices": []
+        }
+        res = self.client.post(url, payload, format="json")
+        assert res.status_code == status.HTTP_201_CREATED
+        advance_payment = PaymentReceived.objects.order_by("-id").first()
+        assert advance_payment.unused_advance_balance == Decimal("200.00")
+
+        # 2. Allocate $80 from this advance payment to self.invoice1 (balance $100)
+        # Using apply_advance_from_payment_id parameter
+        payload2 = {
+            "customer_id": self.customer.id,
+            "amount_received": "0.00",
+            "advance_applied": "80.00",
+            "payment_method": "CASH",
+            "apply_advance_from_payment_id": advance_payment.id,
+            "invoices": [
+                {
+                    "invoice_id": self.invoice1.id,
+                    "amount_applied": "80.00"
+                }
+            ]
+        }
+        res2 = self.client.post(url, payload2, format="json")
+        assert res2.status_code == status.HTTP_201_CREATED
+
+        # 3. Verify no new payment received was created, and old payment is updated
+        advance_payment.refresh_from_db()
+        assert advance_payment.unused_advance_balance == Decimal("120.00")
+        assert advance_payment.advance_applied == Decimal("80.00")
+        
+        # Verify invoice balance is updated
+        self.invoice1.refresh_from_db()
+        assert self.invoice1.amount_paid == Decimal("80.00")
+        assert self.invoice1.balance == Decimal("20.00")
+        
+        # Verify ledger entries are correctly created under the existing payment
+        # Debit Customer Advance (2200): $80
+        # Credit Accounts Receivable (1200) or EMI Receivable: $80
+        debit_advance = LedgerEntry.objects.filter(
+            payment_received=advance_payment,
+            accounting_code__code="2200",
+            type="DEBIT"
+        ).first()
+        assert debit_advance is not None
+        assert debit_advance.amount == Decimal("80.00")
+
+

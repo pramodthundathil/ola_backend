@@ -32,6 +32,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     corregimiento_name = serializers.SerializerMethodField()
     amount_to_finance = serializers.SerializerMethodField()
     loan_account_number = serializers.SerializerMethodField()
+    advance_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -67,6 +68,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'next_step_url',
             'amount_to_finance',
             'loan_account_number',
+            'advance_balance',
             'created_at',
             'updated_at',
         ]
@@ -333,6 +335,9 @@ class CustomerSerializer(serializers.ModelSerializer):
         if latest and hasattr(latest, 'finance_plan') and latest.finance_plan:
             return latest.finance_plan.loan_account_number
         return None
+
+    def get_advance_balance(self, obj):
+        return float(obj.advance_balance)
 
 
 

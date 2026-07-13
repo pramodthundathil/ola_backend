@@ -1,58 +1,23 @@
-"""
-URL Configuration for Analytics API
-"""
-
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+from django.urls import path
 from .views import (
-    SalesAnalyticsViewSet,
-    ApplicationFunnelViewSet,
-    DeviceEnrollmentViewSet,
-    BrandModelAnalyticsViewSet,
-    GeographicAnalyticsViewSet,
-    FPDAnalyticsViewSet,
-    FinancialMetricsViewSet,
-    ClerkPerformanceViewSet,
-    HourlyAnalyticsViewSet,
-    DashboardOverviewViewSet,
-
-    DailyFinanceMetricsViewSet,
-    BrandPerformanceMetricsViewSet,
-    ProductPerformanceMetricsViewSet,
-    SalespersonPerformanceViewSet,
-    PaymentCollectionMetricsViewSet,
-    RiskAnalysisMetricsViewSet,
-    GeographicPerformanceMetricsViewSet,
-    DeviceLockPerformanceMetricsViewSet,
-    DashboardViewSet
+    KPIsView, LoanTrendView, CustomerAnalyticsView, CollectionAnalyticsView,
+    MerchantAnalyticsView, BranchAnalyticsView, DeviceAnalyticsView,
+    GeographyAnalyticsView, FunnelAnalyticsView, RiskAnalyticsView,
+    ExecutiveAnalyticsView, OperationsAnalyticsView, ReportsExportView
 )
 
-router = DefaultRouter()
-
-# Register viewsets
-router.register(r'sales', SalesAnalyticsViewSet, basename='sales-analytics')
-router.register(r'funnel', ApplicationFunnelViewSet, basename='funnel-analytics')
-router.register(r'devices', DeviceEnrollmentViewSet, basename='device-analytics')
-router.register(r'brands', BrandModelAnalyticsViewSet, basename='brand-analytics')
-router.register(r'geographic', GeographicAnalyticsViewSet, basename='geographic-analytics')
-router.register(r'fpd', FPDAnalyticsViewSet, basename='fpd-analytics')
-router.register(r'financial', FinancialMetricsViewSet, basename='financial-analytics')
-router.register(r'performance', ClerkPerformanceViewSet, basename='performance-analytics')
-router.register(r'hourly', HourlyAnalyticsViewSet, basename='hourly-analytics')
-router.register(r'dashboard-overview', DashboardOverviewViewSet, basename='dashboard-overview')
-
-
-router.register(r'charts/daily-metrics', DailyFinanceMetricsViewSet, basename='daily-metrics')
-router.register(r'charts/brand-performance', BrandPerformanceMetricsViewSet, basename='brand-performance')
-router.register(r'charts/product-performance', ProductPerformanceMetricsViewSet, basename='product-performance')
-router.register(r'charts/salesperson-performance', SalespersonPerformanceViewSet, basename='salesperson-performance')
-router.register(r'charts/payment-collection', PaymentCollectionMetricsViewSet, basename='payment-collection')
-router.register(r'charts/risk-analysis', RiskAnalysisMetricsViewSet, basename='risk-analysis')
-router.register(r'charts/geographic-performance', GeographicPerformanceMetricsViewSet, basename='geographic-performance')
-router.register(r'charts/device-lock-performance', DeviceLockPerformanceMetricsViewSet, basename='device-lock-performance')
-router.register(r'charts/dashboard', DashboardViewSet, basename='dashboard')
-
-
 urlpatterns = [
-    path('', include(router.urls)),
+    path('kpis/', KPIsView.as_view(), name='analytics-kpis'),
+    path('loan-trend/', LoanTrendView.as_view(), name='analytics-loan-trend'),
+    path('customer/', CustomerAnalyticsView.as_view(), name='analytics-customer'),
+    path('collection/', CollectionAnalyticsView.as_view(), name='analytics-collection'),
+    path('merchant/', MerchantAnalyticsView.as_view(), name='analytics-merchant'),
+    path('branch/', BranchAnalyticsView.as_view(), name='analytics-branch'),
+    path('device/', DeviceAnalyticsView.as_view(), name='analytics-device'),
+    path('geography/', GeographyAnalyticsView.as_view(), name='analytics-geography'),
+    path('funnel/', FunnelAnalyticsView.as_view(), name='analytics-funnel'),
+    path('risk/', RiskAnalyticsView.as_view(), name='analytics-risk'),
+    path('executive/', ExecutiveAnalyticsView.as_view(), name='analytics-executive'),
+    path('operations/', OperationsAnalyticsView.as_view(), name='analytics-operations'),
+    path('reports/export/', ReportsExportView.as_view(), name='analytics-reports-export'),
 ]

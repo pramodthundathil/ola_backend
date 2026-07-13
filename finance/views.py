@@ -5070,74 +5070,168 @@ class PaymentReceivedListCreateAPIView(APIView):
                 payment_ids = []
                 for p in payments:
                     p_invs = p.invoices or []
-                    if any(isinstance(item, dict) and item.get('invoice_id') in inv_ids for item in p_invs):
-                        payment_ids.append(p.id)
+                    if isinstance(p_invs, str):
+                        try:
+                            import json
+                            p_invs = json.loads(p_invs)
+                        except Exception:
+                            p_invs = []
+                    if isinstance(p_invs, list):
+                        for item in p_invs:
+                            if isinstance(item, dict) and item.get('invoice_id'):
+                                try:
+                                    item_id = int(item.get('invoice_id'))
+                                    if item_id in inv_ids:
+                                        payment_ids.append(p.id)
+                                        break
+                                except ValueError:
+                                    pass
                 payments = payments.filter(id__in=payment_ids)
             except ValueError:
                 pass
+
+        invoice_id = request.query_params.get('invoice_id')
+        if invoice_id:
+            try:
+                inv_id = int(invoice_id)
+                payment_ids = []
+                for p in payments:
+                    p_invs = p.invoices or []
+                    if isinstance(p_invs, str):
+                        try:
+                            import json
+                            p_invs = json.loads(p_invs)
+                        except Exception:
+                            p_invs = []
+                    if isinstance(p_invs, list):
+                        for item in p_invs:
+                            if isinstance(item, dict) and item.get('invoice_id'):
+                                try:
+                                    item_id = int(item.get('invoice_id'))
+                                    if item_id == inv_id:
+                                        payment_ids.append(p.id)
+                                        break
+                                except ValueError:
+                                    pass
+                payments = payments.filter(id__in=payment_ids)
+            except ValueError:
+                pass
+
         paginator = FinancePlanPagination()
         page = paginator.paginate_queryset(payments, request, view=self)
         serializer = PaymentReceivedSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
+        from decimal import Decimal
+        from django.db import transaction
+        from django.utils import timezone
+        from .models import PaymentReceived, Customer, AccountingCode, AuditLog
+
         data = request.data
         customer_id = data.get('customer_id')
         amount_received = Decimal(str(data.get('amount_received', 0)))
+        advance_applied = Decimal(str(data.get('advance_applied', 0)))
         payment_method = data.get('payment_method', 'CASH')
         transaction_reference = data.get('transaction_reference')
         deposited_to_id = data.get('deposited_to')
         invoices_data = data.get('invoices', [])
         notes = data.get('notes')
+        apply_advance_from_payment_id = data.get('apply_advance_from_payment_id')
 
-        if not customer_id or amount_received <= 0 or not deposited_to_id:
+        if not customer_id or (amount_received <= 0 and advance_applied <= 0):
             return Response({"error": "Missing required fields"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not apply_advance_from_payment_id and not deposited_to_id:
+            return Response({"error": "Missing deposited_to account for cash payment"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             with transaction.atomic():
                 customer = Customer.objects.get(id=customer_id)
-                deposited_to = AccountingCode.objects.get(id=deposited_to_id)
 
-                # Generate payment number PR-YYYYMMDD-XXXX
-                import random
-                date_str = timezone.now().strftime("%Y%m%d")
-                rand_str = str(random.randint(1000, 9999))
-                payment_number = f"PR-{date_str}-{rand_str}"
+                if apply_advance_from_payment_id:
+                    # Allocate advance credit from an existing receipt
+                    try:
+                        payment = PaymentReceived.objects.get(id=apply_advance_from_payment_id, customer_id=customer_id)
+                    except PaymentReceived.DoesNotExist:
+                        return Response({"error": "Original advance payment receipt not found for this customer."}, status=status.HTTP_404_NOT_FOUND)
 
-                payment = PaymentReceived.objects.create(
-                    payment_number=payment_number,
-                    customer=customer,
-                    amount_received=amount_received,
-                    payment_date=timezone.now(),
-                    payment_method=payment_method,
-                    transaction_reference=transaction_reference,
-                    deposited_to=deposited_to,
-                    invoices=invoices_data,
-                    notes=notes
-                )
+                    unused_bal = payment.unused_advance_balance
+                    if advance_applied > unused_bal:
+                        return Response({"error": f"Applied advance amount {advance_applied} exceeds the remaining unused advance balance {unused_bal} of receipt {payment.payment_number}."}, status=status.HTTP_400_BAD_REQUEST)
 
-                # Process invoice balance updates, EMI schedule integration, and ledger postings
-                payment.process_payment(user=request.user if request.user.is_authenticated else None)
+                    # Process the advance allocation directly under the existing payment
+                    payment.apply_existing_advance(invoices_data, user=request.user if request.user.is_authenticated else None)
 
-                # Create Audit Log
-                AuditLog.objects.create(
-                    user=request.user if request.user.is_authenticated else None,
-                    customer=customer,
-                    action_type='PAYMENT_RECEIVED',
-                    description=f"Recorded PaymentReceived {payment_number} of {amount_received} from customer {customer.first_name} {customer.last_name}",
-                    metadata={
-                        "payment_number": payment_number,
-                        "amount_received": str(amount_received),
-                        "payment_method": payment_method,
-                        "transaction_reference": transaction_reference
-                    }
-                )
+                    # Create Audit Log for the allocation
+                    AuditLog.objects.create(
+                        user=request.user if request.user.is_authenticated else None,
+                        customer=customer,
+                        action_type='PAYMENT_RECEIVED',
+                        description=f"Allocated {advance_applied} advance credit from PaymentReceived {payment.payment_number} to invoices for customer {customer.first_name} {customer.last_name}",
+                        metadata={
+                            "payment_number": payment.payment_number,
+                            "advance_applied": str(advance_applied),
+                            "invoices": invoices_data
+                        }
+                    )
 
-                return Response({
-                    "status": "success",
-                    "message": "Payment received and processed successfully",
-                    "payment_number": payment_number
-                }, status=status.HTTP_201_CREATED)
+                    return Response({
+                        "status": "success",
+                        "message": "Advance credit allocated successfully from existing payment received",
+                        "payment_number": payment.payment_number
+                    }, status=status.HTTP_201_CREATED)
+
+                else:
+                    # Create a new payment received record
+                    if advance_applied > 0:
+                        available = customer.advance_balance
+                        if advance_applied > available:
+                            raise ValueError(f"Applied advance amount {advance_applied} exceeds available advance balance {available}.")
+
+                    deposited_to = AccountingCode.objects.get(id=deposited_to_id)
+
+                    # Generate payment number PR-YYYYMMDD-XXXX
+                    import random
+                    date_str = timezone.now().strftime("%Y%m%d")
+                    rand_str = str(random.randint(1000, 9999))
+                    payment_number = f"PR-{date_str}-{rand_str}"
+
+                    payment = PaymentReceived.objects.create(
+                        payment_number=payment_number,
+                        customer=customer,
+                        amount_received=amount_received,
+                        advance_applied=advance_applied,
+                        payment_date=timezone.now(),
+                        payment_method=payment_method,
+                        transaction_reference=transaction_reference,
+                        deposited_to=deposited_to,
+                        invoices=invoices_data,
+                        notes=notes
+                    )
+
+                    # Process invoice balance updates, EMI schedule integration, and ledger postings
+                    payment.process_payment(user=request.user if request.user.is_authenticated else None)
+
+                    # Create Audit Log
+                    AuditLog.objects.create(
+                        user=request.user if request.user.is_authenticated else None,
+                        customer=customer,
+                        action_type='PAYMENT_RECEIVED',
+                        description=f"Recorded PaymentReceived {payment_number} of {amount_received} from customer {customer.first_name} {customer.last_name}",
+                        metadata={
+                            "payment_number": payment_number,
+                            "amount_received": str(amount_received),
+                            "payment_method": payment_method,
+                            "transaction_reference": transaction_reference
+                        }
+                    )
+
+                    return Response({
+                        "status": "success",
+                        "message": "Payment received and processed successfully",
+                        "payment_number": payment_number
+                    }, status=status.HTTP_201_CREATED)
 
         except Customer.DoesNotExist:
             return Response({"error": "Customer not found"}, status=status.HTTP_404_NOT_FOUND)

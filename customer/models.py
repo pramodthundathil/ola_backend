@@ -108,6 +108,24 @@ class Customer(models.Model):
         latest_score = self.get_latest_credit_score()
         return latest_score is None or latest_score.is_expired
 
+    @property
+    def advance_balance(self):
+        from finance.models import LedgerEntry
+        from django.db.models import Sum
+        from decimal import Decimal
+        credits = LedgerEntry.objects.filter(
+            accounting_code__code="2200",
+            type="CREDIT",
+            payment_received__customer=self
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        debits = LedgerEntry.objects.filter(
+            accounting_code__code="2200",
+            type="DEBIT",
+            payment_received__customer=self
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        return credits - debits
+
+
 
 # ========================================
 # IDENTITY VERIFICATION MODEL

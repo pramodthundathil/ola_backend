@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, filters
 from rest_framework.permissions import AllowAny
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.pagination import PageNumberPagination
 from drf_yasg.utils import swagger_auto_schema
 
@@ -53,7 +53,7 @@ class ProductCategoryCreateView(APIView):
     # In production, only Admin or Global Manager should create categories
     # For testing pupose permission_classes = [AllowAny] can be used.
     permission_classes = [IsAdminOrGlobalManager]    
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     # Enable filter, search, ordering
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 
@@ -145,7 +145,7 @@ class ProductCategoryDetailView(APIView):
     # In production, only Admin or Global Manager should modify or delete categories
     # For testing pupose permission_classes = [AllowAny] can be used.
     permission_classes = [IsAdminOrGlobalManager]  
-    parser_classes = [MultiPartParser, FormParser] 
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self, pk):
         """Helper: Fetch ProductCategory instance or return None."""
@@ -257,7 +257,7 @@ class ProductBrandCreateView(APIView):
     # In production, only Admin or Global Manager should create brand and others can read.
     # For testing pupose permission_classes = [AllowAny] can be used.    
     permission_classes = [IsAdminOrGlobalManagerOrReadOnly]    
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     # Enable search, filter, and ordering
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -332,7 +332,7 @@ class ProductBrandDetailView(APIView):
     # In production, only Admin or Global Manager should creamodify or delete brand and others can read.
     # For testing pupose permission_classes = [AllowAny] can be used.
     permission_classes = [IsAdminOrGlobalManagerOrReadOnly]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self, pk):
         """Helper: Fetch Brand instance or return None."""
@@ -439,7 +439,7 @@ class ProductModelListCreateView(APIView):
     List all Product Models or create a new one.
     """
     permission_classes = [IsAdminOrGlobalManagerOrReadOnly]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 
     # Include all fields you want to be searchable
@@ -507,7 +507,7 @@ class ProductModelDetailView(APIView):
     """    
     # Permissions and parsers    
     permission_classes = [IsAdminOrGlobalManagerOrReadOnly]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self, pk):
         """
