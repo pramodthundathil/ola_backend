@@ -171,3 +171,17 @@ class CanManageUsers(permissions.BasePermission):
         )
 
 
+class CanCreateUsersPermission(permissions.BasePermission):
+    """
+    Permission check for users who can create/register other users.
+    Allows Admin, Global Manager, Financial Manager, and Sales Advisor.
+    """
+    def has_permission(self, request, view):
+        return (
+            request.user 
+            and request.user.is_authenticated 
+            and request.user.role in ['admin', 'global_manager', 'financial_manager', 'sales_advisor']
+        )
+
+
+

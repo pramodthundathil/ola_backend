@@ -93,7 +93,7 @@ from .serializers import (
     SalespersonListSerializer,
     AdminUserUpdateSerializer
 )
-from .permissions import IsAdminUser, IsStoreManager, CanListUsers, CanManageUsers
+from .permissions import IsAdminUser, IsStoreManager, CanListUsers, CanManageUsers, CanCreateUsersPermission
 
 
 import logging
@@ -417,10 +417,10 @@ def verify_otp_and_login(request):
     tags=['User Management']
 )
 @api_view(['POST'])
-@permission_classes([IsAdminUser]) 
+@permission_classes([CanCreateUsersPermission]) 
 def admin_create_user(request):
     """
-    Admin-only endpoint to create new users.
+    Endpoint to create new users.
     Directly saves the user to the database (no OTP verification).
     """
     email = request.data.get('email')
@@ -446,8 +446,24 @@ def admin_create_user(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Enforce role-based creation limits
+    creator_role = request.user.role
+    target_role = request.data.get('role')
+    
+    if creator_role in ['financial_manager', 'sales_advisor']:
+        if target_role not in ['store_manager', 'salesperson']:
+            return Response(
+                {"error": f"You do not have permission to create users with the role '{target_role}'."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    # Map store_id to store for serializer compatibility
+    data = request.data.copy()
+    if 'store_id' in data and 'store' not in data:
+        data['store'] = data['store_id']
+
     # Validate serializer
-    serializer = UserRegistrationSerializer(data=request.data)
+    serializer = UserRegistrationSerializer(data=data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

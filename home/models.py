@@ -324,7 +324,45 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.role in [self.ADMIN, self.FINANCIAL_MANAGER, self.GLOBAL_MANAGER]:
             self.is_staff = True
         
+        # Check if store changed to update store_manager relation
+        old_store = None
+        if self.pk:
+            try:
+                old_instance = self.__class__.objects.get(pk=self.pk)
+                old_store = old_instance.store
+            except self.__class__.DoesNotExist:
+                pass
+
         super().save(*args, **kwargs)
+
+        # Sync store_manager on Store
+        if self.role == self.STORE_MANAGER:
+            # Local import to avoid circular dependency
+            from store.models import Store
+            
+            # If store changed, clear store_manager on the old store
+            if old_store and old_store != self.store:
+                if getattr(old_store, 'store_manager', None) == self:
+                    old_store.store_manager = None
+                    old_store.save(update_fields=['store_manager'])
+            
+            # Set store_manager on the new store
+            if self.store:
+                store = self.store
+                if getattr(store, 'store_manager', None) != self:
+                    # Clean up old manager from this store if any
+                    current_mgr = getattr(store, 'store_manager', None)
+                    if current_mgr and current_mgr != self:
+                        current_mgr.store = None
+                        current_mgr.save(update_fields=['store'])
+                    
+                    store.store_manager = self
+                    store.save(update_fields=['store_manager'])
+        else:
+            # If role changed from store_manager, clear managed_store
+            if old_store and getattr(old_store, 'store_manager', None) == self:
+                old_store.store_manager = None
+                old_store.save(update_fields=['store_manager'])
 
 
 
